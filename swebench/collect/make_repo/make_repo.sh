@@ -4,7 +4,7 @@
 # Usage make_repo.sh {gh organization}/{gh repository}
 
 # Abort on error
-set -euo pipefail
+# set -euo pipefail
 
 REPO_TARGET=$1
 
@@ -12,7 +12,7 @@ REPO_TARGET=$1
 gh repo view "$REPO_TARGET" > /dev/null || exit 1
 
 # Set the organization and repository names
-ORG_NAME="swe-bench"
+ORG_NAME="firebenders"
 NEW_REPO_NAME="${REPO_TARGET//\//__}"
 
 # Check if the new repository already exists
@@ -40,7 +40,6 @@ TARGET_REPO_DIR="${REPO_TARGET##*/}.git"
 # Check if the local repository directory already exists
 if [ -d "$TARGET_REPO_DIR" ]; then
     echo "The local repository directory $TARGET_REPO_DIR already exists."
-    exit 1
 fi
 
 git clone --bare git@github.com:$REPO_TARGET.git
@@ -64,7 +63,10 @@ if [ -d "$NEW_REPO_NAME/.github/workflows" ]; then
     cd "$NEW_REPO_NAME";
     git add -A;
     git commit -m "Removed .github/workflows";
-    git push origin main;  # Change 'master' to your desired branch
+
+    # Get the current branch name instead of assuming it's 'main'
+    DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    git push origin $DEFAULT_BRANCH;
     cd ..;
 else
     echo "$NEW_REPO_NAME/.github/workflows does not exist. No action required."

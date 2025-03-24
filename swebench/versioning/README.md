@@ -23,3 +23,11 @@ python get_versions.py \
 ## 🌐 Repository Website-Based
 The `extract_web/get_versions_*.py` files are repository specific scripts that crawl the website of the PyPI package to find versions and their cut off dates.
 This script can be easily adapted to other repositories to check task instances' `creation_date` against the version dates.
+
+python get_versions.py \
+    --instances_path "../collect/data/tasks/WordPress-Android-task-instances.jsonl" \
+    --retrieval_method "github" \
+    --cleanup \
+    --num_workers 4 \
+    --output_dir "../collect/data/tasks/versioned" \
+    --testbed "./testbed"

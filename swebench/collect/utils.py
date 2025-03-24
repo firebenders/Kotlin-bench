@@ -299,7 +299,7 @@ def _extract_hints(pull: dict, repo: Repo, issue_number: int) -> list[str]:
 
 def extract_patches(pull: dict, repo: Repo) -> tuple[str, str]:
     """
-    Get patch and test patch from PR
+    Get patch and test patch from PR for Android/Kotlin repositories
 
     Args:
         pull (dict): PR dictionary object from GitHub
@@ -310,38 +310,47 @@ def extract_patches(pull: dict, repo: Repo) -> tuple[str, str]:
     """
     # Convert diff to patch format with "index" lines removed
     patch = requests.get(pull["diff_url"]).text
-    if patch.endswith("\n"):
-        patch = patch[:-1]
-    # Create change patch and test patch
-    patch_change, patch_test = [], []
-
-    # Flag to determine if current diff block is a test or general change
-    # Values: 'test', 'diff', None
-    flag = None
-
-    for line in patch.split("\n"):
-        # Exclude commit specific metadata
-        if line.startswith("index "):
-            continue
-        # Determine if current diff block is a test or general change
-        if line.startswith("diff --git a/"):
-            words = set(re.split(r" |_|\/|\.", line.lower()))
-            flag = (
-                "test"
-                if ("test" in words or "tests" in words or "testing" in words)
-                else "diff"
-            )
-            if flag != "test" and not line.strip().endswith(".py"):
-                flag = None
-        # Append line to separate patch depending on flag status
-        if flag == "test":
-            patch_test.append(line)
-        elif flag == "diff":
-            patch_change.append(line)
-
-    patch_change_str = "\n".join(patch_change) + "\n" if len(patch_change) > 0 else ""
-    patch_test_str = "\n".join(patch_test) + "\n" if len(patch_test) > 0 else ""
-    return patch_change_str, patch_test_str
+    patch_test = ""
+    patch_fix = ""
+    for hunk in PatchSet(patch):
+        # Check for Android/Kotlin test patterns
+        is_test = False
+        path_lower = hunk.path.lower()
+        
+        # Standard test directories
+        if "/test/" in path_lower or "/androidtest/" in path_lower:
+            is_test = True
+        # Test file naming patterns
+        elif (path_lower.endswith("test.kt") or path_lower.endswith("test.java") or 
+              path_lower.endswith("tests.kt") or path_lower.endswith("tests.java") or
+              "test" in path_lower.split("/")[-1] or
+              "spec" in path_lower.split("/")[-1]):
+            is_test = True
+        # Common Android test directories and patterns
+        elif any(test_pattern in path_lower for test_pattern in [
+            "/src/test/", 
+            "/src/androidtest/",
+            "/src/sharedtest/",
+            "/src/testcommon/",
+            "/src/testshared/",
+            "unittest",
+            "instrumentedtest",
+            "uitest",
+            "integrationtest",
+            "/robolectric/", 
+            "/espresso/",
+            "testutils",
+            "mockito",
+            "e2e",
+            "testing"
+        ]):
+            is_test = True
+            
+        if is_test:
+            patch_test += str(hunk)
+        else:
+            patch_fix += str(hunk)
+    return patch_fix, patch_test
 
 
 ### MARK: Repo Specific Parsing Functions ###

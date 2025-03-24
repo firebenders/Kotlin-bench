@@ -200,6 +200,7 @@ def get_versions_from_web(data: dict):
     version_not_found = data["not_found_list"]
     for instance in data_tasks:
         version = get_version(instance)
+        print(f"For instance {instance['instance_id']}, version is {version}")
         if version is not None:
             instance["version"] = version
             logger.info(f'For instance {instance["instance_id"]}, version is {version}')
@@ -255,6 +256,7 @@ def main(args):
     logger.info(
         f"Split instances into {len(data_task_lists)} groups with lengths {[len(x) for x in data_task_lists]}"
     )
+    logger.info(f"Args: {args}")
 
     # If retrieval method includes GitHub, then search GitHub for versions via parallel call
     if any([x == args.retrieval_method for x in ["github", "mix"]]):

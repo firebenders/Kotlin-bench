@@ -460,7 +460,7 @@ def main():
     # Extract all patches to a separate folder
     extract_all_patches(dataset, "patches", [
         "deepseek-r1",
-        "deepseek-v3",
+        "deepseek-v3-0324",
         "o1",
         "o3-mini",
         "gpt-4o-2024-11-20",

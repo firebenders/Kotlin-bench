@@ -1,13 +1,13 @@
 ## 👋 Overview
 
-Kotlin-bench is a spinoff of [SWE-Bench](https://www.swebench.com/) and is the first benchmark that evaluates Large Language Models (LLMs) and AI agents on 100 real-world Kotlin and Android software engineering tasks.
+Kotlin-bench is a spinoff of [SWE-bench](https://www.swebench.com/) and is the first benchmark that evaluates Large Language Models (LLMs) and AI agents on 100 real-world Kotlin and Android software engineering tasks.
 
 Given a *codebase* and an *issue*, a language model is tasked with generating a *patch* that resolves the described problem.
 
 <img src="assets/teaser.png">
 
 ## 📰 News
-* **[Apr. 3, 2025]**: Firebender introduces Kotlin Bench. Read the [blog post](https://firebender.com/blog/kotlin-bench).
+* **[Apr. 3, 2025]**: Firebender team introduces Kotlin-bench in this [blog post](https://firebender.com/blog/kotlin-bench).
 
 ## 🚀 Set Up
 To build Kotlin-bench from source, follow these steps:

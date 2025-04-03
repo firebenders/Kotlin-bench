@@ -1,9 +1,8 @@
 <p align="center">
-  <span style="display: inline-flex; align-items: center; justify-content: center;">
-    <span style="font-size: 2.5em; font-weight: bold; margin-right: 15px;">Kotlin-Bench</span>
-    <img src="firebender-logo.svg" width="50px" alt="Firebender Logo" />
-  </span>
-</p>
+  <a href="https://github.com/princeton-nlp/Llamao">
+    <img src="assets/swellama_banner.png" width="50%" alt="Kawi the SWE-Llama" />
+  </a>
+</p>ender-logo.svg" width="50px" alt="Firebender Logo" />
 
 ## 📰 News
 * **[Apr. 3, 2025]**: Firebender introduces Kotlin Bench. Read the [blog post](https://firebender.com/blog/kotlin-bench).

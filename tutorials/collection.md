@@ -1,7 +1,7 @@
-# Collecting Evaluation Tasks for Kotlin-Bench
+# Collecting Evaluation Tasks for Kotlin-bench
 Aman Gottumukkala &bull; March 25, 2025
 
-In this tutorial, we explain how to use the Kotlin-Bench repository to collect evaluation task instances from GitHub repositories.
+In this tutorial, we explain how to use the Kotlin-bench repository to collect evaluation task instances from GitHub repositories.
 
 <div align="center">
     <img style="width:70%" src="../assets/collection.png">

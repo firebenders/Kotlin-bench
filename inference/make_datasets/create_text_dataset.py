@@ -83,16 +83,18 @@ def main(
     max_context_len,
     tokenizer_name,
     push_to_hub_user,
+    include_test_files=False,
 ):
     if push_to_hub_user is not None:
         hub_token = os.environ.get("HUGGING_FACE_HUB_TOKEN", None)
         assert hub_token is not None, "Must provide HUGGING_FACE_HUB_TOKEN to push to the Hub"
-        assert output_dir is None, "Cannot provide output_dir if pushing to the Hub"
     if max_context_len is not None:
         assert tokenizer_name is not None
     if push_to_hub_user is None and not Path(output_dir).exists():
         Path(output_dir).mkdir(parents=True)
     output_file = f"SWE-bench__{prompt_style}__fs-{file_source}"
+    if include_test_files:
+        output_file += "__lenient"
     if k is not None:
         assert file_source not in {
             "all",
@@ -132,6 +134,7 @@ def main(
             file_source,
             max_context_len=max_context_len,
             tokenizer_name=tokenizer_name,
+            include_test_files=include_test_files,
         )
     columns = [
         "instance_id",
@@ -171,11 +174,19 @@ def main(
         dataset["validation"] = train_val["test"]
     for split in dataset:
         logger.info(f"Found {len(dataset[split])} {split} instances")
+    
+    # Save to Hub if requested
     if push_to_hub_user is not None:
-        dataset.push_to_hub(f'{push_to_hub_user}/{output_file}', use_auth_token=hub_token)
-    else:
-        dataset.save_to_disk(output_file)
-    logger.info(f"Finsihed saving to {output_file}")
+        dataset.push_to_hub(f'{push_to_hub_user}/{output_file}')
+        logger.info(f"Pushed to Hugging Face Hub: {push_to_hub_user}/{output_file}")
+    
+    # Save to disk if output_dir is provided
+    if output_dir is not None:
+        local_output_path = Path(output_dir, output_file)
+        dataset.save_to_disk(local_output_path)
+        logger.info(f"Saved to disk: {local_output_path}")
+    
+    logger.info("Finished saving dataset")
 
 
 if __name__ == "__main__":
@@ -244,4 +255,18 @@ if __name__ == "__main__":
         type=str,
         help="Username to use for pushing to the Hub. If not provided, will save to disk.",
     )
+    parser.add_argument(
+        "--include_test_files",
+        action="store_true",
+        help="Include test files in oracle mode context"
+    )
     main(**vars(parser.parse_args()))
+
+
+# python3 ./inference/make_datasets/create_text_dataset.py \
+#     --dataset_name_or_path ./outputs/datasets/wordpress_validated \
+#     --output_dir ./outputs \
+#     --retrieval_file ./outputs/datasets/wordpress_retrieval_results.json \
+#     --prompt_style style-3 \
+#     --file_source oracle \
+#     --splits test

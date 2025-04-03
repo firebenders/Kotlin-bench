@@ -4,7 +4,7 @@ import re
 import requests
 
 from argparse import ArgumentTypeError
-from datasets import Dataset, load_dataset
+from datasets import load_from_disk
 from datetime import datetime
 from dotenv import load_dotenv
 from functools import cache
@@ -17,24 +17,21 @@ from swebench.harness.constants import (
     MAP_REPO_TO_REQS_PATHS,
     NON_TEST_EXTS,
     SWE_BENCH_URL_RAW,
+    MAP_REPO_TO_TEST_FRAMEWORK_KT,
 )
 
 load_dotenv()
 
 
-def load_swebench_dataset(name="princeton-nlp/SWE-bench", split="test") -> list[SWEbenchInstance]:
+def load_swebench_dataset(name, split="test") -> list[SWEbenchInstance]:
     if name.endswith(".json") or name.endswith(".jsonl"):
         return [
             cast(SWEbenchInstance, instance)
             for instance in json.load(open(name))
         ]
-    if name.lower() in {"swe-bench", "swebench", "swe_bench"}:
-        name = "princeton-nlp/SWE-bench"
-    elif name.lower() in {"swe-bench-lite", "swebench-lite", "swe_bench_lite", "swe-bench_lite", "lite"}:
-        name = "princeton-nlp/SWE-bench_Lite"
-    dataset = cast(Dataset, load_dataset(name, split=split))
+    dataset = load_from_disk(name)[split]
+    print(f"Loaded dataset: {len(dataset)}")
     return [cast(SWEbenchInstance, instance) for instance in dataset]
-
 
 def get_instances(instance_path: str) -> list:
     """
@@ -57,25 +54,34 @@ def get_instances(instance_path: str) -> list:
     return task_instances
 
 
-def clone_repo(repo_name: str, path: str, token: str = None) -> bool:
+def clone_repo(repo_name: str, path: str, token: str = None, use_original_repo: bool = False) -> bool:
     """
-    Wrapper for cloning repo from swe-bench organization
+    Wrapper for cloning repo from swe-bench organization or original repository
 
     Args:
         repo_name (str): Name of repo to clone
         path (str): Path to clone repo to
         token (str): GitHub token to use for cloning
+        use_original_repo (bool): If True, clone from the original repository instead of swe-bench
     Returns:
         success (bool): True if repo cloned successfully, False otherwise
     """
     try:
         if token is None:
             token = os.environ.get("GITHUB_TOKEN", "git")
-        repo_url = (
-            f"https://{token}@github.com/swe-bench/"
-            + repo_name.replace("/", "__")
-            + ".git"
-        )
+        
+        if use_original_repo:
+            # Use the original repository
+            repo_url = f"https://{token}@github.com/{repo_name}.git"
+        else:
+            # Use the swe-bench mirror
+            repo_url = (
+                f"https://{token}@github.com/swe-bench/"
+                + repo_name.replace("/", "__")
+                + ".git"
+            )
+        
+        print(f"Cloning from: {repo_url}")
         Repo.clone_from(repo_url, path)
         return True
     except Exception as e:
@@ -390,16 +396,18 @@ def get_test_directives(instance: SWEbenchInstance) -> list:
     Returns:
         directives (list): List of test directives
     """
-    # For seq2seq code repos, testing command is fixed
-    if instance["repo"] == "swe-bench/humaneval":
-        return ["test.py"]
-
     # Get test directives from test patch and remove non-test files
     diff_pat = r"diff --git a/.* b/(.*)"
     test_patch = instance["test_patch"]
     directives = re.findall(diff_pat, test_patch)
     directives = [
         d for d in directives if not any(d.endswith(ext) for ext in NON_TEST_EXTS)
+    ]
+
+    # Filter directives to only include those ending with 'Test' (excluding extension)
+    directives = [
+        d for d in directives 
+        if (d.rsplit('.', 1)[0] if '.' in d else d).endswith('Test')
     ]
 
     # For Django tests, remove extension + "tests/" prefix and convert slashes to dots (module referencing)
@@ -412,8 +420,76 @@ def get_test_directives(instance: SWEbenchInstance) -> list:
             directives_transformed.append(d)
         directives = directives_transformed
 
+    if instance["repo"] == "ankidroid/Anki-Android":
+        # TODO: Include Android emulator tests in the future, currently filtering to only include unit tests. 
+        directives = [d for d in directives if d.startswith("AnkiDroid/src/test")]
+
+    if instance["repo"] == "pinterest/ktlint":
+        # TODO: Include other tests from ktlint
+        directives = [d for d in directives if d.startswith("ktlint-ruleset-standard/src/test/kotlin")]
+    
+    if instance["repo"] == "Kotlin/kotlinx.coroutines":
+        directives_transformed = []
+        for d in directives:
+            if d.startswith("kotlinx-coroutines-core"):
+                # Extract just the file name without extension
+                file_name = d.split("/")[-1]
+                if file_name.endswith(".kt"):
+                    file_name = file_name[:-3]  # Remove .kt extension
+                elif file_name.endswith(".java"):
+                    file_name = file_name[:-5]  # Remove .java extension
+                directives_transformed.append(f'"*.{file_name}"')
+        directives = directives_transformed
+    
+    if instance["repo"] == "Kotlin/kotlinx-datetime":
+        directives = [d for d in directives if d.startswith("core/common/test")]
+
     return directives
 
+def get_android_test_cmd(instance: SWEbenchInstance) -> str:
+    directives = get_test_directives(instance)
+    directives_transformed = []
+        
+    for d in directives:
+        # Only process Kotlin or Java test files
+        if d.endswith(".kt") or d.endswith(".java"):
+            # Remove file extension
+            d = d[:-3] if d.endswith(".kt") else d
+            d = d[:-5] if d.endswith(".java") else d
+            
+            # Try to extract package name from file path based on conventional structure
+            # Assume test file path follows standard Maven/Gradle structure
+            parts = d.split("/")
+            class_name = parts[-1]
+            
+            # Convert path to package format (src/test/java or src/test/kotlin prefix removal)
+            if "src/test/java/" in d:
+                package_path = d.split("src/test/java/")[-1].replace("/", ".")
+                directives_transformed.append(package_path)
+            elif "src/test/kotlin/" in d:
+                package_path = d.split("src/test/kotlin/")[-1].replace("/", ".")
+                directives_transformed.append(package_path)
+            else:
+                # Fall back to simple path conversion if structure is unclear
+                package_path = d.replace("/", ".")
+                directives_transformed.append(package_path)
+        else:
+            # For non-Java/Kotlin files or already formatted class names, keep as is
+            directives_transformed.append(d)
+
+    # Format directives for Gradle-style test filters
+    if directives_transformed:
+        test_type = MAP_REPO_TO_TEST_FRAMEWORK_KT[instance["repo"]]
+        if instance["repo"] == "Kotlin/kotlinx.coroutines" or instance["repo"] == "Kotlin/kotlinx-datetime" or instance["repo"] == "thunderbird/thunderbird-android":
+            # We run all tests for these repos
+            return test_type
+        else:
+            # Use --tests flag for each test directive
+            formatted_directives = " --tests " + " --tests ".join(directives_transformed)
+            return test_type + formatted_directives
+    else:
+        # If no specific tests, return empty string (will run all tests)
+        return None
 
 def str2bool(v):
     if isinstance(v, bool):

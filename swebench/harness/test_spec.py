@@ -10,7 +10,7 @@ from swebench.harness.constants import (
     SWEbenchInstance,
     MAP_REPO_TO_INSTALL,
     MAP_VERSION_TO_INSTALL,
-    MAP_REPO_TO_TEST_FRAMEWORK,
+    MAP_REPO_TO_TEST_FRAMEWORK_KT,
     USE_X86,
 )
 from swebench.harness.dockerfiles import (
@@ -221,7 +221,7 @@ def make_eval_script_list(instance, install, env_name, repo_directory, base_comm
     )
     test_command = " ".join(
         [
-            MAP_REPO_TO_TEST_FRAMEWORK[instance["repo"]][instance["version"]],
+            MAP_REPO_TO_TEST_FRAMEWORK_KT[instance["repo"]][instance["version"]],
             *get_test_directives(instance),
         ]
     )

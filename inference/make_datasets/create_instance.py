@@ -219,7 +219,7 @@ def prompt_style_2_edits_only(instance):
     return final_text
 
 
-def prompt_style_3(instance):
+def prompt_style_3(instance, include_test_files=False):
     premise = "You will be provided with a partial code base and an issue statement explaining a problem to resolve."
     readmes_text = make_code_text(instance["readmes"])
     code_text = make_code_text(instance["file_contents"])
@@ -230,9 +230,15 @@ def prompt_style_3(instance):
     )
     final_instruction = (
         f"I need you to solve the provided issue by generating a single patch file that I can apply "
-        + f"directly to this repository using git apply. Please respond with a single patch "
-        + f"file in the format shown above."
+        + f"directly to this repository using git apply. "
     )
+    
+    # Only add the test file instruction if include_test_files is True
+    if include_test_files:
+        final_instruction += f"Your solution must not modify any test files - only modify the main source code files. "
+    
+    final_instruction += f"Please respond with a single patch file in the format shown above."
+    
     problem_statement = instance["problem_statement"]
     final_text = [
         premise,
@@ -257,7 +263,7 @@ def prompt_style_3(instance):
     return final_text
 
 
-def full_file_gen(instance):
+def full_file_gen(instance, include_test_files=False):
     premise = "You will be provided with a partial code base and an issue statement explaining a problem to resolve."
     readmes_text = make_code_text(instance["readmes"], add_line_numbers=False)
     code_text = make_code_text(instance["file_contents"], add_line_numbers=False)
@@ -324,14 +330,26 @@ def add_retrieval_results(input_instances, retrieval_file, k, file_source):
             instance["hits"] = list()
 
 
-def get_oracle_filenames(instance):
+def get_oracle_filenames(instance, include_test_files=False):
     """
     Returns the filenames that are changed in the patch
+    
+    Args:
+        instance: The instance containing patches
+        include_test_files: Whether to include files from test_patch in the oracle set
     """
     source_files = {
         patch_file.source_file.split("a/", 1)[-1]
         for patch_file in unidiff.PatchSet(instance["patch"])
     }
+    
+    if include_test_files and instance.get("test_patch"):
+        test_files = {
+            patch_file.source_file.split("a/", 1)[-1]
+            for patch_file in unidiff.PatchSet(instance["test_patch"])
+        }
+        source_files.update(test_files)
+        
     gold_docs = set()
     for source_file in source_files:
         gold_docs.add(source_file)
@@ -347,6 +365,7 @@ def add_text_inputs(
     max_context_len=None,
     tokenizer_name=None,
     verbose=False,
+    include_test_files=False,
 ):
     """Adds text inputs context for prediction in-place.
 
@@ -357,6 +376,7 @@ def add_text_inputs(
     - prompt_style: specify the function to generate instructions and prompt provided an instance (from PROMPT_FUNCTIONS)
     - file_source: where to collect file_contents (e.g. oracle or bm25)
     - verbose: set ContextManager verbose to True
+    - include_test_files: whether to include test files in the context (for any file source)
     """
     if max_context_len is not None:
         assert (
@@ -387,26 +407,44 @@ def add_text_inputs(
                         base_text_input_length = len(
                             tokenizer_func(base_text_inputs, tokenizer)
                         )
+                    
+                    # Get the base set of files based on file_source
                     if file_source in {"oracle"}:
-                        instance["file_contents"] = ingest_files(
-                            get_oracle_filenames(instance)
-                        )
+                        files_to_include = get_oracle_filenames(instance, include_test_files=include_test_files)
                     elif file_source in {"bm25"}:
-                        instance["file_contents"] = ingest_files(
-                            [x["docid"] for x in instance["hits"]]
-                        )
+                        files_to_include = set(x["docid"] for x in instance["hits"])
+                        if include_test_files and instance.get("test_patch"):
+                            test_files = {
+                                patch_file.source_file.split("a/", 1)[-1]
+                                for patch_file in unidiff.PatchSet(instance["test_patch"])
+                            }
+                            files_to_include.update(test_files)
                     elif file_source in {"all"}:
-                        instance["file_contents"] = ingest_directory_contents(
-                            cm.repo_path
-                        )
+                        files_to_include = set(os.path.join(cm.repo_path, f) for f in os.listdir(cm.repo_path))
+                        if include_test_files and instance.get("test_patch"):
+                            test_files = {
+                                patch_file.source_file.split("a/", 1)[-1]
+                                for patch_file in unidiff.PatchSet(instance["test_patch"])
+                            }
+                            files_to_include.update(test_files)
                     elif file_source in {"none"}:
-                        instance["file_contents"] = dict()
+                        files_to_include = set()
+                        if include_test_files and instance.get("test_patch"):
+                            test_files = {
+                                patch_file.source_file.split("a/", 1)[-1]
+                                for patch_file in unidiff.PatchSet(instance["test_patch"])
+                            }
+                            files_to_include.update(test_files)
                     else:
                         raise ValueError(f"Invalid file source {file_source}")
+
+                    # Ingest the files
+                    instance["file_contents"] = ingest_files(files_to_include)
+
                     if max_context_len is not None:
                         cur_input_len = base_text_input_length
                         include_files = list()
-                        for filename in [x["docid"] for x in instance["hits"]]:
+                        for filename in files_to_include:
                             content = make_code_text(
                                 {filename: instance["file_contents"][filename]}
                             )
@@ -428,7 +466,7 @@ def add_text_inputs(
                         }
                     input_instances[instance_id]["text_inputs"] = PROMPT_FUNCTIONS[
                         prompt_style
-                    ](instance)
+                    ](instance, include_test_files=include_test_files)
             except Exception as e:
                 print(f"Failed on instance {instance_id}", e)
                 traceback.print_exc()

@@ -29,7 +29,7 @@ def get_diffs(sm_1: dict, sm_2: dict) -> dict:
     return diff_map
 
 
-def get_logs_eval(log_fp: str) -> Tuple[dict, bool]:
+def get_logs_eval(log_fp: str, repo: str = "") -> Tuple[dict, bool]:
     """
     Retrieve evaluation results for a task instance from its corresponding log file
 
@@ -39,18 +39,12 @@ def get_logs_eval(log_fp: str) -> Tuple[dict, bool]:
         bool: whether the patch applied successfully
         dict: status map
     """
-    repo = get_repo_from_lp(log_fp)
+    repo = get_repo_from_lp(log_fp) if repo == "" else repo
     log_parser = MAP_REPO_TO_PARSER[repo]
 
     with open(log_fp) as f:
         content = f.read()
-        if any([
-            x not in content for x in [
-                f"{APPLY_PATCH_PASS} (test)",
-                f"{APPLY_PATCH_PASS} (pred)",
-            ]
-
-        ]):
+        if APPLY_PATCH_PASS not in content:
             # Eval patch was not applied successfully
             return {}, False
 
@@ -119,10 +113,11 @@ def log_path_to_sms(log_fp: str, log_parser) -> Tuple[list, bool]:
 
 test_passed = lambda case, sm: case in sm and sm[case] == TestStatus.PASSED.value
 
-test_failed = lambda case, sm: case not in sm or any(
-    [sm[case] == status for status in [TestStatus.FAILED.value, TestStatus.ERROR.value]]
-)
+test_failed = lambda case, sm: case not in sm or sm[case] == TestStatus.FAILED.value
 
+test_error = lambda case, sm: case in sm and sm[case] == TestStatus.ERROR.value
+
+test_errored = lambda case, sm: case in sm and sm[case] == TestStatus.ERROR.value
 
 def get_eval_refs(data_path_or_name):
     decode_keys = False

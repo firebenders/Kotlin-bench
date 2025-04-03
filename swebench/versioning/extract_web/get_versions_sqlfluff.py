@@ -7,7 +7,11 @@ from ghapi.core import GhApi
 sys.path.append("../../harness")
 from utils import get_instances
 
-GITHUB_TOKEN = "<your GitHub token>"
+# Use environment variable instead of hardcoded token
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+if not GITHUB_TOKEN:
+    print("Warning: GitHub token not set. Please set the GITHUB_TOKEN environment variable.")
+    
 PATH_TASKS_SQLFLUFF = "<path to sqlfluff task instances>"
 PATH_TO_SAVE = "<path to save versioned task instances to>"
 

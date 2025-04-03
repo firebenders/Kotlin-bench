@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, List
 
 from swebench.harness.test_spec import TestSpec
-from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
+from swebench.metrics.log_parsers import MAP_REPO_TO_PARSER
 
 # TODO remove unused constants
 # Evaluation Log Constants
@@ -50,7 +50,7 @@ def test_failed(case: str, sm: dict[str, str]) -> bool:
     )
 
 
-def get_logs_eval(log_fp: str) -> tuple[dict[str, str], bool]:
+def get_logs_eval(log_fp: str, repo: str = "") -> tuple[dict[str, str], bool]:
     """
     Retrieve evaluation results for a task instance from its corresponding log file
 
@@ -61,10 +61,15 @@ def get_logs_eval(log_fp: str) -> tuple[dict[str, str], bool]:
         dict: status map
     """
     # Convert e.g. "logs/scikit-learn__scikit-learn-12421/test_output.txt" to "scikit-learn/scikit-learn"
-    sample_id = str(Path(log_fp).parent.stem)  # e.g. scikit-learn__scikit-learn-12421
-    repo = "-".join(sample_id.replace("__", "/").split("-")[:-1])  # e.g. scikit-learn/scikit-learn
+    # sample_id = str(Path(log_fp).parent.stem)  # e.g. scikit-learn__scikit-learn-12421
+    # print(f"Sample ID: {sample_id}")
+    # repo = "-".join(sample_id.replace("__", "/").split("-")[:-1])  # e.g. scikit-learn/scikit-learn
+    # print(f"Repo: {repo}")
     log_parser = MAP_REPO_TO_PARSER[repo]
 
+    print(f"Getting logs FP: {log_fp}")
+    print(f"Gettings logs repo: {repo}")
+    
     with open(log_fp) as f:
         content = f.read()
         # TODO fix constant here
@@ -81,15 +86,59 @@ def get_logs_eval(log_fp: str) -> tuple[dict[str, str], bool]:
                     ]
                 ]
             )
-            or "applied patch" not in content.lower()
         ):
             # Eval patch was not applied successfully
+            print(f"Eval patch was not applied successfully: {len(content)}")
             return {}, False
 
         # Get status map of evaluation results
         content = content.split(f"{APPLY_PATCH_PASS} (pred)")[-1]
         return log_parser(content), True
 
+def get_logs_eval_v2(log_fp: str, repo: str = "") -> tuple[dict[str, str], bool]:
+    """
+    Retrieve evaluation results for a task instance from its corresponding log file
+
+    Args:
+        log_fp (str): path to log file
+    Returns:
+        bool: whether the patch applied successfully
+        dict: status map
+    """
+    # Convert e.g. "logs/scikit-learn__scikit-learn-12421/test_output.txt" to "scikit-learn/scikit-learn"
+    # sample_id = str(Path(log_fp).parent.stem)  # e.g. scikit-learn__scikit-learn-12421
+    # print(f"Sample ID: {sample_id}")
+    # repo = "-".join(sample_id.replace("__", "/").split("-")[:-1])  # e.g. scikit-learn/scikit-learn
+    # print(f"Repo: {repo}")
+    log_parser = MAP_REPO_TO_PARSER[repo]
+
+    print(f"Getting logs FP: {log_fp}")
+    print(f"Gettings logs repo: {repo}")
+    
+    with open(log_fp) as f:
+        content = f.read()
+        # TODO fix constant here
+        if (
+            any(
+                [
+                    x in content
+                    for x in [
+                        APPLY_PATCH_FAIL,
+                        RESET_FAILED,
+                        TESTS_ERROR,
+                        TESTS_TIMEOUT,
+                        "Failed to reset task environment",
+                    ]
+                ]
+            )
+        ):
+            # Eval patch was not applied successfully
+            print(f"Eval patch was not applied successfully: {len(content)}")
+            return {}, False
+
+        # Get status map of evaluation results
+        content = content.split(f"{APPLY_PATCH_PASS} (pred)")[-1]
+        return log_parser(content), True
 
 def get_eval_report(
     eval_sm: dict[str, str],
@@ -275,6 +324,63 @@ def get_pred_report(
         "instance_id": test_spec.instance_id,
         "FAIL_TO_PASS": test_spec.FAIL_TO_PASS,
         "PASS_TO_PASS": test_spec.PASS_TO_PASS,
+    }
+
+    report = get_eval_report(eval_sm, eval_ref)
+    if get_resolution_status(report) == "RESOLVED_FULL":
+        report_map[instance_id]["resolved"] = True
+
+    if include_tests_status:
+        report_map[instance_id]["tests_status"] = report  # type: ignore
+    
+    return report_map
+
+def get_pred_report_kt(
+    task_instance: dict[str, Any],
+    prediction: dict[str, str],
+    log_path: str,
+    include_tests_status: bool,
+) -> dict[str, Any]:
+    """
+    Generate a report of model evaluation results from a prediction, task instance,
+    and evaluation log.
+
+    Args:
+        test_spec (dict): test spec containing keys "instance_id", "FAIL_TO_PASS", and "PASS
+        prediction (dict): prediction containing keys "instance_id", "model_name_or_path", and "model_patch"
+        log_path (str): path to evaluation log
+        include_tests_status (bool): whether to include the status of each test in the returned report
+    Returns:
+        report (dict): report of metrics
+    """
+    report_map = {}
+
+    instance_id = prediction["instance_id"]
+    if instance_id not in report_map:
+        report_map[instance_id] = {
+            "patch_is_None": False,
+            "patch_exists": False,
+            "patch_successfully_applied": False,
+            "resolved": False,
+        }
+
+    # Check if the model patch exists
+    if prediction["model_patch"] is None:
+        report_map[instance_id]["none"] = True
+        return report_map
+    report_map[instance_id]["patch_exists"] = True
+
+    # Get evaluation logs
+    eval_sm, found = get_logs_eval(log_path)
+
+    if not found:
+        return report_map
+    report_map[instance_id]["patch_successfully_applied"] = True
+
+    eval_ref = {
+        "instance_id": task_instance["instance_id"],
+        "FAIL_TO_PASS": task_instance["FAIL_TO_PASS"],
+        "PASS_TO_PASS": task_instance["PASS_TO_PASS"],
     }
 
     report = get_eval_report(eval_sm, eval_ref)

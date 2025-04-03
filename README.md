@@ -99,3 +99,107 @@ If you find our work helpful, please use the following citations.
 
 ## 🪪 License
 MIT. Check `LICENSE.md`.
+
+# Kotlin-bench Prediction Generator
+
+This repository contains tools for generating predictions for Kotlin-bench, a fork of [SWE-bench](https://github.com/princeton-nlp/SWE-bench) adapted for Kotlin projects.
+
+## Overview
+
+SWE-bench is a benchmark for evaluating large language models (LLMs) on real-world software engineering tasks. It provides a dataset of GitHub issues and their solutions, and challenges models to generate patches that fix the issues.
+
+Kotlin-bench adapts this benchmark for Kotlin projects, providing a collection of real-world Kotlin issues from GitHub repositories.
+
+## Requirements
+
+- Python 3.8+
+- Required Python packages:
+  - `tqdm`
+  - `openai` (for OpenAI API)
+  - `anthropic` (for Anthropic API)
+
+## Installation
+
+Clone this repository and install the required packages:
+
+```bash
+git clone https://github.com/your-username/kotlin-bench.git
+cd kotlin-bench
+pip install -r requirements.txt
+```
+
+## Generating Predictions
+
+The `generate_predictions.py` script generates predictions for Kotlin-bench tasks. It takes a list of task instances and a model name as input, and outputs a JSON file with predictions in the SWE-bench format.
+
+### Basic Usage
+
+```bash
+python generate_predictions.py --task_file path/to/tasks.json --model_name gpt-4-1106-preview
+```
+
+### Command-line Arguments
+
+- `--task_file`: Path to the JSON file containing task instances (required)
+- `--model_name`: Name or path of the model to use (required)
+- `--output_dir`: Directory to save predictions (default: `./predictions`)
+- `--batch_size`: Number of instances to process in parallel (default: 1)
+
+### Environment Variables
+
+For API-based models, set the appropriate API key:
+
+- For OpenAI models: `OPENAI_API_KEY`
+- For Anthropic models: `ANTHROPIC_API_KEY`
+
+Example:
+```bash
+export OPENAI_API_KEY=your_openai_api_key
+python generate_predictions.py --task_file tasks.json --model_name gpt-4
+```
+
+## Output Format
+
+The script outputs a JSON file with predictions in the following format:
+
+```json
+[
+  {
+    "instance_id": "<Unique task instance ID>",
+    "model_patch": "<.patch file content string>",
+    "model_name_or_path": "<Model name here>",
+  },
+  ...
+]
+```
+
+## Supported Models
+
+- OpenAI models: `gpt-3.5-turbo`, `gpt-4`, etc.
+- Anthropic models: `claude-2`, `claude-3-opus`, etc.
+- Custom models: For other models, modify the `generate_prediction` function
+
+## Task File Format
+
+The task file should be a JSON array of objects with the following structure:
+
+```json
+[
+  {
+    "instance_id": "owner__repo-issue_number",
+    "problem_statement": "Description of the issue",
+    "repo": "owner/repo",
+    "base_commit": "commit_hash",
+    ...
+  },
+  ...
+]
+```
+
+## Example
+
+```bash
+python generate_predictions.py --task_file data/kotlin_tasks.json --model_name claude-3-opus-20240229 --output_dir ./results
+```
+
+This will generate predictions for all tasks in `kotlin_tasks.json` using the Claude 3 Opus model and save the output to `./results/claude-3-opus-20240229_YYYY-MM-DD_HH-MM-SS.json`.

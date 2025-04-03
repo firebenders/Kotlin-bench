@@ -8,7 +8,6 @@ from swebench.harness.constants import (
     KEY_INSTANCE_ID,
     KEY_MODEL,
     KEY_PREDICTION,
-    MAP_REPO_TO_TEST_FRAMEWORK,
     MAP_VERSION_TO_INSTALL,
 )
 

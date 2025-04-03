@@ -15,11 +15,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-INSTALL_CMD = {
-    "pytest-dev/pytest": "pip install -e .",
-    "matplotlib/matplotlib": "python -m pip install -e .",
-    "pydata/xarray": "pip install -e .",
-}
+INSTALL_CMD = {}
 
 
 def _find_version_in_text(text: str, instance: dict) -> str:
@@ -39,12 +35,6 @@ def _find_version_in_text(text: str, instance: dict) -> str:
     for pattern in MAP_REPO_TO_VERSION_PATTERNS[instance["repo"]]:
         matches = re.search(pattern, text)
         if matches is not None:
-            print(instance['repo'])
-            if instance['repo'] == 'pyvista/pyvista':
-                text = matches.group(0)
-                text = text.split('=')[-1].strip() if '=' in text else text.strip()
-                text = '.'.join(text.split(','))
-                return text
             return str(matches.group(1)).replace(" ", "")
 
 
@@ -53,8 +43,8 @@ def get_version(instance, is_build=False, path_repo=None):
     Function for looking up the version of a task instance.
 
     If is_build is True, then the version is looked up by 1. building the repo
-    at the instance's base commit, 2. activating the conda environment, and 3.
-    looking for the version according to a predefined list of paths.
+    at the instance's base commit, and 2. looking for the version according to
+    a predefined list of paths.
 
     Otherwise, the version is looked up by searching GitHub at the instance's
     base commit for the version according to a predefined list of paths.
@@ -130,16 +120,11 @@ def get_versions_from_build(data: dict):
         data (dict): Dictionary of data for building a repo for any task instance
             in a given list.
     """
-    data_tasks, path_repo, conda_env, path_conda, save_path = (
+    data_tasks, path_repo, save_path = (
         data["data_tasks"],
         data["path_repo"],
-        data["conda_env"],
-        data["path_conda"],
         data["save_path"],
     )
-    # Activate conda environment and set installation command
-    cmd_activate = f"source {os.path.join(path_conda, 'bin/activate')}"
-    cmd_source = f"source {os.path.join(path_conda, 'etc/profile.d/conda.sh')}"
     cmd_install = INSTALL_CMD[data_tasks[0]["repo"]]
 
     # Change directory to repo testbed
@@ -167,14 +152,15 @@ def get_versions_from_build(data: dict):
             continue
 
         # Run installation command in repo
-        out_install = subprocess.run(
-            f"{cmd_source}; {cmd_activate} {conda_env}; {cmd_install}",
-            shell=True,
-            stdout=subprocess.DEVNULL,
-        )
-        if out_install.returncode != 0:
-            logger.error(f"[{instance['instance_id']}] Installation failed")
-            continue
+        if cmd_install is not None:
+            out_install = subprocess.run(
+                cmd_install,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+            )
+            if out_install.returncode != 0:
+                logger.error(f"[{instance['instance_id']}] Installation failed")
+                continue
 
         # Look up version according to repo-specific paths
         version = get_version(instance, is_build=True, path_repo=path_repo)
@@ -299,8 +285,7 @@ def main(args):
 
     # Check that all required arguments for installing task instances are present
     assert any([x == args.retrieval_method for x in ["build", "mix"]])
-    assert all([x in args for x in ["testbed", "path_conda", "conda_env"]])
-    conda_exec = os.path.join(args.path_conda, "bin/conda")
+    assert all([x in args for x in ["testbed"]])
 
     cwd = os.getcwd()
     os.chdir(args.testbed)
@@ -319,18 +304,6 @@ def main(args):
             logger.info(
                 f"Repo for {data_tasks[0]['repo']} exists: {testbed_repo_name}; skipping..."
             )
-        # Clone conda environment per thread
-        conda_env_name = f"{args.conda_env}_clone_{x}"
-        if not os.path.exists(os.path.join(args.path_conda, "envs", conda_env_name)):
-            logger.info(f"Creating clone of {args.conda_env} at {conda_env_name}")
-            cmd_clone_env = f"{conda_exec} create --name {conda_env_name} --clone {args.conda_env} -y"
-            subprocess.run(
-                cmd_clone_env, shell=True, check=True, stdout=subprocess.DEVNULL
-            )
-        else:
-            logger.info(
-                f"Conda clone for thread {x} exists: {conda_env_name}; skipping..."
-            )
     os.chdir(cwd)
 
     # Create pool tasks
@@ -341,8 +314,6 @@ def main(args):
             {
                 "data_tasks": data_task_lists[i],
                 "path_repo": os.path.join(args.testbed, testbed_repo_name),
-                "conda_env": f"{args.conda_env}_clone_{i}",
-                "path_conda": args.path_conda,
                 "save_path": os.path.join(cwd, f"{repo_prefix}_versions_{i}.json"),
             }
         )
@@ -364,7 +335,7 @@ def main(args):
             args.instances_path, repo_prefix, args.output_dir
         )
 
-    # Remove testbed repo and conda environments
+    # Remove testbed repo
     if args.cleanup:
         cwd = os.getcwd()
         os.chdir(args.testbed)
@@ -372,12 +343,6 @@ def main(args):
             # Remove git repo
             testbed_repo_name = f"{repo_prefix}__{x}"
             subprocess.run(f"rm -rf {testbed_repo_name}", shell=True, check=True)
-
-            # Remove conda environment
-            cmd_rm_env = (
-                f"{conda_exec} remove --name {args.conda_env}_clone_{x} --all -y"
-            )
-            subprocess.run(cmd_rm_env, shell=True, check=True)
         os.chdir(cwd)
 
 
@@ -385,9 +350,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--instances_path", required=True, type=str, default=None, help="Path to task instances")
     parser.add_argument("--retrieval_method", required=True, choices=["build", "mix", "github"], default="github", help="Method to retrieve versions")
-    parser.add_argument("--cleanup", action="store_true", help="Remove testbed repo and conda environments")
-    parser.add_argument("--conda_env", type=str, default=None, help="Conda environment to use")
-    parser.add_argument("--path_conda", type=str, default=None, help="Path to conda")
+    parser.add_argument("--cleanup", action="store_true", help="Remove testbed repo")
     parser.add_argument("--num_workers", type=int, default=1, help="Number of threads to use")
     parser.add_argument("--output_dir", type=str, default=None, help="Path to save results")
     parser.add_argument("--testbed", type=str, default=None, help="Path to testbed repo")

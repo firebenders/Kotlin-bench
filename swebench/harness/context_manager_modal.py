@@ -3,7 +3,7 @@ import time
 from logging import DEBUG, INFO, WARNING, ERROR, CRITICAL
 from traceback import format_exc
 import glob
-from typing import Dict, Any
+import re
 
 from swebench.harness.constants import (
     APPLY_PATCH_FAIL,
@@ -151,11 +151,7 @@ class ModalTaskEnvManager:
         
         # Log file naming
         log_file_suffix = f".{log_suffix}" if log_suffix else ""
-        
-        # Format repo-specific log file name to avoid path issues
-        repo = instance.get("repo", "unknown")
-        repo_id = repo.replace("/", "__")
-        log_file_name = f"{repo_id}-{instance_id}{log_file_suffix}.log"
+        log_file_name = f"{instance_id}{log_file_suffix}.log"
         
         # Ensure log directory exists
         # log_dir should already be an absolute path to the mounted volume
@@ -169,6 +165,12 @@ class ModalTaskEnvManager:
             prefix=f"[{self.testbed_name}] [{instance_id}]"
         )
         
+        # Set environment with Mockito fix
+        env = {**os.environ}
+        
+        # Add Mockito environment variable to fix ByteBuddy agent issue
+        env["JAVA_TOOL_OPTIONS"] = env.get("JAVA_TOOL_OPTIONS", "") + " -Dmockito.mock.maker=org.mockito.internal.creation.bytebuddy.SubclassByteBuddyMockMaker"
+        
         # Initialize subprocess executor
         self.exec = ExecWrapper(
             subprocess_args={
@@ -176,7 +178,7 @@ class ModalTaskEnvManager:
                 "shell": False,
                 "capture_output": False,
                 "text": True,
-                "env": {**os.environ},
+                "env": env,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.STDOUT,
             },
@@ -281,7 +283,7 @@ class ModalTaskEnvManager:
     
     def configure_jdk(self, jdk_version: str):
         """
-        Configure environment to use the specified JDK version
+        Configure environment to use the specified JDK version from the shared volume.
         
         Args:
             jdk_version (str): JDK version to use
@@ -290,29 +292,23 @@ class ModalTaskEnvManager:
             bool: True if configuration successful, False otherwise
         """
         try:
-            # Check if the JDK is available in the shared volume
-            if self.jdk_volume_path and os.path.exists(os.path.join(self.jdk_volume_path, jdk_version)):
-                # Use JDK directly from the shared volume
-                java_home = os.path.join(self.jdk_volume_path, jdk_version)
-                self.log.write(f"Using JDK {jdk_version} from shared volume at {java_home}")
-            else:
-                # If JDK is not found in volume or volume not provided, try to use local JDK
-                if self.jdk_volume_path:
-                    self.log.write(f"JDK {jdk_version} not found in shared volume, checking local installation", level=WARNING)
+            # The JDK should already be installed in the shared volume by engine_validation_modal.py
+            if not self.jdk_volume_path:
+                self.log.write("No JDK volume path provided", level=ERROR)
+                return False
                 
-                # Try SDKMAN installation as fallback
-                java_home = os.path.expanduser(f"~/.sdkman/candidates/java/{jdk_version}")
-                if os.path.exists(java_home):
-                    self.log.write(f"Using locally installed JDK {jdk_version}")
-                else:
-                    self.log.write(f"JDK {jdk_version} not found in local installation", level=WARNING)
-                    return False
+            java_home = os.path.join(self.jdk_volume_path, jdk_version)
+            if not os.path.exists(java_home):
+                self.log.write(f"JDK {jdk_version} not found in shared volume at {java_home}", level=ERROR)
+                return False
+                
+            self.log.write(f"Using JDK {jdk_version} from shared volume at {java_home}")
                 
             # Update environment variables
             self.exec.subprocess_args["env"]["JAVA_HOME"] = java_home
             self.exec.subprocess_args["env"]["PATH"] = f"{java_home}/bin:{self.exec.subprocess_args['env'].get('PATH', '')}"
             
-            # Verify JDK is properly configured
+            # Verify JDK is properly configured by checking java version
             version_output = self.exec(["java", "-version"], raise_error=False)
             if version_output.returncode == 0:
                 self.log.write(f"JDK {jdk_version} is properly configured")
@@ -334,16 +330,7 @@ class ModalTaskEnvManager:
         
         Returns:
             bool: True if installation successful, False otherwise
-        """
-        # Get installation specifications for this repo/version
-        if instance["repo"] not in MAP_VERSION_TO_INSTALL:
-            self.log.write(f"No installation instructions found for repo {instance['repo']}")
-            return True
-            
-        if instance["version"] not in MAP_VERSION_TO_INSTALL[instance["repo"]]:
-            self.log.write(f"No installation instructions found for version {instance['version']}")
-            return True
-            
+        """            
         specifications = MAP_VERSION_TO_INSTALL[instance["repo"]][instance["version"]]
         
         # Set up JDK if version is specified
@@ -476,6 +463,7 @@ class ModalTaskEnvManager:
         log_cmd = "Revert" if revert else "Apply"
         if out_patch.returncode != 0:
             # Patch apply failed
+            print(f"Patch apply failed ({out_patch.stdout})")
             self.log.write(f"{log_cmd} patch failed ({patch_type})", level=ERROR)
             with open(self.log_file, "a") as f:
                 f.write(f"{APPLY_PATCH_FAIL}; ({patch_type})\nOutput:\n")
@@ -488,39 +476,198 @@ class ModalTaskEnvManager:
             f.write(f"{APPLY_PATCH_PASS} ({patch_type})\n")
         return True
 
-    def run_tests_task(self, task_instance: Dict[str, Any]) -> bool:
-        """Run tests for the task instance"""
-        test_script = task_instance.get("test")
+    def run_tests_task(self, instance: dict):
+        """
+        Run tests for task instance
         
-        if not test_script:
-            print(f"{self.prefix} No test script found in task instance")
+        Args:
+            instance (dict): Task instance
+            
+        Returns:
+            bool: True if tests ran successfully, False otherwise
+        """
+        try:
+            # Ensure test command exists
+            if "test_cmd" not in instance:
+                # Generate test command if not already present
+                instance["test_directives"] = get_test_directives(instance)
+                instance["test_cmd"] = get_android_test_cmd(instance)
+                
+            test_cmd = instance["test_cmd"]
+            if test_cmd is None:
+                self.log.write("No test command found for instance", level=ERROR)
+                return True
+            
+            # # Log test command
+            # with open(self.log_file, "a") as f:
+            #     f.write(f"Test Script: {test_cmd};\n")
+
+            # Set environment variables for testing if specified
+            specifications = MAP_VERSION_TO_INSTALL.get(instance.get("repo", ""), {}).get(instance.get("version", ""), {})
+            if "env_vars_test" in specifications:
+                self.exec.subprocess_args["env"].update(specifications["env_vars_test"])
+            
+            # Set additional JVM arguments to fix ByteBuddy/Mockito issues
+            mockito_fix = "-Dmockito.mock.maker=org.mockito.internal.creation.bytebuddy.SubclassByteBuddyMockMaker -Djdk.attach.allowAttachSelf=true -Dnet.bytebuddy.experimental=true"
+            current_java_opts = self.exec.subprocess_args["env"].get("JAVA_TOOL_OPTIONS", "")
+            if mockito_fix not in current_java_opts:
+                self.exec.subprocess_args["env"]["JAVA_TOOL_OPTIONS"] = f"{current_java_opts} {mockito_fix}".strip()
+                self.log.write(f"Added Mockito fix to JAVA_TOOL_OPTIONS: {self.exec.subprocess_args['env']['JAVA_TOOL_OPTIONS']}")
+            
+            android_sdk_path = self.android_sdk_path or os.environ.get("ANDROID_HOME", "/root/android-sdk")
+            self.log.write(f"Setting Android environment variables: ANDROID_HOME={android_sdk_path}")
+            self.exec.subprocess_args["env"]["ANDROID_HOME"] = android_sdk_path
+            
+            # Update PATH to include Android tools
+            self.exec.subprocess_args["env"]["PATH"] = (
+                f"{android_sdk_path}/platform-tools:{android_sdk_path}/cmdline-tools/latest/bin:"
+                f"{self.exec.subprocess_args['env'].get('PATH', '')}"
+            )
+            
+            # Double-check local.properties exists before running tests
+            local_properties_path = os.path.join(self.testbed, "local.properties")
+            if not os.path.exists(local_properties_path):
+                self.log.write(f"Creating local.properties with sdk.dir={android_sdk_path}")
+                with open(local_properties_path, "w") as f:
+                    f.write(f"sdk.dir={android_sdk_path}\n")
+            
+            # Add Mockito fix to gradle.properties
+            gradle_properties_path = os.path.join(self.testbed, "gradle.properties")
+            mockito_gradle_fix = "org.gradle.jvmargs=-Dmockito.mock.maker=org.mockito.internal.creation.bytebuddy.SubclassByteBuddyMockMaker -Djdk.attach.allowAttachSelf=true -Dnet.bytebuddy.experimental=true"
+            
+            if os.path.exists(gradle_properties_path):
+                self.log.write("Updating gradle.properties with Mockito fix")
+                # Read existing content
+                with open(gradle_properties_path, "r") as f:
+                    lines = f.readlines()
+                
+                # Check if org.gradle.jvmargs is already defined
+                jvmargs_found = False
+                for i, line in enumerate(lines):
+                    if line.startswith("org.gradle.jvmargs="):
+                        if "mockito.mock.maker" not in line:
+                            # Append Mockito fix to existing jvmargs
+                            lines[i] = line.strip() + " -Dmockito.mock.maker=org.mockito.internal.creation.bytebuddy.SubclassByteBuddyMockMaker -Djdk.attach.allowAttachSelf=true -Dnet.bytebuddy.experimental=true\n"
+                        jvmargs_found = True
+                        break
+                
+                # Add jvmargs if not found
+                if not jvmargs_found:
+                    lines.append(f"{mockito_gradle_fix}\n")
+                
+                # Write updated content
+                with open(gradle_properties_path, "w") as f:
+                    f.writelines(lines)
+            else:
+                # Create new gradle.properties file
+                self.log.write("Creating gradle.properties with Mockito fix")
+                with open(gradle_properties_path, "w") as f:
+                    f.write(f"{mockito_gradle_fix}\n")
+            
+            # Run test command
+            self.log.write(f"Running test command: {test_cmd}")
+            out_test = self.exec(test_cmd, shell=True, timeout=self.timeout, check=False)
+            
+            # Unset environment variables
+            if "env_vars_test" in specifications:
+                for key in specifications["env_vars_test"]:
+                    if key in self.exec.subprocess_args["env"]:
+                        del self.exec.subprocess_args["env"][key]
+                        
+            # Write test results to log file
+            with open(self.log_file, "a") as f:
+                if out_test.returncode != 0:
+                    f.write(f"\n{TESTS_FAILED}\n")
+                    # Add detailed test output to help identify which predictions failed
+                    f.write("=== Detailed Test Output ===\n")
+                    if hasattr(out_test, 'stdout') and out_test.stdout:
+                        f.write(out_test.stdout)
+                    if hasattr(out_test, 'stderr') and out_test.stderr:
+                        f.write(out_test.stderr)
+                    f.write("=== End Test Output ===\n")
+                else:
+                    f.write(f"\n{TESTS_PASSED}\n")
+                    
+            self.log.write(f"Test script completed with return code {out_test.returncode}")
+            return True
+            
+        except subprocess.TimeoutExpired:
+            self.log.write("Test script timed out", level=ERROR)
+            with open(self.log_file, "a") as f:
+                f.write(f"\n{TESTS_TIMEOUT}\n")
+            return False
+            
+        except Exception as e:
+            self.log.write(f"Test script failed: {e}", level=ERROR)
+            with open(self.log_file, "a") as f:
+                f.write(f"\n{TESTS_ERROR}: {e}\n")
             return False
 
-        # Add JVM memory settings to the Gradle command if using Gradle
-        if "./gradlew" in test_script or "gradle" in test_script:
-            # Enhance Gradle command with memory settings
-            test_script = test_script.replace("./gradlew", 
-                                            "./gradlew -Dorg.gradle.jvmargs='-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError' "
-                                            "-Pandroid.testInstrumentationRunnerArguments.notAnnotation=androidx.test.filters.LargeTest")
+    def apply_full_file_changes(self, full_file_content: str, patch_type: str = "pred") -> bool:
+        """
+        Applies changes from a full file format response by updating the files directly.
+        
+        Args:
+            full_file_content (str): The model output in full file format with [start of]/[end of] markers
+            patch_type (str): Type of patch being applied (pred or gold)
+        
+        Returns:
+            bool: True if changes were applied successfully, False otherwise
+        """
+        # Use the regex pattern from eval_retrieval.py to extract file contents
+        file_pattern = re.compile(
+            r'\[start of (.*?)]'  # Match "[start of " and capture the path (non-greedy)
+            r'\n?'               # Optionally match a newline after the start marker
+            r'(.*?)'             # Capture the content between markers (non-greedy)
+            r'\n?'               # Optionally match a newline before the end marker
+            r'\[end of \1]',      # Match "[end of " and the same path captured earlier (\1)
+            re.DOTALL
+        )
+        matches = list(file_pattern.finditer(full_file_content))
 
-        print(f"{self.prefix} Test Script: {test_script};")
+        if not matches:
+            self.log.write("No matches found in full file content", level=ERROR)
+            return False
         
-        # Set Android environment variables if needed
-        if self.android_sdk_path and os.path.exists(self.android_sdk_path):
-            os.environ["ANDROID_HOME"] = self.android_sdk_path
-            print(f"{self.prefix} Setting Android environment variables: ANDROID_HOME={self.android_sdk_path}")
-        
-        # Run the test script
-        print(f"{self.prefix} Running test command: {test_script}")
-        process = self.exec(test_script, shell=True, timeout=self.timeout)
-        
-        success = (process.returncode == 0)
-        if success:
-            print(f"{self.prefix} Test script completed successfully with return code {process.returncode}")
-        else:
-            print(f"{self.prefix} Test script completed with return code {process.returncode}")
-        
-        return success
+        try:
+            for match in matches:
+                file_path = match.group(1)
+                new_content = match.group(2)
+                
+                # Skip if this is a readme file
+                if 'readme' in file_path.lower():
+                    continue
+                    
+                # Construct absolute path relative to repo root
+                abs_file_path = os.path.join(self.testbed, file_path)
+                
+                # Create directories if they don't exist
+                os.makedirs(os.path.dirname(abs_file_path), exist_ok=True)
+                
+                try:
+                    # Read existing content if file exists
+                    if os.path.exists(abs_file_path):
+                        with open(abs_file_path, 'r', encoding='utf-8') as f:
+                            old_content = f.read()
+                    else:
+                        old_content = ""
+                    
+                    # Only write if content is different
+                    if old_content != new_content:
+                        with open(abs_file_path, 'w', encoding='utf-8') as f:
+                            f.write(new_content)
+                        
+                        # Log the change
+                        self.log.write(f"Updated file: {file_path}")
+                except Exception as e:
+                    self.log.write(f"Error updating file {file_path}: {str(e)}", level=ERROR)
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error applying full file changes: {str(e)}")
+            return False
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         """Clean up when exiting the context manager"""

@@ -1,5 +1,5 @@
 import glob, json, os
-
+from pathlib import Path
 from collections import Counter
 from swebench.harness.constants import (
     APPLY_PATCH_FAIL,
@@ -15,6 +15,11 @@ from swebench.metrics.constants import (
     FAIL_TO_PASS,
     PASS_TO_FAIL,
     PASS_TO_PASS,
+    ERROR_TO_PASS,
+    ERROR_TO_FAIL,
+    ERROR_TO_ERROR,
+    PASS_TO_ERROR,
+    FAIL_TO_ERROR,
 )
 from swebench.metrics.getters import (
     get_file_name_from_lp,
@@ -22,6 +27,7 @@ from swebench.metrics.getters import (
     get_id_from_lp,
     test_failed,
     test_passed,
+    test_errored,
     get_eval_refs,
 )
 from swebench.metrics.metrics import (
@@ -34,7 +40,7 @@ from swebench.metrics.metrics import (
 )
 from tqdm.auto import tqdm
 from typing import Tuple
-
+from swebench.harness.grading import get_logs_eval_v2
 
 ### MARK - Eval Report Generation
 
@@ -59,6 +65,8 @@ def get_eval_report(
     - Pass-Pass (P2P) + P: Success (Maintenance)
     - Fail-Pass (F2P) + F: Failure
     - Pass-Pass (P2P) + F: Failure
+    - Error-Pass (E2P) + P: Success (Additional Resolution)
+    - Error-Pass (E2P) + F: Failure
 
     Miscellaneous Definitions
     - Fail-Fail (F2F) + F: Failure Maintenance
@@ -73,7 +81,7 @@ def get_eval_report(
         if test_passed(test_case, eval_sm):
             # Assume silent success for now (test case not in eval_sm)
             f2p_success.append(test_case)
-        elif test_failed(test_case, eval_sm):
+        elif test_failed(test_case, eval_sm) or test_errored(test_case, eval_sm):
             f2p_failure.append(test_case)
 
     # Calculate maintenance metrics
@@ -82,8 +90,18 @@ def get_eval_report(
     for test_case in gold_results[PASS_TO_PASS]:
         if test_passed(test_case, eval_sm):
             p2p_success.append(test_case)
-        elif test_failed(test_case, eval_sm):
+        elif test_failed(test_case, eval_sm) or test_errored(test_case, eval_sm):
             p2p_failure.append(test_case)
+    
+    # Handle ERROR_TO_PASS cases
+    e2p_success = []
+    e2p_failure = []
+    if ERROR_TO_PASS in gold_results:
+        for test_case in gold_results[ERROR_TO_PASS]:
+            if test_passed(test_case, eval_sm):
+                e2p_success.append(test_case)
+            elif test_failed(test_case, eval_sm) or test_errored(test_case, eval_sm):
+                e2p_failure.append(test_case)
     
     results = {
         FAIL_TO_PASS: {
@@ -93,6 +111,10 @@ def get_eval_report(
         PASS_TO_PASS: {
             "success": p2p_success,
             "failure": p2p_failure,
+        },
+        ERROR_TO_PASS: {
+            "success": e2p_success,
+            "failure": e2p_failure,
         }
     }
 
@@ -105,15 +127,53 @@ def get_eval_report(
         for test_case in gold_results[FAIL_TO_FAIL]:
             if test_passed(test_case, eval_sm):
                 f2f_success.append(test_case)
-            elif test_failed(test_case, eval_sm):
+            elif test_failed(test_case, eval_sm) or test_errored(test_case, eval_sm):
                 f2f_failure.append(test_case)
 
         # Calculate not considered metrics
         for test_case in gold_results[PASS_TO_FAIL]:
             if test_passed(test_case, eval_sm):
                 p2f_success.append(test_case)
-            elif test_failed(test_case, eval_sm):
+            elif test_failed(test_case, eval_sm) or test_errored(test_case, eval_sm):
                 p2f_failure.append(test_case)
+                
+        # Handle ERROR_TO_FAIL cases
+        e2f_success = []
+        e2f_failure = []
+        if ERROR_TO_FAIL in gold_results:
+            for test_case in gold_results[ERROR_TO_FAIL]:
+                if test_passed(test_case, eval_sm):
+                    e2f_success.append(test_case)
+                elif test_failed(test_case, eval_sm) or test_errored(test_case, eval_sm):
+                    e2f_failure.append(test_case)
+                    
+        # Handle other error transitions
+        e2e_success = []
+        e2e_failure = []
+        if ERROR_TO_ERROR in gold_results:
+            for test_case in gold_results[ERROR_TO_ERROR]:
+                if test_passed(test_case, eval_sm):
+                    e2e_success.append(test_case)
+                elif test_failed(test_case, eval_sm) or test_errored(test_case, eval_sm):
+                    e2e_failure.append(test_case)
+        
+        p2e_success = []
+        p2e_failure = []
+        if PASS_TO_ERROR in gold_results:
+            for test_case in gold_results[PASS_TO_ERROR]:
+                if test_passed(test_case, eval_sm):
+                    p2e_success.append(test_case)
+                elif test_failed(test_case, eval_sm) or test_errored(test_case, eval_sm):
+                    p2e_failure.append(test_case)
+                    
+        f2e_success = []
+        f2e_failure = []
+        if FAIL_TO_ERROR in gold_results:
+            for test_case in gold_results[FAIL_TO_ERROR]:
+                if test_passed(test_case, eval_sm):
+                    f2e_success.append(test_case)
+                elif test_failed(test_case, eval_sm) or test_errored(test_case, eval_sm):
+                    f2e_failure.append(test_case)
 
     results.update({
         FAIL_TO_FAIL: {
@@ -123,6 +183,22 @@ def get_eval_report(
         PASS_TO_FAIL: {
             "success": p2f_success,
             "failure": p2f_failure,
+        },
+        ERROR_TO_FAIL: {
+            "success": e2f_success if calculate_to_fail else [],
+            "failure": e2f_failure if calculate_to_fail else [],
+        },
+        ERROR_TO_ERROR: {
+            "success": e2e_success if calculate_to_fail else [],
+            "failure": e2e_failure if calculate_to_fail else [],
+        },
+        PASS_TO_ERROR: {
+            "success": p2e_success if calculate_to_fail else [],
+            "failure": p2e_failure if calculate_to_fail else [],
+        },
+        FAIL_TO_ERROR: {
+            "success": f2e_success if calculate_to_fail else [],
+            "failure": f2e_failure if calculate_to_fail else [],
         }
     })
     return results
@@ -153,21 +229,27 @@ def get_eval_reports_for_logs(
     for eval_log in eval_logs:
         # Remove task instances that do not satisfy callback
         if callback is not None and not callback(eval_log):
+            print(f"Callback not satisfied for {eval_log}")
             continue
 
         # Get gold results
         instance_id = get_id_from_lp(eval_log)
+        print(f"Instance ID: {instance_id}")
         if instance_id not in eval_refs:
             if verbose:
                 print(f"Gold results not found for {instance_id}")
             continue
 
         gold_results = eval_refs[instance_id]
+        print(f"Gold Results: {gold_results}")
 
         # Get eval logs
         eval_sm, has_report = get_logs_eval(eval_log)
+        print(f"Eval SM: {eval_sm}")
+        print(f"Has Report: {has_report}")
 
         if not has_report:
+            print(f"No report found for {instance_id}")
             # If eval patch failed to apply, convert to report
             # format with tests as failures
             reports_patch_failure[get_file_name_from_lp(eval_log)] = {
@@ -178,6 +260,7 @@ def get_eval_reports_for_logs(
 
         # Compare eval status map and gold status map
         report = get_eval_report(eval_sm, gold_results)
+        print(f"Report: {report}")
         reports_patch_success[get_file_name_from_lp(eval_log)] = report
 
     return reports_patch_success, reports_patch_failure
@@ -194,8 +277,10 @@ def get_eval_reports_for_dir(
         (See get_eval_reports_for_logs for other args)
     """
     if not os.path.exists(eval_dir):
+        print(f"Path {eval_dir} does not exist")
         raise ValueError(f"Path {eval_dir} does not exist")
     logs_list = [x for x in glob.glob(os.path.join(eval_dir, "*.log"))]
+    print(f"Logs List: {len(logs_list)}")
     return get_eval_reports_for_logs(logs_list, swe_bench_tasks, callback, verbose)
 
 
@@ -206,7 +291,7 @@ def get_model_eval_summary(
     predicts_path: str,
     eval_dir: str,
     swe_bench_tasks: str,
-    repo: str = None,
+    repo: str = "wordpress-mobile/WordPress-Android",
 ) -> dict:
     """
     Generate a summary of model evaluation results.
@@ -222,6 +307,7 @@ def get_model_eval_summary(
     with open(predicts_path) as f:
         for line in f.readlines():
             preds.append(json.loads(line))
+    print(f"Predictions: {len(preds)}")
 
     # Filter by repo if provided
     criteria_eval_sm = None
@@ -229,17 +315,21 @@ def get_model_eval_summary(
         criteria_pred = lambda pred: repo in pred[KEY_INSTANCE_ID]
         criteria_eval_sm = lambda eval_log: repo in eval_log
         preds = [x for x in preds if criteria_pred(x)]
+        print(f"Filtered Predictions: {len(preds)}")
 
     # Get reports
     reports_patch_success, reports_patch_failure = get_eval_reports_for_dir(
         eval_dir, swe_bench_tasks, callback=criteria_eval_sm, verbose=False
     )
+    print(f"Reports Patch Success: {len(reports_patch_success)}")
+    print(f"Reports Patch Failure: {len(reports_patch_failure)}")
 
     # Print reports for different granularities of patch success/failure
     summary = {
         "repo": repo if repo is not None else "all",
         "total_predictions": len(preds),
     }
+    print(f"Summary: {summary}")
     reports_by_patch_status = [
         ("Patch Apply Success", [reports_patch_success]),
         (
@@ -374,4 +464,235 @@ def get_model_report(
         if get_resolution_status(report) == ResolvedStatus.FULL.value:
             report_map["resolved"].append(p[KEY_INSTANCE_ID])
 
+    return report_map
+
+def get_model_report(
+    model: str,
+    predictions_path: str,
+    swe_bench_tasks: str,
+    log_dir: str,
+    verbose: bool = False,
+) -> dict:
+    """
+    Generate a report of model evaluation results from predictions, task instances,
+    and evaluation logs.
+
+    Args:
+        model (str): model name
+        predictions_path (str): path to predictions file
+        swe_bench_tasks (str): path to eval references (swe-bench-eval-refs.json)
+        log_dir (str): path to directory of evaluation logs
+        verbose (bool): show tqdm to track progress
+    Returns:
+        report_map (dict): map of repo to report
+    """
+    eval_refs = get_eval_refs(swe_bench_tasks)
+    for k, v in eval_refs.items():
+        eval_refs[k] = {key: v[key] for key in [KEY_INSTANCE_ID, FAIL_TO_PASS, PASS_TO_PASS]}
+
+    # Get predictions
+    predictions = []
+    if predictions_path.endswith("jsonl"):
+        with open(predictions_path) as f:
+            for line in f.readlines():
+                predictions.append(json.loads(line))
+    elif predictions_path.endswith("json"):
+        predictions = json.load(open(predictions_path))
+    else:
+        raise ValueError("Predictions file must be in json or jsonl format")
+    report_map = {}
+
+    # Iterate through predictions
+    report_map = {
+        "no_generation": [],
+        "generated": [],
+        "with_logs": [],
+        "install_fail": [],
+        "reset_failed": [],
+        "no_apply": [],
+        "applied": [],
+        "test_errored": [],
+        "test_timeout": [],
+        "resolved": [],
+    }
+    for p in tqdm(predictions, desc="Processing predictions", disable=not verbose):
+        # Check if the model patch exists
+        if p["model_patch"] == None or len(p["model_patch"].strip()) == 0:
+            report_map["no_generation"].append(p[KEY_INSTANCE_ID])
+            continue
+        report_map["generated"].append(p[KEY_INSTANCE_ID])
+
+        # Get log file
+        log_path = os.path.join(log_dir, f"{p[KEY_INSTANCE_ID]}.{model}.eval.log")
+        if not os.path.exists(log_path):
+            continue
+        report_map["with_logs"].append(p[KEY_INSTANCE_ID])
+        log_content = open(log_path).read()
+
+        # Check if both patch types failed to apply
+        if all([
+            f"{APPLY_PATCH_FAIL}; ({patch_type})" in log_content
+            for patch_type in [
+                PatchType.PATCH_PRED_TRY.value,
+                PatchType.PATCH_PRED_MINIMAL_TRY.value
+            ]
+        ]):
+            report_map["no_apply"].append(p[KEY_INSTANCE_ID])
+            continue
+
+        # Check if there is an installation failure
+        if INSTALL_FAIL in log_content:
+            report_map["install_fail"].append(p[KEY_INSTANCE_ID])
+            continue
+
+        # Check if there is a reset failure
+        if RESET_FAILED in log_content:
+            report_map["reset_failed"].append(p[KEY_INSTANCE_ID])
+            continue
+
+        # Get evaluation logs
+        eval_sm, found = get_logs_eval(log_path)
+
+        # Check if any tests errored or timed out
+        for status in [
+            ("test_errored", TESTS_ERROR),
+            ("test_timeout", TESTS_TIMEOUT),
+        ]:
+            if status[1] in log_content:
+                report_map[status[0]].append(p[KEY_INSTANCE_ID])
+                continue
+
+        # Check if patch failed to apply
+        if not found:
+            continue
+        report_map["applied"].append(p[KEY_INSTANCE_ID])
+
+        # Check if the patch was resolved
+        report = get_eval_report(eval_sm, eval_refs[p[KEY_INSTANCE_ID]])
+        if get_resolution_status(report) == ResolvedStatus.FULL.value:
+            report_map["resolved"].append(p[KEY_INSTANCE_ID])
+
+    return report_map
+
+def save_model_report_kt(
+    predictions_path: str,
+    dataset: list,
+    log_dir: str,
+    verbose: bool = False,
+) -> dict:
+    print(f"Predictions path: {predictions_path}")
+    print(f"Dataset: {len(dataset)}")
+    print(f"Log dir: {log_dir}")
+    print(f"Verbose: {verbose}")
+    """
+    Generate a report of model evaluation results from predictions, task instances,
+    and evaluation logs.
+
+    Args:
+        predictions_path (str): path to predictions file
+        dataset (list): list of task instances with gold results
+        log_dir (str): path to directory of evaluation logs
+        verbose (bool): show tqdm to track progress
+    Returns:
+        report_map (dict): map of categories to instance IDs
+    """
+    # Load dataset for reference
+    eval_refs = {
+        item["instance_id"]: {
+            "instance_id": item["instance_id"],
+            "FAIL_TO_PASS": item["FAIL_TO_PASS"],
+            "PASS_TO_PASS": item["PASS_TO_PASS"]
+        }
+        for item in dataset
+    }
+
+    # Get predictions
+    predictions = []
+    if predictions_path.endswith("jsonl"):
+        with open(predictions_path) as f:
+            for line in f.readlines():
+                predictions.append(json.loads(line))
+    elif predictions_path.endswith("json"):
+        predictions = json.load(open(predictions_path))
+    else:
+        raise ValueError("Predictions file must be in json or jsonl format")
+    print(f"Predictions: {len(predictions)}")
+
+    if len(predictions) == 0:
+        print(f"No predictions found for {predictions_path}")
+        return {}
+
+    # Initialize report categories
+    model = predictions[0]["model_name_or_path"]
+    report_map = {
+        "model": model,
+        "no_generation": [],
+        "generated": [],
+        "with_logs": [],
+        "install_fail": [],
+        "reset_failed": [],
+        "no_apply": [],
+        "applied": [],
+        "test_errored": [],
+        "test_timeout": [],
+        "resolved": [],
+    }
+
+    # Process each prediction
+    for p in tqdm(predictions, desc="Processing predictions", disable=not verbose):
+        instance_id = p["instance_id"]
+        model = p["model_name_or_path"]
+        prediction_name = Path(predictions_path).stem
+        print(f"Instance ID: {instance_id}")
+        print(f"Model: {model}")
+        
+        # Check if the model patch exists
+        if p["model_patch"] is None or len(p["model_patch"].strip()) == 0:
+            report_map["no_generation"].append(instance_id)
+            continue
+        report_map["generated"].append(instance_id)
+
+        # Get log file and report file paths
+        instance_log_dir = os.path.join(log_dir, instance_id, model, "unknown")
+        log_path = os.path.join(instance_log_dir, f"{instance_id}.log")
+        report_path = os.path.join(instance_log_dir, f"report_{model}_{prediction_name}.json")
+        print(f"Log path: {log_path}")
+        # print(f"Report path: {report_path}")
+
+        if not os.path.exists(log_path):
+            print(f"Log path does not exist for {instance_id}")
+            continue
+        report_map["with_logs"].append(instance_id)
+
+        # Get evaluation logs
+        repo = next((item["repo"] for item in dataset if item["instance_id"] == instance_id), None)
+        print(f"Repo: {repo}")
+        eval_sm, found = get_logs_eval_v2(log_path, repo)
+        print(f"Eval SM: {eval_sm}")
+        print(f"Found: {found}")
+        print()
+
+        # Check if patch failed to apply
+        if not found:
+            continue
+
+        report_map["applied"].append(instance_id)
+
+        # Check if the patch was resolved
+        if instance_id in eval_refs:
+            print("Getting eval report")
+            report = get_eval_report(eval_sm, eval_refs[instance_id])
+            print("Report: ", report)
+            if get_resolution_status(report) == ResolvedStatus.FULL.value:
+                report_map["resolved"].append(instance_id)
+
+    # Save the report map to a JSON file
+    output_path = os.path.join(log_dir, "reports", f"model_report_{model}.json")
+    print(f"Output path: {output_path}")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'w') as f:
+        json.dump(report_map, f, indent=2)
+
+    print(f"Report saved to {output_path}")
+    
     return report_map

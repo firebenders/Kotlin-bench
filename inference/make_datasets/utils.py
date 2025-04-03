@@ -7,6 +7,7 @@ from argparse import ArgumentTypeError
 from git import Repo
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 
 
 DIFF_PATTERN = re.compile(r"^diff(?:.*)")
@@ -134,11 +135,30 @@ def extract_diff(response):
     return response.split("</s>")[0]
 
 
-def is_test(name, test_phrases=None):
-    if test_phrases is None:
-        test_phrases = ["test", "tests", "testing"]
-    words = set(re.split(r" |_|\/|\.", name.lower()))
-    return any(word in words for word in test_phrases)
+def extract_full_file_patch(response):
+    """
+    Extracts all full file blocks from a response, preserving the original format.
+    Looks for blocks delimited by [start of filename] and [end of filename].
+    Returns all blocks concatenated as a single string.
+
+    Args:
+        response (str): The model's response text
+
+    Returns:
+        str|None: The concatenated file blocks if found, None otherwise
+    """
+    if response is None:
+        return None
+
+    # Extract all [start of]/[end of] blocks
+    pattern = re.compile(r"(\[start of [^\]]+\].*?\[end of [^\]]+\])", re.DOTALL)
+    matches = pattern.findall(response)
+    
+    if matches:
+        # Join all matched blocks with newlines
+        return "\n".join(matches)
+    
+    return None
 
 
 class ContextManager:
@@ -189,9 +209,10 @@ class AutoContextManager(ContextManager):
         self.root_dir = root_dir
         repo_dir = os.path.join(self.root_dir, instance["repo"].replace("/", "__"))
         if not os.path.exists(repo_dir):
+            print(f"Cloning {instance['repo']} to {root_dir}")
             repo_url = (
-                f"https://{token}@github.com/swe-bench/"
-                + instance["repo"].replace("/", "__")
+                f"https://{token}@github.com/"
+                + instance["repo"]
                 + ".git"
             )
             if verbose:
@@ -298,3 +319,50 @@ def string_to_bool(v):
         raise ArgumentTypeError(
             f"Truthy value expected: got {v} but expected one of yes/no, true/false, t/f, y/n, 1/0 (case insensitive)."
         )
+
+
+def update_model_patches(path: str):
+    """
+    Updates model_patch fields in JSONL files using extract_full_file_patch.
+    Can process either a directory of JSONL files or a single JSONL file.
+
+    Args:
+        path (str): Path to either a directory containing JSONL files or a single JSONL file
+    """
+    def process_jsonl_file(file_path: Path):
+        temp_file = file_path.with_suffix('.jsonl.tmp')
+        updated_count = 0
+        
+        try:
+            with open(file_path, 'r') as f_in, open(temp_file, 'w') as f_out:
+                for line in f_in:
+                    entry = json.loads(line)
+                    if 'full_output' in entry:
+                        # Extract and update the model_patch field
+                        new_patch = extract_full_file_patch(entry['full_output'])
+                        if new_patch is not None:
+                            entry['model_patch'] = new_patch
+                            updated_count += 1
+                    
+                    # Write the entry back (updated or not)
+                    print(json.dumps(entry), file=f_out)
+            
+            # Replace original file with updated version
+            temp_file.replace(file_path)
+            print(f"Processed {file_path.name}: Updated {updated_count} entries")
+            
+        except Exception as e:
+            print(f"Error processing {file_path}: {str(e)}")
+            if temp_file.exists():
+                temp_file.unlink()  # Delete temp file if it exists
+    
+    path = Path(path)
+    if path.is_file() and path.suffix == '.jsonl':
+        # Process single file
+        process_jsonl_file(path)
+    elif path.is_dir():
+        # Process all JSONL files in directory
+        for jsonl_file in path.glob('*.jsonl'):
+            process_jsonl_file(jsonl_file)
+    else:
+        raise ValueError(f"Path {path} is not a JSONL file or directory")

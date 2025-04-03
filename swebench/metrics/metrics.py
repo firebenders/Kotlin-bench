@@ -2,6 +2,7 @@ from statistics import mean
 from swebench.metrics.constants import (
     FAIL_TO_PASS,
     PASS_TO_PASS,
+    ERROR_TO_PASS,
     ResolvedStatus,
 )
 
@@ -82,10 +83,16 @@ def get_resolution_status(report: dict) -> str:
     """
     f2p = compute_fail_to_pass(report)
     p2p = compute_pass_to_pass(report)
+    
+    # Also consider ERROR_TO_PASS as part of resolution
+    e2p_total = len(report[ERROR_TO_PASS]["success"]) + len(report[ERROR_TO_PASS]["failure"])
+    e2p_success = len(report[ERROR_TO_PASS]["success"])
+    e2p = 1.0 if e2p_total == 0 else e2p_success / e2p_total
 
-    if f2p == 1 and p2p == 1:
+    # Full resolution requires all tests to pass
+    if f2p == 1 and p2p == 1 and e2p == 1:
         return ResolvedStatus.FULL.value
-    elif f2p < 1 and f2p > 0 and p2p == 1:
+    elif ((f2p < 1 and f2p > 0) or (e2p < 1 and e2p > 0)) and p2p == 1:
         return ResolvedStatus.PARTIAL.value
     else:
         return ResolvedStatus.NO.value

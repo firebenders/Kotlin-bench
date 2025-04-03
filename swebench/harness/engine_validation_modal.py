@@ -2,14 +2,13 @@ import argparse
 import os
 import time
 import json
-from typing import List, Dict, Any, Set, Tuple
-from pathlib import Path
+import datetime
+from typing import List, Dict, Any, Set
 
 import modal
-from modal import FilePatternMatcher
 
 from swebench.harness.constants import PatchType, MAP_VERSION_TO_INSTALL
-from swebench.harness.utils import get_instances, clone_repo
+from swebench.harness.utils import get_instances
 from swebench.harness.context_manager_modal import ModalTaskEnvManager
 
 # Define base image with all required dependencies
@@ -26,28 +25,32 @@ base_image = (
         "GitPython",
         "python-dotenv",
         "bs4",
+        "unidiff"
     ])
+    .run_commands([
+        # Add this line to set JVM arguments that fix the ByteBuddy/Mockito issue
+        'echo "export JAVA_TOOL_OPTIONS=-Dmockito.mock.maker=org.mockito.internal.creation.bytebuddy.SubclassByteBuddyMockMaker -Djdk.attach.allowAttachSelf=true" >> /etc/profile'
+    ])
+    .add_local_dir(
+        "swebench",
+        remote_path="/root/swebench",
+        ignore=lambda path: (
+            str(path).endswith(".pyc") or 
+            "__pycache__" in str(path) or
+            ".git" in str(path)
+        ),
+        copy=True
+    )
 )
 
 # Define the Modal app with ignore patterns for virtual environments and cache files
-app = modal.App("swebench-validation", image=base_image)
+app = modal.App("ktbench-execution-validation", image=base_image)
 
 # Create shared volumes
 logs_volume = modal.Volume.from_name("logs-volume", create_if_missing=True)
 jdk_volume = modal.Volume.from_name("jdk-volume", create_if_missing=True)
 repos_volume = modal.Volume.from_name("repos-volume", create_if_missing=True)
-android_sdk_volume = modal.Volume.from_name("android-sdk-volume", create_if_missing=True)  # New Android SDK volume
-
-# Mount the swebench package explicitly
-app.mount = modal.Mount.from_local_dir(
-    "swebench",
-    remote_path="/root/swebench",
-    condition=lambda path: not (
-        path.endswith(".pyc") or 
-        "__pycache__" in path or
-        ".git" in path
-    )
-)
+android_sdk_volume = modal.Volume.from_name("android-sdk-volume", create_if_missing=True)
 
 def validate_args(args):
     """
@@ -55,8 +58,8 @@ def validate_args(args):
     """
     if not os.path.exists(args.instances_path):
         raise ValueError(f"Could not find instances file at {args.instances_path}")
-    if not os.path.exists(args.log_dir):
-        raise ValueError(f"Could not find log directory at {args.log_dir}")
+    if not os.path.exists(args.output_log_dir):
+        raise ValueError(f"Could not find log directory at {args.output_log_dir}")
 
     # If value is provided, check that it is valid
     if args.timeout is not None and args.timeout < 0:
@@ -80,7 +83,7 @@ def get_repo_path(repo: str) -> str:
 
 @app.function(
     volumes={"/repos": repos_volume},
-    timeout=1800  # 30 minutes
+    timeout=600  # 10 minutes
 )
 def initialize_repo_volume(repo: str):
     """
@@ -133,15 +136,17 @@ def initialize_repo_volume(repo: str):
         print(f"Cloning repository {repo} to {repo_path}")
     
     try:
-        # Clone repository to its specific directory
-        clone_success = clone_repo(repo, repo_path, use_original_repo=True)
-        
-        if clone_success:
-            print(f"Successfully initialized repository {repo}")
-            return True
-        else:
-            print(f"Failed to clone repository {repo}")
-            return False
+        os.chdir(repo_path)
+        try:
+            print("Fetching all branches and tags...")
+            subprocess.run(["git", "fetch", "--all"], check=False)
+            subprocess.run(["git", "fetch", "--tags"], check=False)
+            print("Successfully fetched all branches and tags")
+        except Exception as e:
+            print(f"Warning: Failed to fetch branches and tags: {e}")
+            
+        print(f"Successfully initialized repository {repo}")
+        return True
     except Exception as e:
         print(f"Error initializing repository: {e}")
         return False
@@ -154,11 +159,11 @@ def initialize_repo_volume(repo: str):
         "/repos": repos_volume,
         "/root/android-sdk": android_sdk_volume
     },
-    timeout=1800,
+    timeout=1200, # 20 minute timeout
     cpu=4.0,
-    memory=16000
+    memory=8000,
 )
-def verify_task_instance(task_instance: Dict[str, Any], log_dir: str, timeout: int = None, verbose: bool = False, log_suffix: str = None):
+def verify_task_instance(task_instance: Dict[str, Any], volume_log_dir: str, timeout: int = None, verbose: bool = False, log_suffix: str = None):
     """
     Verify a single task instance in a Modal container
     
@@ -220,102 +225,50 @@ def verify_task_instance(task_instance: Dict[str, Any], log_dir: str, timeout: i
         os.environ["PATH"] = f"{android_sdk_path}/platform-tools:{android_sdk_path}/cmdline-tools/latest/bin:{os.environ['PATH']}"
     
     # Use the Modal-specific task environment manager with shared JDK volume
-    # Map the local log_dir to the mounted volume path
-    volume_log_dir = "/logs"
-    
-    # Add Gradle memory settings to avoid Mockito initialization issues
-    gradle_properties_path = os.path.join(work_dir, "gradle.properties")
+    # Ensure the volume log directory exists
+    os.makedirs(volume_log_dir, exist_ok=True)
     
     try:
-        with open(gradle_properties_path, 'a') as f:
-            f.write("\n# Added to fix Mockito initialization issues\n")
-            f.write("org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError\n")
-            f.write("android.suppressUnsupportedCompileSdk=34\n")
-            f.write("org.gradle.parallel=true\n")
-            f.write("org.gradle.daemon=false\n")
-        print(f"Added memory settings to gradle.properties")
-        
-        # Also add a gradle.properties file in the .gradle folder to ensure settings are applied
-        os.makedirs(os.path.join(work_dir, ".gradle"), exist_ok=True)
-        with open(os.path.join(work_dir, ".gradle", "gradle.properties"), 'w') as f:
-            f.write("org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError\n")
-        
-        # Create a mockito-extensions directory and configure it to use mock-maker-inline
-        # This can help with Mockito initialization issues
-        mockito_dir = os.path.join(work_dir, "WordPress/src/test/resources/mockito-extensions")
-        os.makedirs(mockito_dir, exist_ok=True)
-        with open(os.path.join(mockito_dir, "org.mockito.plugins.MockMaker"), 'w') as f:
-            # Use the classic maker instead of inline which is causing issues
-            f.write("mock-maker-inline\norg.mockito.internal.creation.bytebuddy.InlineByteBuddyMockMaker\n")
+        with ModalTaskEnvManager(
+            task_instance,
+            work_dir,           # working directory with repo copy
+            volume_log_dir,     # use run-specific directory in the logs volume
+            verbose=verbose,
+            timeout=timeout,
+            log_suffix=log_suffix,
+            jdk_volume_path="/root/.sdkman/candidates/java",  # Standard SDKMAN Java path
+            android_sdk_path=android_sdk_path  # Pass the Android SDK path
+        ) as tcm:
+            # Run the verification steps in sequence
+            success = (
+                tcm.reset_task_env(task_instance) and
+                tcm.run_install_task(task_instance) and
+                tcm.apply_patch(task_instance["test_patch"], patch_type=PatchType.PATCH_TEST.value) and
+                tcm.run_tests_task(task_instance) and
+                tcm.apply_patch(task_instance["patch"], patch_type=PatchType.PATCH_GOLD.value) and
+                tcm.run_tests_task(task_instance)
+            )
+            
+            return {
+                "instance_id": task_instance.get("instance_id", "unknown"),
+                "repo": task_instance["repo"],
+                "version": task_instance["version"],
+                "success": success
+            }
     except Exception as e:
-        print(f"Failed to add memory settings to gradle.properties: {e}")
-    
-    with ModalTaskEnvManager(
-        task_instance,
-        work_dir,           # working directory with repo copy
-        volume_log_dir,     # use mounted volume path for logs
-        verbose=verbose,
-        timeout=timeout,
-        log_suffix=log_suffix,
-        jdk_volume_path="/root/.sdkman/candidates/java",  # Standard SDKMAN Java path
-        android_sdk_path=android_sdk_path  # Pass the Android SDK path
-    ) as tcm:
-        # Run the verification steps in sequence
-        success = (
-            tcm.reset_task_env(task_instance)
-        )
-        
-        # After resetting the environment, check if this is the WordPress-Android repo with failing test
-        if success and repo == "wordpress-mobile/WordPress-Android" and "SubFilterViewModelTest" in task_instance.get("test_patch", ""):
-            try:
-                # Path to the test file with constructor mismatch
-                test_file_path = os.path.join(work_dir, "WordPress/src/test/java/org/wordpress/android/ui/reader/subfilter/SubFilterViewModelTest.kt")
-                
-                # Check if the file exists before trying to modify it
-                if os.path.exists(test_file_path):
-                    print(f"Found SubFilterViewModelTest.kt, checking for constructor mismatch")
-                    
-                    # Read the file
-                    with open(test_file_path, 'r') as f:
-                        content = f.read()
-                    
-                    # Look for constructor calls with too many arguments
-                    # This is a simple fix that modifies the constructor calls to use named parameters
-                    # which makes it more tolerant to changes in the constructor signature
-                    if "SubFilterViewModel(" in content:
-                        print(f"Found SubFilterViewModel constructor calls, updating to use named parameters")
-                        
-                        # Replace the constructor calls with a more flexible version using named parameters
-                        updated_content = content.replace(
-                            "SubFilterViewModel(",
-                            "SubFilterViewModel(mainDispatcher = mainDispatcher, bgDispatcher = bgDispatcher, "
-                            "appPrefsWrapper = appPrefsWrapper, subfilterListItemMapper = subfilterListItemMapper, "
-                            "eventBusWrapper = eventBusWrapper, accountStore = accountStore, readerTracker = readerTracker, "
-                        )
-                        
-                        # Write the updated content back to the file
-                        with open(test_file_path, 'w') as f:
-                            f.write(updated_content)
-                        
-                        print(f"Updated SubFilterViewModelTest.kt with more flexible constructor calls")
-            except Exception as e:
-                print(f"Error modifying SubFilterViewModelTest.kt: {e}")
-        
-        # Continue with the standard verification process
-        success = success and (
-            tcm.run_install_task(task_instance) and
-            tcm.apply_patch(task_instance["test_patch"], patch_type=PatchType.PATCH_TEST.value) and
-            tcm.run_tests_task(task_instance) and
-            tcm.apply_patch(task_instance["patch"], patch_type=PatchType.PATCH_GOLD.value) and
-            tcm.run_tests_task(task_instance)
-        )
-        
-        return {
-            "instance_id": task_instance.get("instance_id", "unknown"),
-            "repo": task_instance["repo"],
-            "version": task_instance["version"],
-            "success": success
-        }
+        print(f"Task failed with error: {e}")
+        # Ensure any subprocesses are killed
+        import subprocess, signal, os
+        try:
+            subprocess.run(["pkill", "-9", "-f", "gradlew"], check=False)
+            # Kill any remaining Java processes that might be hanging
+            subprocess.run(["pkill", "-9", "java"], check=False)
+        except:
+            pass
+        return {"instance_id": task_instance.get("instance_id", "unknown"),
+                "repo": task_instance.get("repo", "unknown"),
+                "version": task_instance.get("version", "unknown"),
+                "success": False}
 
 
 def get_required_jdk_versions(task_instances: List[Dict[str, Any]]) -> Set[str]:
@@ -492,13 +445,10 @@ def setup_jdk_shared_volume(jdk_versions: Set[str], force_reinstall: bool = Fals
 
 
 @app.function(volumes={"/logs": logs_volume})
-def process_results(results: List[Dict[str, Any]], log_dir: str):
+def process_results(results: List[Dict[str, Any]], volume_log_dir: str):
     """
     Process and summarize results from all task verification runs
     """
-    # Use the mounted volume path for logs
-    volume_log_dir = "/logs"
-    
     # Count successes and failures
     success_count = sum(1 for r in results if r["success"])
     total_count = len(results)
@@ -719,6 +669,46 @@ def initialize_android_sdk_volume(force_reinstall: bool = False):
         return False
 
 
+@app.function(volumes={"/logs": logs_volume})
+def copy_logs_to_local(volume_run_dir: str):
+    """
+    Read logs from the volume and return their contents for transfer to the local machine.
+    
+    Args:
+        volume_run_dir: Path to the run directory in the logs volume
+    
+    Returns:
+        dict: A dictionary mapping filenames to their contents
+    """
+    import os
+    
+    try:
+        # Check if the directory exists
+        if not os.path.exists(volume_run_dir):
+            print(f"Error: Directory {volume_run_dir} not found in the volume")
+            return None
+        
+        print(f"Reading logs from {volume_run_dir}")
+        
+        # Dictionary to store file contents
+        files_data = {}
+        
+        # Read all files from the volume run directory
+        for filename in os.listdir(volume_run_dir):
+            src_path = os.path.join(volume_run_dir, filename)
+            if os.path.isfile(src_path):
+                # Read the file content
+                with open(src_path, 'rb') as f:
+                    file_content = f.read()
+                files_data[filename] = file_content
+        
+        print(f"Successfully read {len(files_data)} log files from volume")
+        return files_data
+            
+    except Exception as e:
+        print(f"Error reading logs from volume: {e}")
+        return None
+
 @app.local_entrypoint()
 def main(*arglist):
     """
@@ -729,7 +719,7 @@ def main(*arglist):
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--instances_path", type=str, required=True)
-    parser.add_argument("--log_dir", type=str, required=True)
+    parser.add_argument("--output_log_dir", type=str, required=True)
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--log_suffix", type=str)
@@ -742,8 +732,20 @@ def main(*arglist):
     # Validate arguments
     validate_args(args)
     
-    # Ensure log directory exists locally
-    os.makedirs(args.log_dir, exist_ok=True)
+    # Create a unique directory name for this run based on timestamp
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_id = f"run_{timestamp}"
+    
+    # Define paths for logs
+    volume_run_dir = f"/logs/{run_id}"  # Directory within the volume for this run
+    local_log_dir = args.output_log_dir  # Local directory for logs
+    
+    print(f"Using run ID: {run_id}")
+    print(f"Logs will be stored in volume directory: {volume_run_dir}")
+    print(f"Logs will be copied to local directory: {local_log_dir}")
+    
+    # Ensure local log directory exists
+    os.makedirs(local_log_dir, exist_ok=True)
     
     # Get task instances
     start_time = time.time()
@@ -789,7 +791,7 @@ def main(*arglist):
     # Check if Android SDK is needed and set it up
     required_android_sdk = get_required_android_sdk_versions(task_instances)
     if required_android_sdk and not args.skip_android_setup:
-        print("Android SDK is required for some task instances")
+        print("Android SDK is required for task instances")
         if initialize_android_sdk_volume.remote(args.force_jdk_reinstall):
             print("Android SDK initialization complete")
         else:
@@ -845,17 +847,25 @@ def main(*arglist):
         # Get task details
         instance_id = instance.get("instance_id", "unknown")
         
-        # Skip the instance if the version isn't 25.72
-        if instance.get("version") != "24.72":
-            # print(f"Skipping instance {instance_id} due to version mismatch")
+        if instance["repo"] not in MAP_VERSION_TO_INSTALL:
+            print(f"No installation instructions found for repo {instance['repo']}")
             continue
-        
+
+        if "version" not in instance:
+            print(f"No version specified for instance {instance_id}")
+            continue
+            
+        if instance["version"] not in MAP_VERSION_TO_INSTALL[instance["repo"]]:
+            print(MAP_VERSION_TO_INSTALL[instance["repo"]])
+            print(f"No installation instructions found for version {instance['version']}")
+            continue
+
         print(f"Scheduling verification for instance {instance_id}")
         
         # Spawn task verification in a concurrent job
         future = verify_task_instance.spawn(
             instance, 
-            args.log_dir, 
+            volume_run_dir,
             timeout=args.timeout, 
             verbose=args.verbose, 
             log_suffix=args.log_suffix
@@ -864,12 +874,75 @@ def main(*arglist):
     
     # Wait for all task verification jobs to finish
     results = []
+    failed_instances = []
     for instance_id, future in verify_task_futures:
-        print(f"Waiting for instance {instance_id} to complete...")
-        results.append(future.get())
+        print(f"Instance {instance_id} completing...")
+        try:
+            result = future.get()
+            results.append(result)
+        except modal.exception.FunctionTimeoutError:
+            print(f"WARNING: Instance {instance_id} timed out")
+            failed_instances.append({
+                "instance_id": instance_id,
+                "error": "timeout",
+                "success": False
+            })
+            results.append({
+                "instance_id": instance_id,
+                "repo": "unknown",  # We could store this from the original instance if needed
+                "version": "unknown",
+                "success": False
+            })
+        except Exception as e:
+            print(f"WARNING: Instance {instance_id} failed with error: {e}")
+            failed_instances.append({
+                "instance_id": instance_id,
+                "error": str(e),
+                "success": False
+            })
+            results.append({
+                "instance_id": instance_id,
+                "repo": "unknown",
+                "version": "unknown",
+                "success": False
+            })
+    
+    # Log failed instances to a separate file
+    if failed_instances:
+        # Ensure the volume run directory exists
+        os.makedirs(volume_run_dir, exist_ok=True)
+        
+        failed_instances_path = os.path.join(volume_run_dir, "failed_instances.json")
+        with open(failed_instances_path, "w") as f:
+            json.dump(failed_instances, f, indent=2)
+        print(f"Logged {len(failed_instances)} failed instances to {failed_instances_path}")
     
     # Process and summarize results
-    summary = process_results.remote(results, args.log_dir)
+    summary = process_results.remote(results, volume_run_dir)
+    
+    # Copy logs from the volume to the local machine
+    print(f"Copying logs from volume to local directory: {local_log_dir}")
+    files_data = copy_logs_to_local.remote(volume_run_dir)
+
+    local_run_dir = os.path.join(local_log_dir, run_id)
+    if files_data:
+        # Create the local run directory
+        os.makedirs(local_run_dir, exist_ok=True)
+        
+        # Write files to the local machine
+        files_copied = 0
+        for filename, content in files_data.items():
+            try:
+                file_path = os.path.join(local_run_dir, filename)
+                with open(file_path, 'wb') as f:
+                    f.write(content)
+                files_copied += 1
+            except Exception as e:
+                print(f"Error writing file {filename}: {e}")
+        
+        print(f"Successfully copied {files_copied} log files to {local_run_dir}")
+    else:
+        print(f"Warning: Failed to copy logs from volume")
     
     end_time = time.time()
     elapsed_time = end_time - start_time
@@ -878,7 +951,9 @@ def main(*arglist):
     print(f"Total task instances processed: {len(task_instances)}")
     print(f"Successful task instances: {summary['successful_instances']}")
     print(f"Success rate: {summary['success_rate']:.2%}")
-    print(f"Results saved to: /logs/validation_summary.json (locally at {os.path.join(args.log_dir, 'validation_summary.json')})")
+    print(f"Results saved to volume: {os.path.join(volume_run_dir, 'validation_summary.json')}")
+    if local_run_dir:
+        print(f"Results available locally at: {os.path.join(local_run_dir, 'validation_summary.json')}")
 
 # python3 ./harness/engine_validation_modal.py \
 #   --instances_path ./collect/data/tasks/versioned/WordPress-Android-task-instances_versions.json \

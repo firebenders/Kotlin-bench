@@ -84,7 +84,19 @@ def extract_files_from_entry(json_entry, jsonl_filename, output_base_dir):
             # Continue to the next match within the same entry if possible
 
     if not found_match and full_output:
-        logging.debug(f"No file blocks found matching pattern in 'full_output' for {instance_id} from {jsonl_filename.name}")
+        logging.info(f"No file blocks found matching pattern in 'full_output' for {instance_id} from {jsonl_filename.name}")
+        # Create the "errored" directory within the instance directory
+        errored_dir = instance_output_dir / "errored"
+        errored_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create a numbered file for this error case
+        error_count = len(list(errored_dir.glob("error_*.txt")))
+        error_file_path = errored_dir / f"error_{error_count + 1}.txt"
+        
+        # Write the full_output content to the error file
+        with open(error_file_path, "w", encoding="utf-8") as f_out:
+            f_out.write(full_output)
+        logging.info(f"Saved full_output to error file: {error_file_path}")
 
     return extracted_count
 

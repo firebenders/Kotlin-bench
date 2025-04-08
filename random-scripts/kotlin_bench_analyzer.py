@@ -11,8 +11,8 @@ import time
 
 # Path to the dataset and reports directory
 dataset_path = "./datasets/Kotlin-bench"
-reports_dir = './evaluation_logs_final/reports'
-logs_dir = './evaluation_logs_final'
+reports_dir = './evaluation_logs/reports'
+logs_dir = './evaluation_logs'
 
 # Configure OpenAI API (add your API key here or set as environment variable)
 # openai.api_key = "your-api-key"  # Or use: os.environ.get("OPENAI_API_KEY")
@@ -102,16 +102,66 @@ def analyze_model_performance(task_df):
 # Save results to JSON
 def save_to_json(task_df, performance_df):
     # Convert the dataframe to a list of dictionaries for JSON serialization
-    task_results = task_df.to_dict(orient='records')
+    new_task_results = task_df.to_dict(orient='records')
     
     # Prepare the model performance summary
-    performance_dict = performance_df.to_dict(orient='index')
+    new_performance_dict = performance_df.to_dict(orient='index')
     
     # Create the final JSON structure
     results_json = {
-        "task_results": task_results,
-        "model_performance": performance_dict
+        "task_results": new_task_results,
+        "model_performance": new_performance_dict
     }
+    
+    # Check if the file already exists
+    if os.path.exists('kotlin_bench_results.json'):
+        print("Existing results file found. Merging new results...")
+        try:
+            with open('kotlin_bench_results.json', 'r') as f:
+                existing_json = json.load(f)
+                
+                # Create a lookup by instance_id for faster merging
+                existing_task_lookup = {task["instance_id"]: task for task in existing_json["task_results"]}
+                
+                # Merge task results
+                merged_task_results = []
+                for new_task in new_task_results:
+                    instance_id = new_task["instance_id"]
+                    if instance_id in existing_task_lookup:
+                        # Update existing task with new model results
+                        merged_task = existing_task_lookup[instance_id].copy()
+                        
+                        # Only add the new model results (fields starting with 'result_')
+                        for key, value in new_task.items():
+                            if key.startswith('result_'):
+                                merged_task[key] = value
+                                
+                        merged_task_results.append(merged_task)
+                    else:
+                        # This is a new task not in the existing file
+                        merged_task_results.append(new_task)
+                
+                # Add any tasks from existing file that aren't in the new results
+                new_instance_ids = {task["instance_id"] for task in new_task_results}
+                for instance_id, task in existing_task_lookup.items():
+                    if instance_id not in new_instance_ids:
+                        merged_task_results.append(task)
+                
+                # Merge performance dictionaries
+                merged_performance = existing_json["model_performance"].copy()
+                for model, perf in new_performance_dict.items():
+                    merged_performance[model] = perf
+                
+                # Update the results JSON with merged data
+                results_json = {
+                    "task_results": merged_task_results,
+                    "model_performance": merged_performance
+                }
+                
+                print(f"Successfully merged results. Total tasks: {len(merged_task_results)}")
+        except Exception as e:
+            print(f"Error merging with existing file: {e}")
+            print("Creating new file instead.")
     
     # Save to JSON file
     with open('kotlin_bench_results.json', 'w') as f:
@@ -393,7 +443,7 @@ def extract_all_patches(dataset, output_folder="patches", model_names=None):
         
         # Extract model-generated patches
         for model_name in model_names:
-            model_patch_path = os.path.join(logs_dir, task_id, model_name, "unknown", "patch.diff")
+            model_patch_path = os.path.join(logs_dir, task_id, model_name, "patch.diff")
             
             if os.path.exists(model_patch_path):
                 try:
@@ -418,9 +468,9 @@ def extract_all_patches(dataset, output_folder="patches", model_names=None):
 
 def main():
     # # Main analysis
-    # print("Starting Kotlin Benchmark Analysis")
+    print("Starting Kotlin Benchmark Analysis")
 
-    # # Check if OpenAI API key is set
+    # Check if OpenAI API key is set
     # if not openai.api_key and not os.environ.get("OPENAI_API_KEY"):
     #     print("Warning: OpenAI API key is not set. Please set it in the code or as an environment variable.")
     #     return
@@ -428,34 +478,34 @@ def main():
     # # Load the dataset
     dataset = load_dataset()
 
-    # # Extract task information
-    # task_info_df = extract_task_info(dataset)
-    # print("\nFirst task information:")
-    # print(task_info_df.iloc[0])
+    # Extract task information
+    task_info_df = extract_task_info(dataset)
+    print("\nFirst task information:")
+    print(task_info_df.iloc[0])
 
-    # # Load model reports
-    # model_reports = load_model_reports()
+    # Load model reports
+    model_reports = load_model_reports()
 
-    # # Create model to result mapping
-    # result_df = create_model_result_mapping(task_info_df, model_reports)
+    # Create model to result mapping
+    result_df = create_model_result_mapping(task_info_df, model_reports)
 
-    # # Display results
-    # print("\nTask information with model results:")
-    # print(result_df.head())
+    # Display results
+    print("\nTask information with model results:")
+    print(result_df.head())
 
-    # # Analyze model performance
-    # performance_df = analyze_model_performance(result_df)
-    # print("\nModel Performance Summary:")
-    # print(performance_df)
+    # Analyze model performance
+    performance_df = analyze_model_performance(result_df)
+    print("\nModel Performance Summary:")
+    print(performance_df)
 
-    # # Save results to JSON file
-    # results_json = save_to_json(result_df, performance_df)
+    # Save results to JSON file
+    results_json = save_to_json(result_df, performance_df)
     
-    # # Analyze failed tasks
-    # analysis_results = analyze_failed_tasks(dataset, results_json)
+    # Analyze failed tasks
+    analysis_results = analyze_failed_tasks(dataset, results_json)
     
-    # # Save analysis to file
-    # save_analysis_to_file(analysis_results)
+    # Save analysis to file
+    save_analysis_to_file(analysis_results)
     
     # Extract all patches to a separate folder
     extract_all_patches(dataset, "patches", [
@@ -466,7 +516,8 @@ def main():
         "gpt-4o-2024-11-20",
         "gemini-2.5-pro-exp-03-25",
         "claude-3-7-sonnet-20250219",
-        "claude-3-7-sonnet-20250219-thinking"
+        "claude-3-7-sonnet-20250219-thinking",
+        "llama4-maverick-instruct-basic"
     ])
 
     print("\nAnalysis complete. Results saved to JSON file and analysis file.")

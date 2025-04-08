@@ -347,58 +347,55 @@ def run_evaluation(
     task_ids_from_predictions = {pred["instance_id"] for pred in predictions}
     dataset = [i for i in dataset if i["instance_id"] in task_ids_from_predictions]
     
-    # if not dataset:
-    #     print("No instances to evaluate.")
-    #     return
+    if not dataset:
+        print("No instances to evaluate.")
+        return
     
-    # # Setup logging
-    # timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    # volume_log_dir = f"/logs/eval_{timestamp}"
-    # os.makedirs(output_log_dir, exist_ok=True)
+    # Setup logging
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    volume_log_dir = f"/logs/eval_{timestamp}"
+    os.makedirs(output_log_dir, exist_ok=True)
     
-    # print(f"Evaluating {len(dataset)} instances with {len(predictions)} total predictions...")
+    print(f"Evaluating {len(dataset)} instances with {len(predictions)} total predictions...")
     
-    # # Initialize repositories in parallel
-    # repos = list({i["repo"] for i in dataset})
-    # print(f"Setting up {len(repos)} repositories in parallel...")
-    # repo_results = list(initialize_repo_volume.map(repos, return_exceptions=True))
+    # Initialize repositories in parallel
+    repos = list({i["repo"] for i in dataset})
+    print(f"Setting up {len(repos)} repositories in parallel...")
+    repo_results = list(initialize_repo_volume.map(repos, return_exceptions=True))
     
     # Prepare inputs for parallel evaluation - flatten to evaluate each prediction individually
-    # eval_inputs = []
-    # for prediction in predictions:
-    #     instance_id = prediction["instance_id"]
-    #     task_instance = next((i for i in dataset if i["instance_id"] == instance_id), None)
-    #     if task_instance:
-    #         eval_inputs.append((task_instance, prediction, volume_log_dir))
-    # print(f"Starting parallel evaluation of {len(eval_inputs)} predictions...")
+    eval_inputs = []
+    for prediction in predictions:
+        instance_id = prediction["instance_id"]
+        task_instance = next((i for i in dataset if i["instance_id"] == instance_id), None)
+        if task_instance:
+            eval_inputs.append((task_instance, prediction, volume_log_dir))
+    print(f"Starting parallel evaluation of {len(eval_inputs)} predictions...")
     
     # Run evaluations in parallel
-    # for prediction_result in evaluate_prediction.starmap(eval_inputs, return_exceptions=True):
-    #     if isinstance(prediction_result, Exception):
-    #         print(f"Warning: Prediction evaluation failed: {prediction_result}")
-    #         continue
-    
-    # Process results and copy logs
-    # summary = process_results.remote(all_results, volume_log_dir)
-    
+    for prediction_result in evaluate_prediction.starmap(eval_inputs, return_exceptions=True):
+        if isinstance(prediction_result, Exception):
+            print(f"Warning: Prediction evaluation failed: {prediction_result}")
+            continue
+
     # Copy logs from volume to local
-    # print(f"Copying logs from volume to local directory: {output_log_dir}")
-    # files_data = copy_logs_to_local.remote(volume_log_dir)
+    print(f"Copying logs from volume to local directory: {output_log_dir}")
+    files_data = copy_logs_to_local.remote(volume_log_dir)
      
-    # if files_data:
-    #     files_copied = 0
-    #     for filename, content in files_data.items():
-    #         try:
-    #             file_path = os.path.join(output_log_dir, filename)
-    #             os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    #             with open(file_path, 'wb') as f:
-    #                 f.write(content)
-    #             files_copied += 1
-    #         except Exception as e:
-    #             print(f"Error writing file {filename}: {e}")
-    #     print(f"Successfully copied {files_copied} log files to {output_log_dir}")
-    # else:
-    #     print("Warning: Failed to copy logs from volume")
+    if files_data:
+        files_copied = 0
+        for filename, content in files_data.items():
+            try:
+                file_path = os.path.join(output_log_dir, filename)
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, 'wb') as f:
+                    f.write(content)
+                files_copied += 1
+            except Exception as e:
+                print(f"Error writing file {filename}: {e}")
+        print(f"Successfully copied {files_copied} log files to {output_log_dir}")
+    else:
+        print("Warning: Failed to copy logs from volume")
     
     # Generate reports using SWE-bench utilities
     print("\nGenerating evaluation reports...")

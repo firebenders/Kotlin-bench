@@ -10,6 +10,7 @@ import os
 import time
 import dotenv
 import traceback
+import threading
 from pathlib import Path
 from tqdm.auto import tqdm
 import numpy as np
@@ -34,6 +35,7 @@ from datetime import datetime
 from unidiff import PatchSet
 import re
 from swebench.harness.constants import PatchType
+from together import Together
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -75,6 +77,8 @@ MODEL_LIMITS = {
     "qwen2p5-coder-32b-instruct": 128_000,
     "gemini-2.5-pro-exp-03-25": 1_000_000,
     "gpt-4o-2024-11-20": 128_000,
+    "llama4-maverick-instruct-basic": 1_000_000,
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": 524_288,  # Will be increased to 1M
 }
 
 # The cost per token for each model input.
@@ -110,6 +114,8 @@ MODEL_COST_PER_INPUT = {
     "qwen2p5-coder-32b-instruct": 0.0000009,
     "gemini-2.5-pro-exp-03-25": 0.000005,  # $0.005/1K tokens for input
     "gpt-4o-2024-11-20": 0.0000025,  # $2.50/1M tokens for input
+    "llama4-maverick-instruct-basic": 0.0000009,  # Estimated cost similar to other Llama models
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": 0.0000009,  # Actual pricing from Together AI
 }
 
 # The cost per token for each model output.
@@ -145,6 +151,8 @@ MODEL_COST_PER_OUTPUT = {
     "qwen2p5-coder-32b-instruct": 0.0000009,
     "gemini-2.5-pro-exp-03-25": 0.000015,  # $0.015/1K tokens for output
     "gpt-4o-2024-11-20": 0.00001,  # $10.00/1M tokens for output
+    "llama4-maverick-instruct-basic": 0.0000009,  # Estimated cost similar to other Llama models
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": 0.0000009,  # Actual pricing from Together AI
 }
 
 # Mapping of simple model names to their Fireworks paths
@@ -154,6 +162,11 @@ FIREWORKS_MODEL_PATHS = {
     "deepseek-v3-0324": "accounts/fireworks/models/deepseek-v3-0324",
     "llama-v3p3-70b-instruct": "accounts/fireworks/models/llama-v3p3-70b-instruct",
     "qwen2p5-coder-32b-instruct": "accounts/fireworks/models/qwen2p5-coder-32b-instruct",
+}
+
+# Mapping of simple model names to their Together AI paths
+TOGETHER_MODEL_PATHS = {
+    "llama4-maverick-instruct-basic": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
 }
 
 # used for azure
@@ -1373,6 +1386,317 @@ def gemini_inference(
 
 
 #####################################
+#          TogetherAI API           #
+#####################################
+
+def call_together(model_name_or_path, inputs, temperature, top_p, instance_id=None, **model_args):
+    """
+    Calls the Together AI API to generate completions for the given inputs.
+    Improved to handle rate limits and other errors better in parallel execution.
+    """
+    logger.info(f"Making API call for instance {instance_id}")
+    system_messages = inputs.split("\n", 1)[0]
+    user_message = inputs.split("\n", 1)[1]
+    
+    # Get Together API key
+    together_key = os.environ.get("TOGETHER_API_KEY", None)
+    if together_key is None:
+        raise ValueError(
+            "Must provide an api key. Expected in TOGETHER_API_KEY environment variable."
+        )
+    
+    try:
+        # Initialize the Together client
+        client = Together(api_key=together_key)
+        
+        # Prepare request arguments
+        request_args = model_args.copy()
+        if "max_tokens" not in request_args:
+            request_args["max_tokens"] = 16384
+        
+        # Check if model needs to be mapped to TogetherAI path
+        actual_model_path = TOGETHER_MODEL_PATHS.get(model_name_or_path, model_name_or_path)
+        logger.info(f"[{instance_id}] Using TogetherAI model: {actual_model_path}")
+            
+        response = client.chat.completions.create(
+            model=actual_model_path,
+            messages=[
+                {"role": "system", "content": system_messages},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=temperature,
+            top_p=top_p,
+            **request_args,
+        )
+        
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        
+        # Use the actual model path for cost calculation if it has cost defined,
+        # otherwise fallback to the original model name
+        cost_model = actual_model_path if actual_model_path in MODEL_COST_PER_INPUT else model_name_or_path
+        cost = calc_cost(cost_model, input_tokens, output_tokens)
+        
+        logger.info(f"[{instance_id}] Successfully received response (input:{input_tokens}, output:{output_tokens})")
+        return response, cost
+    except Exception as e:
+        # Check for specific error types for better handling
+        error_msg = str(e).lower()
+        
+        # Handle rate limit errors - raise with specific message so calling code can retry
+        if "rate limit" in error_msg or "too many requests" in error_msg or "429" in error_msg:
+            rate_limit_error = ValueError(f"Rate limit exceeded: {str(e)}")
+            rate_limit_error.is_rate_limit = True
+            logger.warning(f"[{instance_id}] Hit rate limit: {str(e)}")
+            raise rate_limit_error
+            
+        # Handle context length errors
+        elif "context length" in error_msg or "too long" in error_msg:
+            logger.warning(f"[{instance_id}] Context length exceeded: {str(e)}")
+            return None, 0
+            
+        # Handle authorization errors
+        elif "unauthorized" in error_msg or "authentication" in error_msg or "401" in error_msg:
+            logger.error(f"[{instance_id}] Authentication error: {str(e)}")
+            raise ValueError(f"TogetherAI authentication error: {str(e)}")
+            
+        # Handle model not found errors
+        elif "model not found" in error_msg or "404" in error_msg:
+            logger.error(f"[{instance_id}] Model not found: {str(e)}")
+            raise ValueError(f"Model not found: {str(e)}. Check if '{actual_model_path}' is valid.")
+            
+        # Other errors
+        else:
+            logger.error(f"[{instance_id}] Error calling Together API: {str(e)}")
+            traceback.print_exc()
+            raise e
+
+@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3), retry=lambda e: hasattr(e, 'is_rate_limit') and e.is_rate_limit)
+def call_together_with_validation(model_name_or_path, inputs, temperature, top_p, output_dir=None, instance_id=None, **model_args):
+    """
+    Calls the Together AI API and validates the response patch. 
+    Retries automatically on validation failure or rate limits.
+    Returns (response, cost, patch_text) tuple if successful, or (None, 0, None) if all attempts fail.
+    """
+    logger.info(f"Making API call with validation for instance {instance_id}")
+    response, cost = call_together(model_name_or_path, inputs, temperature, top_p, instance_id=instance_id, **model_args)
+    if response is None:
+        return None, 0, None
+        
+    completion = response.choices[0].message.content
+    patch_text, error_msg = validate_and_extract_patch(
+        completion,
+        output_dir=output_dir,
+        instance_id=instance_id
+    )
+    
+    if patch_text is None:
+        # Validation failed - raise exception to trigger retry
+        logger.warning(f"[{instance_id}] Patch validation failed: {error_msg}")
+        raise ValueError(f"Patch validation failed: {error_msg}")
+    
+    logger.info(f"[{instance_id}] Successfully validated patch")   
+    return response, cost, patch_text
+
+def together_inference(
+    test_dataset,
+    model_name_or_path,
+    output_file,
+    model_args,
+    existing_ids,
+    max_cost,
+):
+    """
+    Runs inference on a dataset using the Together AI API with parallel processing.
+    """    
+    # Initialize the Together API token
+    api_key = os.environ.get("TOGETHER_API_KEY", None)
+    if api_key is None:
+        raise ValueError(
+            "Must provide an api key. Expected in TOGETHER_API_KEY environment variable."
+        )
+    
+    print(f"Using Together AI key {'*' * max(0, len(api_key)-5) + api_key[-5:]}")
+    
+    # Map the model name to the actual Together AI model path if needed
+    actual_model_path = TOGETHER_MODEL_PATHS.get(model_name_or_path, model_name_or_path)
+    logger.info(f"Using model {model_name_or_path} mapped to TogetherAI model: {actual_model_path}")
+    
+    # Use the appropriate model for context length limits
+    limit_model = actual_model_path if actual_model_path in MODEL_LIMITS else model_name_or_path
+    
+    # Filter the dataset to include only instances that fit within the context window
+    encoding = limit_model  # Pass the model name instead of the encoding object
+    print(f"Model name: {model_name_or_path} (Using {limit_model} for context limits)")
+    print(f"Model limits: {MODEL_LIMITS[limit_model]}")
+    test_dataset = test_dataset.filter(
+        lambda x: gpt_tokenize(x["text"], encoding) <= MODEL_LIMITS[limit_model],
+        desc="Filtering",
+        load_from_cache_file=False,
+    )
+    
+    temperature = model_args.pop("temperature", 0.2)
+    top_p = model_args.pop("top_p", 0.95 if temperature > 0 else 1)
+    print(f"Using temperature={temperature}, top_p={top_p}")
+    
+    basic_args = {
+        "model_name_or_path": model_name_or_path,
+    }
+    
+    # Set up for parallel processing
+    max_workers = model_args.pop("max_workers", 10)  # Default to 10 parallel workers
+    max_concurrent_requests = model_args.pop("max_concurrent_requests", 5)  # Default to 5 concurrent API calls
+    
+    # Prepare data for parallel processing
+    data_to_process = []
+    for datum in test_dataset:
+        instance_id = datum["instance_id"]
+        if instance_id in existing_ids:
+            continue
+            
+        output_dict = {"instance_id": instance_id}
+        output_dict.update(basic_args)
+        output_dict["text"] = f"{datum['text']}\n\n"
+        data_to_process.append((instance_id, output_dict, model_args.copy()))
+    
+    if not data_to_process:
+        logger.info(f"No new instances to process for {model_name_or_path}")
+        return 0
+    
+    total_cost = 0
+    processed_count = 0
+    
+    # Create thread-safe locks for shared resources
+    output_lock = threading.Lock()
+    cost_lock = threading.Lock()
+    
+    # Semaphore to limit concurrent API requests
+    api_semaphore = threading.Semaphore(max_concurrent_requests)
+    
+    # Flag to signal early termination
+    stop_processing = threading.Event()
+    
+    # Progress bar
+    pbar = tqdm(total=len(data_to_process), desc=f"Inference for {model_name_or_path}")
+    
+    def process_instance(args):
+        """Worker function to process a single instance with retry logic"""
+        nonlocal total_cost, processed_count
+        
+        instance_id, output_dict, instance_args = args
+        output_dir = os.path.dirname(output_file)
+        
+        # Skip if we've reached max cost
+        if stop_processing.is_set():
+            return None
+        
+        # Limit concurrent API requests
+        with api_semaphore:
+            retry_attempts = 0
+            max_retries = 5
+            
+            while retry_attempts < max_retries and not stop_processing.is_set():
+                try:
+                    response, cost, patch_text = call_together_with_validation(
+                        model_name_or_path,
+                        output_dict["text"],
+                        temperature,
+                        top_p,
+                        output_dir=output_dir,
+                        instance_id=instance_id,
+                        **instance_args
+                    )
+                    
+                    # Skip if no valid response
+                    if response is None:
+                        logger.warning(f"[{instance_id}] Generated invalid response")
+                        break
+                    
+                    # Update the output dictionary with results
+                    output_dict["full_output"] = response.choices[0].message.content
+                    output_dict["model_patch"] = patch_text
+                    
+                    # Update costs and write output in a thread-safe way
+                    with cost_lock:
+                        total_cost += cost
+                        current_cost = total_cost
+                        
+                        # Check if we've hit max cost
+                        if max_cost is not None and current_cost >= max_cost:
+                            stop_processing.set()
+                    
+                    # Write to output file
+                    with output_lock:
+                        with open(output_file, "a+") as f:
+                            print(json.dumps(output_dict), file=f, flush=True)
+                        
+                        # Log cost occasionally
+                        with cost_lock:
+                            processed_count += 1
+                            if processed_count % 5 == 0:  # Log every 5 completed instances
+                                print(f"Processed {processed_count}/{len(data_to_process)}, Total Cost: ${current_cost:.4f}")
+                    
+                    return True
+                    
+                except Exception as e:
+                    # Check if it's a rate limit error
+                    if hasattr(e, 'is_rate_limit') and e.is_rate_limit:
+                        retry_attempts += 1
+                        wait_time = min(2 ** retry_attempts, 60)  # Exponential backoff capped at 60 seconds
+                        logger.warning(f"[{instance_id}] Rate limit hit, retrying in {wait_time}s (attempt {retry_attempts}/{max_retries})")
+                        time.sleep(wait_time)
+                    else:
+                        # For other errors, log and break
+                        logger.error(f"[{instance_id}] Error: {e}")
+                        traceback.print_exc()
+                        break
+            
+            return False
+    
+    try:
+        print(f"Processing {len(data_to_process)} instances with {max_workers} workers")
+        
+        # Process instances in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks to the executor
+            future_to_instance = {
+                executor.submit(process_instance, args): args[0]  # Map future to instance_id
+                for args in data_to_process
+            }
+            
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_instance):
+                instance_id = future_to_instance[future]
+                try:
+                    result = future.result()
+                    if stop_processing.is_set():
+                        logger.info(f"Skipping remaining instances due to max cost or interrupt")
+                        # Cancel any pending futures
+                        for pending_future in future_to_instance:
+                            if not pending_future.done():
+                                pending_future.cancel()
+                except Exception as e:
+                    logger.error(f"[{instance_id}] Worker thread error: {e}")
+                    traceback.print_exc()
+                
+                # Update progress bar
+                pbar.update(1)
+                
+                # Check for early termination
+                if stop_processing.is_set():
+                    break
+    
+    finally:
+        pbar.close()
+    
+    print(f"Completed inference for {model_name_or_path}")
+    print(f"Processed {processed_count}/{len(data_to_process)} instances")
+    print(f"Total Cost: ${total_cost:.4f}")
+    
+    return total_cost
+
+
+#####################################
 #          Main Inference Loop       #
 #####################################
 
@@ -1399,6 +1723,8 @@ def run_inference_for_model(
         openai_inference(**inference_args)
     elif model_name_or_path in FIREWORKS_MODEL_PATHS:
         fireworks_inference(**inference_args)
+    elif model_name_or_path in TOGETHER_MODEL_PATHS or model_name_or_path.startswith("meta-llama/Llama-4"):
+        together_inference(**inference_args)
     elif model_name_or_path.startswith("gemini"):
         gemini_inference(**inference_args)
     else:

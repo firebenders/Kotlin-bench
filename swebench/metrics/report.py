@@ -653,7 +653,7 @@ def save_model_report_kt(
         report_map["generated"].append(instance_id)
 
         # Get log file and report file paths
-        instance_log_dir = os.path.join(log_dir, instance_id, model, "unknown")
+        instance_log_dir = os.path.join(log_dir, instance_id, model)
         log_path = os.path.join(instance_log_dir, f"{instance_id}.log")
         report_path = os.path.join(instance_log_dir, f"report_{model}_{prediction_name}.json")
         print(f"Log path: {log_path}")

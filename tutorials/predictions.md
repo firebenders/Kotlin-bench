@@ -35,25 +35,19 @@ export GEMINI_API_KEY=your_gemini_api_key
 # To run inference on a specific model, you can run a command like this
 python3 ./inference/run_api.py \
     --dataset_name_or_path \
-    --models o1 o3-mini gpt-4.5-preview gpt-4o-2024-11-20 claude-3-5-sonnet-20241022 claude-3-7-sonnet-20250219 claude-3-7-sonnet-20250219-thinking gemini-2.5-pro-exp-03-25 deepseek-r1 deepseek-v3 llama-v3p3-70b-instruct \
+    --models o1 o3 o4-mini o3-mini gpt-4.5-preview gpt-4o-2024-11-20 claude-3-5-sonnet-20241022 claude-3-7-sonnet-20250219 claude-3-7-sonnet-20250219-thinking gemini-2.5-pro-exp-03-25 deepseek-r1 deepseek-v3 llama-v3p3-70b-instruct \
     --output_dir \
     --split
 
 python3 ./inference/run_api.py \
     --dataset_name_or_path ./datasets/Kotlin-bench__style-3__fs-oracle \
-    --models o1 o3-mini gpt-4.5-preview gpt-4o-2024-11-20 claude-3-5-sonnet-20241022 claude-3-7-sonnet-20250219 claude-3-7-sonnet-20250219-thinking gemini-2.5-pro-exp-03-25 deepseek-r1 deepseek-v3 llama-v3p3-70b-instruct \
+    --models o1 o3 o4-mini o3-mini gpt-4.5-preview gpt-4o-2024-11-20 claude-3-5-sonnet-20241022 claude-3-7-sonnet-20250219 claude-3-7-sonnet-20250219-thinking gemini-2.5-pro-exp-03-25 deepseek-r1 deepseek-v3 llama-v3p3-70b-instruct \
     --output_dir ./predictions/Kotlin-bench \
     --split test
 
 python3 ./inference/run_api.py \
     --dataset_name_or_path ./datasets/Kotlin-bench__style-3__fs-oracle \
-    --models o1 \
+    --models o3 \
     --output_dir ./predictions/Kotlin-bench \
     --split test
 ```
-
-## Next Steps
-
-After generating predictions, the next step is to evaluate them to see if they successfully solve the provided problems. This involves running the evaluation process which tests if the predictions pass the required tests.
-
-For detailed information on how to evaluate your predictions, please refer to the [Evaluation Tutorial](./evaluation.md).

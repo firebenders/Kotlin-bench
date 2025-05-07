@@ -517,7 +517,8 @@ def main():
         "gemini-2.5-pro-exp-03-25",
         "claude-3-7-sonnet-20250219",
         "claude-3-7-sonnet-20250219-thinking",
-        "llama4-maverick-instruct-basic"
+        "llama4-maverick-instruct-basic",
+        "gpt-4.1"
     ])
 
     print("\nAnalysis complete. Results saved to JSON file and analysis file.")

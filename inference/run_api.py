@@ -66,9 +66,12 @@ MODEL_LIMITS = {
     "gpt-4-0613": 8_192,
     "gpt-4-1106-preview": 128_000,
     "gpt-4-0125-preview": 128_000,
+    "gpt-4.1": 1_047_576,
     "o1": 200_000,
     "o1-pro-2025-03-19": 200_000,
     "o3-mini": 200_000,
+    "o3": 200_000,
+    "o4-mini": 200_000,
     "gpt-4.5-preview": 128_000,
     "deepseek-r1": 160_000,
     "deepseek-v3": 128_000,
@@ -79,6 +82,7 @@ MODEL_LIMITS = {
     "gpt-4o-2024-11-20": 128_000,
     "llama4-maverick-instruct-basic": 1_000_000,
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": 524_288,  # Will be increased to 1M
+    "grok-3-latest": 128_000,  # xAI Grok-3 context window
 }
 
 # The cost per token for each model input.
@@ -103,9 +107,12 @@ MODEL_COST_PER_INPUT = {
     "gpt-4-32k": 0.00006,
     "gpt-4-1106-preview": 0.00001,
     "gpt-4-0125-preview": 0.00001,
+    "gpt-4.1": 0.000002,  # $2.00/1M tokens for input
     "o1": 0.000015,
     "o1-pro-2025-03-19": 0.000015,
     "o3-mini": 0.00000110,
+    "o3": 0.000010,  # $10.00/1M tokens for input
+    "o4-mini": 0.00000110,  # $1.10/1M tokens for input
     "gpt-4.5-preview": 0.000075,
     "deepseek-r1": 0.000003,
     "deepseek-v3": 0.0000009,
@@ -116,6 +123,7 @@ MODEL_COST_PER_INPUT = {
     "gpt-4o-2024-11-20": 0.0000025,  # $2.50/1M tokens for input
     "llama4-maverick-instruct-basic": 0.0000009,  # Estimated cost similar to other Llama models
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": 0.0000009,  # Actual pricing from Together AI
+    "grok-3-latest": 0.0000020,  # Estimated cost for Grok-3
 }
 
 # The cost per token for each model output.
@@ -140,9 +148,12 @@ MODEL_COST_PER_OUTPUT = {
     "gpt-4-32k": 0.00012,
     "gpt-4-1106-preview": 0.00003,
     "gpt-4-0125-preview": 0.00003,
+    "gpt-4.1": 0.000008,  # $8.00/1M tokens for output
     "o1": 0.000060,
     "o1-pro-2025-03-19": 0.000060,
     "o3-mini": 0.00000440,
+    "o3": 0.000040,  # $40.00/1M tokens for output
+    "o4-mini": 0.00000440,  # $4.40/1M tokens for output
     "gpt-4.5-preview": 0.000150,
     "deepseek-r1": 0.000008,
     "deepseek-v3": 0.0000009,
@@ -153,6 +164,7 @@ MODEL_COST_PER_OUTPUT = {
     "gpt-4o-2024-11-20": 0.00001,  # $10.00/1M tokens for output
     "llama4-maverick-instruct-basic": 0.0000009,  # Estimated cost similar to other Llama models
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": 0.0000009,  # Actual pricing from Together AI
+    "grok-3-latest": 0.0000060,  # Estimated cost for Grok-3
 }
 
 # Mapping of simple model names to their Fireworks paths
@@ -360,9 +372,12 @@ def gpt_tokenize(string: str, encoding) -> int:
             # Fallback for models without direct tokenizer mapping
             model_mapping = {
                 "gpt-4.5-preview": "gpt-4",
+                "gpt-4.1": "gpt-4",
                 "o1": "gpt-4",
                 "o1-pro-2025-03-19": "gpt-4",
                 "o3-mini": "gpt-4",
+                "o3": "gpt-4",
+                "o4-mini": "gpt-4",
             }
             fallback_model = model_mapping.get(encoding, "gpt-4")
             encoding = tiktoken.encoding_for_model(fallback_model)
@@ -412,13 +427,18 @@ def call_chat(model_name_or_path, inputs, use_azure, temperature, top_p, instanc
         # Handle max tokens parameter based on model type
         if model_name_or_path.startswith(("o3")):
             request_args["max_completion_tokens"] = request_args.pop("max_tokens", 20_000)
+        elif model_name_or_path.startswith("o4"):
+            request_args["max_completion_tokens"] = request_args.pop("max_tokens", 20_000)
+        elif model_name_or_path.startswith("gpt-4.1"):
+            # GPT-4.1 supports a larger output window of 32,768 tokens
+            request_args["max_tokens"] = 32_768
         else:
-            request_args["max_tokens"] = 16384
+            request_args["max_tokens"] = 16_384
         
         # Special handling for O-level models
-        if model_name_or_path.startswith("o1") or model_name_or_path.startswith("o3"):
+        if model_name_or_path.startswith("o1") or model_name_or_path.startswith("o3") or model_name_or_path.startswith("o4"):
             # Add reasoning_effort for o-level models
-            additional_args["reasoning_effort"] = "low"
+            additional_args["reasoning_effort"] = "high"  # Changed from "low" to "high"
             
             # O-level models don't support temperature parameter
             # Don't pass temperature or top_p
@@ -522,11 +542,18 @@ def call_responses_api(model_name_or_path, inputs, temperature, top_p, instance_
     # Prepare additional arguments
     request_args = model_args.copy()
     additional_args = {}
+    
+    # Handle max tokens parameter based on model type
+    if model_name_or_path.startswith("gpt-4.1"):
+        # GPT-4.1 supports a larger output window of 32,768 tokens
+        request_args["max_tokens"] = 32_768
+    elif not "max_tokens" in request_args:
+        request_args["max_tokens"] = 16_384
 
     # Special handling for O-level models
-    if model_name_or_path.startswith("o1") or model_name_or_path.startswith("o3"):
+    if model_name_or_path.startswith("o1") or model_name_or_path.startswith("o3") or model_name_or_path.startswith("o4"):
         # Add reasoning_effort for o-level models
-        additional_args["reasoning_effort"] = "low"
+        additional_args["reasoning_effort"] = "high"  # Changed from "low" to "high"
         
         # O-level models don't support temperature parameter
         # Don't pass temperature or top_p
@@ -642,16 +669,17 @@ def openai_inference(
     max_cost,
 ):
     """
-    Run inference on test dataset using OpenAI API.
+    Run inference on test dataset using OpenAI API with parallel processing.
     """
-    total_cost = 0
-    temperature = 0
-    top_p = 1
-    use_azure = False
-    basic_args = {
-        "model_name_or_path": model_name_or_path,
-    }
-
+    # Initialize API token
+    openai_key = os.environ.get("OPENAI_API_KEY", None)
+    if openai_key is None:
+        raise ValueError(
+            "Must provide an api key. Expected in OPENAI_API_KEY environment variable."
+        )
+    
+    print(f"Using OpenAI key {'*' * max(0, len(openai_key)-5) + openai_key[-5:]}")
+    
     # Filter the dataset to include only instances that fit within the context window
     encoding = model_name_or_path  # Pass the model name instead of the encoding object
     print(f"Model name: {model_name_or_path}")
@@ -661,64 +689,193 @@ def openai_inference(
         desc="Filtering",
         load_from_cache_file=False,
     )
-    print(f"Filtered to {len(test_dataset)} instances")
-
-    with open(output_file, "a+") as f:
-        for datum in tqdm(test_dataset, desc=f"Inference for {model_name_or_path}"):
-            instance_id = datum["instance_id"]
-            if instance_id in existing_ids:
-                continue
-            output_dict = {"instance_id": instance_id}
-            output_dict.update(basic_args)
-            output_dict["text"] = f"{datum['text']}\n\n"
+    
+    temperature = model_args.pop("temperature", 0)
+    top_p = model_args.pop("top_p", 1)
+    use_azure = False
+    print(f"Using temperature={temperature}, top_p={top_p}")
+    
+    basic_args = {
+        "model_name_or_path": model_name_or_path,
+    }
+    
+    # Set up for parallel processing - use more workers for GPT-4.1 which has higher throughput
+    max_workers = model_args.pop("max_workers", 10)  # Default to 10 parallel workers
+    max_concurrent_requests = model_args.pop("max_concurrent_requests", 5)  # Default to 5 concurrent API calls
+    
+    # Increase workers for GPT-4.1
+    if model_name_or_path.startswith("gpt-4.1"):
+        max_workers = model_args.pop("max_workers", 20)  # Use more workers for GPT-4.1
+        max_concurrent_requests = model_args.pop("max_concurrent_requests", 10)  # Use more concurrent requests
+    
+    # Prepare data for parallel processing
+    data_to_process = []
+    for datum in test_dataset:
+        instance_id = datum["instance_id"]
+        if instance_id in existing_ids:
+            continue
             
-            try:
-                # Choose appropriate API based on model name
-                if model_name_or_path.startswith("o1"):
-                    response, cost, patch_text = call_responses_with_validation(
-                        output_dict["model_name_or_path"],
-                        output_dict["text"],
-                        temperature,
-                        top_p,
-                        output_dir=os.path.dirname(output_file),
-                        instance_id=instance_id,
-                        **model_args,
-                    )
-                else:
-                    response, cost, patch_text = call_chat_with_validation(
-                        output_dict["model_name_or_path"],
-                        output_dict["text"],
-                        use_azure,
-                        temperature,
-                        top_p,
-                        output_dir=os.path.dirname(output_file),
-                        instance_id=instance_id,
-                        **model_args,
-                    )
-                
-                if response is None:
-                    continue
+        output_dict = {"instance_id": instance_id}
+        output_dict.update(basic_args)
+        output_dict["text"] = f"{datum['text']}\n\n"
+        data_to_process.append((instance_id, output_dict, model_args.copy()))
+    
+    if not data_to_process:
+        logger.info(f"No new instances to process for {model_name_or_path}")
+        return 0
+    
+    total_cost = 0
+    processed_count = 0
+    
+    # Create thread-safe locks for shared resources
+    output_lock = threading.Lock()
+    cost_lock = threading.Lock()
+    
+    # Semaphore to limit concurrent API requests
+    api_semaphore = threading.Semaphore(max_concurrent_requests)
+    
+    # Flag to signal early termination
+    stop_processing = threading.Event()
+    
+    # Progress bar
+    pbar = tqdm(total=len(data_to_process), desc=f"Inference for {model_name_or_path}")
+    
+    def process_instance(args):
+        """Worker function to process a single instance with retry logic"""
+        nonlocal total_cost, processed_count
+        
+        instance_id, output_dict, instance_args = args
+        output_dir = os.path.dirname(output_file)
+        
+        # Skip if we've reached max cost
+        if stop_processing.is_set():
+            return None
+        
+        # Limit concurrent API requests
+        with api_semaphore:
+            retry_attempts = 0
+            max_retries = 3
+            
+            while retry_attempts < max_retries and not stop_processing.is_set():
+                try:
+                    # Choose appropriate API based on model name
+                    if output_dict["model_name_or_path"].startswith("o1"):
+                        response, cost, patch_text = call_responses_with_validation(
+                            output_dict["model_name_or_path"],
+                            output_dict["text"],
+                            temperature,
+                            top_p,
+                            output_dir=output_dir,
+                            instance_id=instance_id,
+                            **instance_args,
+                        )
+                    else:
+                        response, cost, patch_text = call_chat_with_validation(
+                            output_dict["model_name_or_path"],
+                            output_dict["text"],
+                            use_azure,
+                            temperature,
+                            top_p,
+                            output_dir=output_dir,
+                            instance_id=instance_id,
+                            **instance_args,
+                        )
                     
-                total_cost += cost
-                print(f"Total Cost: {total_cost:.2f}")
+                    # Skip if no valid response
+                    if response is None:
+                        logger.warning(f"[{instance_id}] Generated invalid response")
+                        break
+                    
+                    # Store the validated response
+                    if output_dict["model_name_or_path"].startswith("o1"):
+                        output_dict["full_output"] = response["choices"][0]["message"]["content"]
+                    else:
+                        output_dict["full_output"] = response.choices[0].message.content
+                    
+                    output_dict["model_patch"] = patch_text
+                    
+                    # Update costs and write output in a thread-safe way
+                    with cost_lock:
+                        total_cost += cost
+                        current_cost = total_cost
+                        
+                        # Check if we've hit max cost
+                        if max_cost is not None and current_cost >= max_cost:
+                            stop_processing.set()
+                    
+                    # Write to output file
+                    with output_lock:
+                        with open(output_file, "a+") as f:
+                            print(json.dumps(output_dict), file=f, flush=True)
+                        
+                        # Log cost occasionally
+                        with cost_lock:
+                            processed_count += 1
+                            if processed_count % 5 == 0:  # Log every 5 completed instances
+                                print(f"Processed {processed_count}/{len(data_to_process)}, Total Cost: ${current_cost:.4f}")
+                    
+                    return True
+                    
+                except Exception as e:
+                    retry_attempts += 1
+                    # Check for rate limit errors
+                    if "rate limit" in str(e).lower() or "too many requests" in str(e).lower():
+                        wait_time = min(2 ** retry_attempts, 60)  # Exponential backoff capped at 60 seconds
+                        logger.warning(f"[{instance_id}] Rate limit hit, retrying in {wait_time}s (attempt {retry_attempts}/{max_retries})")
+                        time.sleep(wait_time)
+                    elif retry_attempts < max_retries:
+                        wait_time = min(2 ** retry_attempts, 30)
+                        logger.warning(f"[{instance_id}] Error: {e}, retrying in {wait_time}s (attempt {retry_attempts}/{max_retries})")
+                        time.sleep(wait_time)
+                    else:
+                        # For other errors on last attempt, log and break
+                        logger.error(f"[{instance_id}] Error: {e}")
+                        traceback.print_exc()
+                        break
+            
+            return False
+    
+    try:
+        print(f"Processing {len(data_to_process)} instances with {max_workers} workers")
+        
+        # Process instances in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks to the executor
+            future_to_instance = {
+                executor.submit(process_instance, args): args[0]  # Map future to instance_id
+                for args in data_to_process
+            }
+            
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_instance):
+                instance_id = future_to_instance[future]
+                try:
+                    result = future.result()
+                    if stop_processing.is_set():
+                        logger.info(f"Skipping remaining instances due to max cost or interrupt")
+                        # Cancel any pending futures
+                        for pending_future in future_to_instance:
+                            if not pending_future.done():
+                                pending_future.cancel()
+                except Exception as e:
+                    logger.error(f"[{instance_id}] Worker thread error: {e}")
+                    traceback.print_exc()
                 
-                # Store the validated response
-                if model_name_or_path.startswith("o1"):
-                    output_dict["full_output"] = response["choices"][0]["message"]["content"]
-                else:
-                    output_dict["full_output"] = response.choices[0].message.content
-                output_dict["model_patch"] = patch_text
+                # Update progress bar
+                pbar.update(1)
                 
-                print(json.dumps(output_dict), file=f, flush=True)
-                
-                if max_cost is not None and total_cost >= max_cost:
-                    print(f"Reached max cost {max_cost}, exiting")
+                # Check for early termination
+                if stop_processing.is_set():
                     break
-                    
-            except Exception as e:
-                logger.error(f"Error processing instance {instance_id}: {e}")
-                traceback.print_exc()
-                continue
+    
+    finally:
+        pbar.close()
+    
+    print(f"Completed OpenAI inference for {model_name_or_path}")
+    print(f"Processed {processed_count}/{len(data_to_process)} instances")
+    print(f"Total Cost: ${total_cost:.4f}")
+    
+    return total_cost
 
 
 #####################################
@@ -1697,6 +1854,310 @@ def together_inference(
 
 
 #####################################
+#          Grok API                 #
+#####################################
+
+def call_grok(model_name_or_path, inputs, temperature, top_p, instance_id=None, **model_args):
+    """
+    Calls the xAI Grok API to generate completions for the given inputs.
+    Uses OpenAI's client library with a custom base URL.
+    """
+    logger.info(f"Making API call for instance {instance_id}")
+    system_messages = inputs.split("\n", 1)[0]
+    user_message = inputs.split("\n", 1)[1]
+    
+    # Get Grok API keys
+    grok_key = os.environ.get("GROK_API_KEY", None)
+    if grok_key is None:
+        raise ValueError(
+            "Must provide an api key. Expected in GROK_API_KEY environment variable."
+        )
+    
+    try:
+        # Initialize the OpenAI client with xAI's base URL
+        client = OpenAI(
+            api_key=grok_key,
+            base_url="https://api.x.ai/v1"
+        )
+        
+        # Prepare request arguments
+        request_args = model_args.copy()
+        if "max_tokens" not in request_args:
+            request_args["max_tokens"] = 16384
+            
+        # Call the chat completions API
+        response = client.chat.completions.create(
+            model=model_name_or_path,
+            messages=[
+                {"role": "system", "content": system_messages},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=temperature,
+            top_p=top_p,
+            **request_args,
+        )
+        
+        # Extract tokens used
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        
+        # Calculate cost
+        cost = calc_cost(model_name_or_path, input_tokens, output_tokens)
+        
+        logger.info(f"[{instance_id}] Successfully received Grok response (input:{input_tokens}, output:{output_tokens})")
+        return response, cost
+        
+    except Exception as e:
+        # Handling different error types
+        error_msg = str(e).lower()
+        
+        # Handle rate limit errors
+        if "rate limit" in error_msg or "too many requests" in error_msg or "429" in error_msg:
+            rate_limit_error = ValueError(f"Rate limit exceeded: {str(e)}")
+            rate_limit_error.is_rate_limit = True
+            logger.warning(f"[{instance_id}] Hit Grok rate limit: {str(e)}")
+            raise rate_limit_error
+            
+        # Handle context length errors
+        elif "context length" in error_msg or "too long" in error_msg:
+            logger.warning(f"[{instance_id}] Context length exceeded: {str(e)}")
+            return None, 0
+            
+        # Handle authorization errors
+        elif "unauthorized" in error_msg or "authentication" in error_msg or "401" in error_msg:
+            logger.error(f"[{instance_id}] Grok authentication error: {str(e)}")
+            raise ValueError(f"Grok authentication error: {str(e)}")
+            
+        # Handle model not found errors
+        elif "model not found" in error_msg or "404" in error_msg:
+            logger.error(f"[{instance_id}] Model not found: {str(e)}")
+            raise ValueError(f"Model not found: {str(e)}. Check if '{model_name_or_path}' is valid.")
+            
+        # Other errors
+        else:
+            logger.error(f"[{instance_id}] Error calling Grok API: {str(e)}")
+            traceback.print_exc()
+            raise e
+
+@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3), retry=lambda e: hasattr(e, 'is_rate_limit') and e.is_rate_limit)
+def call_grok_with_validation(model_name_or_path, inputs, temperature, top_p, output_dir=None, instance_id=None, **model_args):
+    """
+    Calls the Grok API and validates the response patch. 
+    Retries automatically on validation failure or rate limits.
+    Returns (response, cost, patch_text) tuple if successful, or (None, 0, None) if all attempts fail.
+    """
+    logger.info(f"Making Grok API call with validation for instance {instance_id}")
+    response, cost = call_grok(model_name_or_path, inputs, temperature, top_p, instance_id=instance_id, **model_args)
+    if response is None:
+        return None, 0, None
+        
+    completion = response.choices[0].message.content
+    patch_text, error_msg = validate_and_extract_patch(
+        completion,
+        output_dir=output_dir,
+        instance_id=instance_id
+    )
+    
+    if patch_text is None:
+        # Validation failed - raise exception to trigger retry
+        logger.warning(f"[{instance_id}] Grok patch validation failed: {error_msg}")
+        raise ValueError(f"Patch validation failed: {error_msg}")
+    
+    logger.info(f"[{instance_id}] Successfully validated Grok patch")   
+    return response, cost, patch_text
+
+def grok_inference(
+    test_dataset,
+    model_name_or_path,
+    output_file,
+    model_args,
+    existing_ids,
+    max_cost,
+):
+    """
+    Runs inference on a dataset using the Grok API with parallel processing.
+    """    
+    # Initialize the Grok API token
+    api_key = os.environ.get("GROK_API_KEY", None)
+    if api_key is None:
+        raise ValueError(
+            "Must provide an api key. Expected in GROK_API_KEY environment variable."
+        )
+    
+    print(f"Using xAI Grok key {'*' * max(0, len(api_key)-5) + api_key[-5:]}")
+    
+    # Filter the dataset to include only instances that fit within the context window
+    encoding = model_name_or_path  # Pass the model name instead of the encoding object
+    print(f"Model name: {model_name_or_path}")
+    print(f"Model limits: {MODEL_LIMITS[model_name_or_path]}")
+    test_dataset = test_dataset.filter(
+        lambda x: gpt_tokenize(x["text"], encoding) <= MODEL_LIMITS[model_name_or_path],
+        desc="Filtering",
+        load_from_cache_file=False,
+    )
+    
+    temperature = model_args.pop("temperature", 0.2)
+    top_p = model_args.pop("top_p", 0.95 if temperature > 0 else 1)
+    print(f"Using temperature={temperature}, top_p={top_p}")
+    
+    basic_args = {
+        "model_name_or_path": model_name_or_path,
+    }
+    
+    # Set up for parallel processing
+    max_workers = model_args.pop("max_workers", 10)  # Default to 10 parallel workers
+    max_concurrent_requests = model_args.pop("max_concurrent_requests", 5)  # Default to 5 concurrent API calls
+    
+    # Prepare data for parallel processing
+    data_to_process = []
+    for datum in test_dataset:
+        instance_id = datum["instance_id"]
+        if instance_id in existing_ids:
+            continue
+            
+        output_dict = {"instance_id": instance_id}
+        output_dict.update(basic_args)
+        output_dict["text"] = f"{datum['text']}\n\n"
+        data_to_process.append((instance_id, output_dict, model_args.copy()))
+    
+    if not data_to_process:
+        logger.info(f"No new instances to process for {model_name_or_path}")
+        return 0
+    
+    total_cost = 0
+    processed_count = 0
+    
+    # Create thread-safe locks for shared resources
+    output_lock = threading.Lock()
+    cost_lock = threading.Lock()
+    
+    # Semaphore to limit concurrent API requests
+    api_semaphore = threading.Semaphore(max_concurrent_requests)
+    
+    # Flag to signal early termination
+    stop_processing = threading.Event()
+    
+    # Progress bar
+    pbar = tqdm(total=len(data_to_process), desc=f"Inference for {model_name_or_path}")
+    
+    def process_instance(args):
+        """Worker function to process a single instance with retry logic"""
+        nonlocal total_cost, processed_count
+        
+        instance_id, output_dict, instance_args = args
+        output_dir = os.path.dirname(output_file)
+        
+        # Skip if we've reached max cost
+        if stop_processing.is_set():
+            return None
+        
+        # Limit concurrent API requests
+        with api_semaphore:
+            retry_attempts = 0
+            max_retries = 5
+            
+            while retry_attempts < max_retries and not stop_processing.is_set():
+                try:
+                    response, cost, patch_text = call_grok_with_validation(
+                        model_name_or_path,
+                        output_dict["text"],
+                        temperature,
+                        top_p,
+                        output_dir=output_dir,
+                        instance_id=instance_id,
+                        **instance_args
+                    )
+                    
+                    # Skip if no valid response
+                    if response is None:
+                        logger.warning(f"[{instance_id}] Generated invalid Grok response")
+                        break
+                    
+                    # Update the output dictionary with results
+                    output_dict["full_output"] = response.choices[0].message.content
+                    output_dict["model_patch"] = patch_text
+                    
+                    # Update costs and write output in a thread-safe way
+                    with cost_lock:
+                        total_cost += cost
+                        current_cost = total_cost
+                        
+                        # Check if we've hit max cost
+                        if max_cost is not None and current_cost >= max_cost:
+                            stop_processing.set()
+                    
+                    # Write to output file
+                    with output_lock:
+                        with open(output_file, "a+") as f:
+                            print(json.dumps(output_dict), file=f, flush=True)
+                        
+                        # Log cost occasionally
+                        with cost_lock:
+                            processed_count += 1
+                            if processed_count % 5 == 0:  # Log every 5 completed instances
+                                print(f"Processed {processed_count}/{len(data_to_process)}, Total Cost: ${current_cost:.4f}")
+                    
+                    return True
+                    
+                except Exception as e:
+                    # Check if it's a rate limit error
+                    if hasattr(e, 'is_rate_limit') and e.is_rate_limit:
+                        retry_attempts += 1
+                        wait_time = min(2 ** retry_attempts, 60)  # Exponential backoff capped at 60 seconds
+                        logger.warning(f"[{instance_id}] Grok rate limit hit, retrying in {wait_time}s (attempt {retry_attempts}/{max_retries})")
+                        time.sleep(wait_time)
+                    else:
+                        # For other errors, log and break
+                        logger.error(f"[{instance_id}] Grok error: {e}")
+                        traceback.print_exc()
+                        break
+            
+            return False
+    
+    try:
+        print(f"Processing {len(data_to_process)} instances with {max_workers} workers")
+        
+        # Process instances in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks to the executor
+            future_to_instance = {
+                executor.submit(process_instance, args): args[0]  # Map future to instance_id
+                for args in data_to_process
+            }
+            
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_instance):
+                instance_id = future_to_instance[future]
+                try:
+                    result = future.result()
+                    if stop_processing.is_set():
+                        logger.info(f"Skipping remaining instances due to max cost or interrupt")
+                        # Cancel any pending futures
+                        for pending_future in future_to_instance:
+                            if not pending_future.done():
+                                pending_future.cancel()
+                except Exception as e:
+                    logger.error(f"[{instance_id}] Grok worker thread error: {e}")
+                    traceback.print_exc()
+                
+                # Update progress bar
+                pbar.update(1)
+                
+                # Check for early termination
+                if stop_processing.is_set():
+                    break
+    
+    finally:
+        pbar.close()
+    
+    print(f"Completed Grok inference for {model_name_or_path}")
+    print(f"Processed {processed_count}/{len(data_to_process)} instances")
+    print(f"Total Cost: ${total_cost:.4f}")
+    
+    return total_cost
+
+
+#####################################
 #          Main Inference Loop       #
 #####################################
 
@@ -1719,7 +2180,7 @@ def run_inference_for_model(
     }
     if model_name_or_path.startswith("claude"):
         anthropic_inference(**inference_args)
-    elif model_name_or_path.startswith("gpt") or model_name_or_path.startswith("o1") or model_name_or_path.startswith("o3"):
+    elif model_name_or_path.startswith("gpt") or model_name_or_path.startswith("o1") or model_name_or_path.startswith("o3") or model_name_or_path.startswith("o4"):
         openai_inference(**inference_args)
     elif model_name_or_path in FIREWORKS_MODEL_PATHS:
         fireworks_inference(**inference_args)
@@ -1727,6 +2188,8 @@ def run_inference_for_model(
         together_inference(**inference_args)
     elif model_name_or_path.startswith("gemini"):
         gemini_inference(**inference_args)
+    elif model_name_or_path.startswith("grok"):
+        grok_inference(**inference_args)
     else:
         raise ValueError(f"Invalid model name or path {model_name_or_path}")
     logger.info(f"Done with model {model_name_or_path}!")

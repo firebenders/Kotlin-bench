@@ -100,4 +100,4 @@ The Modal-based system differs from the original evaluation system in several wa
 4. JDK and Android SDK installations are shared across runs
 5. Evaluation results are handled differently due to the distributed nature
 
-Despite these differences, the evaluation criteria and outcome determination remain the same. 
+Despite these differences, the evaluation criteria and outcome determination remain the same.

@@ -1,4 +1,4 @@
-## See latest [results](https://firebender.com/leaderboard)
+## 🏆 See latest [results](https://firebender.com/leaderboard)
 
 <img src="assets/results-teaser.png">
 

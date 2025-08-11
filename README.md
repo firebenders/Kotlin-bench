@@ -1,9 +1,13 @@
+## See latest [results](https://firebender.com/leaderboard)
+
+<img src="assets/results-teaser.png">
+
 ## 📰 Changelog
 * **[Apr. 3, 2025]**: Firebender team introduces Kotlin-bench in this [blog post](https://firebender.com/blog/kotlin-bench).
 
 ## 👋 Overview
 
-Kotlin-bench is a spinoff of [SWE-bench](https://www.swebench.com/) and is the first benchmark that evaluates Large Language Models (LLMs) and AI agents on 100 real-world Kotlin and Android software engineering tasks.
+Kotlin-bench is a spinoff of [SWE-bench](https://www.swebench.com/) and is the first benchmark that evaluates Large Language Models (LLMs) and AI agents on 100 real-world Kotlin and Android software engineering tasks. It was created and maintained by the engineering team behind [Firebender](https://firebender.com).
 
 Given a *codebase* and an *issue*, a language model is tasked with generating a *patch* that resolves the described problem.
 
@@ -49,3 +53,7 @@ Feel free to email me directly at aman@firebender.com
 
 ## 🪪 License
 MIT. Check `LICENSE.md`.
+
+## What is Firebender?
+
+Firebender, is Cursor but for Android Studio. It's the best coding agent in Android Studio and Jetbrains IDEs, with integrations into the preview window, kotlin LSP, and more. Here's a [30-second](https://firebender.com/blog/cursor-for-android-studio) walkthrough!

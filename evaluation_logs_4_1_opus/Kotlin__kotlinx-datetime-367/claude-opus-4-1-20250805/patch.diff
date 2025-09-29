@@ -1,0 +1,1418 @@
+[start of core/common/src/Clock.kt]
+/*
+ * Copyright 2019-2020 JetBrains s.r.o.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime
+
+import kotlin.time.*
+
+/**
+ * A source of [Instant] values.
+ *
+ * A `Clock` provides access to the current instant. The most common implementation is [Clock.System],
+ * which uses the system's real-time clock. Custom implementations can be created for testing purposes
+ * or to provide alternative time sources.
+ *
+ * ### Obtaining a Clock
+ *
+ * The primary way to obtain a `Clock` is through [Clock.System]:
+ * ```
+ * val clock = Clock.System
+ * val currentTime = clock.now()
+ * ```
+ *
+ * ### Custom Implementations
+ *
+ * For testing, you can create a custom `Clock` implementation:
+ * ```
+ * class TestClock(private var instant: Instant) : Clock {
+ *     override fun now(): Instant = instant
+ *     fun advance(duration: Duration) { instant += duration }
+ * }
+ * ```
+ *
+ * ### Platform Specifics
+ *
+ * - **JVM**: Uses `java.time.Clock.systemUTC()` internally
+ * - **JS**: Uses `Date.now()` internally
+ * - **Native**: Uses platform-specific system time APIs
+ *
+ * ### Time Scale
+ *
+ * All `Clock` implementations return instants on the UTC-SLS time scale, which handles leap seconds
+ * through "smearing" rather than discrete jumps.
+ *
+ * @see Clock.System for the default system clock
+ * @see Instant for the time values returned by clocks
+ */
+public interface Clock {
+    /**
+     * Returns the [Instant] corresponding to the current time, according to this clock.
+     *
+     * The returned instant represents a specific moment in time on the UTC-SLS time scale.
+     * Multiple calls to this function may return the same value if called in quick succession,
+     * depending on the resolution of the underlying clock implementation.
+     *
+     * ### Example
+     * ```
+     * val clock = Clock.System
+     * val instant1 = clock.now()
+     * // ... some time passes ...
+     * val instant2 = clock.now()
+     * val elapsed = instant2 - instant1
+     * ```
+     *
+     * @return the current instant according to this clock
+     */
+    public fun now(): Instant
+
+    /**
+     * The system clock instance that queries the operating system's real-time clock.
+     *
+     * This clock represents "wall clock" time and advances at the same rate as real time.
+     * The exact instant returned depends on the system's time settings and may jump backwards
+     * or forwards if the system time is adjusted.
+     *
+     * ### Platform Implementation Details
+     *
+     * - **JVM**: Equivalent to `java.time.Clock.systemUTC()`
+     * - **JS**: Uses JavaScript's `Date.now()`
+     * - **Native**: Uses platform-specific system calls (e.g., `clock_gettime` on POSIX systems)
+     *
+     * ### Example
+     * ```
+     * val currentTime = Clock.System.now()
+     * println("Current time: $currentTime")
+     * 
+     * // Get today's date in a specific time zone
+     * val today = Clock.System.todayIn(TimeZone.currentSystemDefault())
+     * ```
+     *
+     * ### Considerations
+     *
+     * - The resolution varies by platform (typically milliseconds to nanoseconds)
+     * - System time adjustments affect the values returned
+     * - For testing, consider injecting a `Clock` interface rather than using `System` directly
+     */
+    public object System : Clock {
+        override fun now(): Instant = @Suppress("DEPRECATION_ERROR") Instant.now()
+    }
+
+    public companion object {
+
+    }
+}
+
+/**
+ * Returns the current date at the given [time zone][timeZone], according to this [Clock].
+ *
+ * The returned date is calculated by converting the current instant to a local date-time
+ * in the specified time zone and extracting the date component.
+ *
+ * ### Example
+ * ```
+ * val clock = Clock.System
+ * 
+ * // Get today's date in UTC
+ * val todayUtc = clock.todayIn(TimeZone.UTC)
+ * 
+ * // Get today's date in the system's default time zone
+ * val todayLocal = clock.todayIn(TimeZone.currentSystemDefault())
+ * 
+ * // These may be different dates if it's near midnight
+ * if (todayUtc != todayLocal) {
+ *     println("It's already tomorrow in some time zone!")
+ * }
+ * ```
+ *
+ * @param timeZone the time zone to use for determining the current date
+ * @return the current date in the specified time zone
+ * @see TimeZone for available time zones
+ * @see LocalDate for the returned date type
+ */
+public fun Clock.todayIn(timeZone: TimeZone): LocalDate =
+    now().toLocalDateTime(timeZone).date
+
+/**
+ * Returns a [TimeSource] that uses this [Clock] to mark a time instant and to find the amount of time elapsed since that mark.
+ *
+ * This allows a `Clock` to be used with Kotlin's duration measurement APIs.
+ *
+ * ### Example
+ * ```
+ * val timeSource = Clock.System.asTimeSource()
+ * val mark = timeSource.markNow()
+ * 
+ * // ... perform some operation ...
+ * 
+ * val elapsed = mark.elapsedNow()
+ * println("Operation took: $elapsed")
+ * ```
+ *
+ * @return a TimeSource that uses this Clock for time measurements
+ */
+@ExperimentalTime
+public fun Clock.asTimeSource(): TimeSource.WithComparableMarks = object : TimeSource.WithComparableMarks {
+    override fun markNow(): ComparableTimeMark = InstantTimeMark(now(), this@asTimeSource)
+}
+
+@ExperimentalTime
+private class InstantTimeMark(private val instant: Instant, private val clock: Clock) : ComparableTimeMark {
+    override fun elapsedNow(): Duration = saturatingDiff(clock.now(), instant)
+
+    override fun plus(duration: Duration): ComparableTimeMark = InstantTimeMark(instant.saturatingAdd(duration), clock)
+    override fun minus(duration: Duration): ComparableTimeMark = InstantTimeMark(instant.saturatingAdd(-duration), clock)
+
+    override fun minus(other: ComparableTimeMark): Duration {
+        if (other !is InstantTimeMark || other.clock != this.clock) {
+            throw IllegalArgumentException("Subtracting or comparing time marks from different time sources is not possible: $this and $other")
+        }
+        return saturatingDiff(this.instant, other.instant)
+    }
+
+    override fun equals(other: Any?): Boolean {
+        return other is InstantTimeMark && this.clock == other.clock && this.instant == other.instant
+    }
+
+    override fun hashCode(): Int = instant.hashCode()
+
+    override fun toString(): String = "InstantTimeMark($instant, $clock)"
+
+    private fun Instant.isSaturated() = this == Instant.MAX || this == Instant.MIN
+    private fun Instant.saturatingAdd(duration: Duration): Instant {
+        if (isSaturated()) {
+            if (duration.isInfinite() && duration.isPositive() != this.isDistantFuture) {
+                throw IllegalArgumentException("Summing infinities of different signs")
+            }
+            return this
+        }
+        return this + duration
+    }
+    private fun saturatingDiff(instant1: Instant, instant2: Instant): Duration = when {
+        instant1 == instant2 ->
+            Duration.ZERO
+        instant1.isSaturated() || instant2.isSaturated() ->
+            (instant1 - instant2) * Double.POSITIVE_INFINITY
+        else ->
+            instant1 - instant2
+    }
+}
+
+@Deprecated("Use Clock.todayIn instead", ReplaceWith("this.todayIn(timeZone)"), DeprecationLevel.WARNING)
+public fun Clock.todayAt(timeZone: TimeZone): LocalDate = todayIn(timeZone)
+[end of core/common/src/Clock.kt]
+[start of core/common/src/Instant.kt]
+/*
+ * Copyright 2019-2020 JetBrains s.r.o.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime
+
+import kotlinx.datetime.format.*
+import kotlinx.datetime.internal.*
+import kotlinx.datetime.serializers.InstantIso8601Serializer
+import kotlinx.serialization.Serializable
+import kotlin.time.*
+
+/**
+ * A moment in time.
+ *
+ * An `Instant` represents a specific point on the timeline, independent of any time zone or calendar system.
+ * It's defined as a number of seconds and nanoseconds since the Unix epoch (1970-01-01T00:00:00Z).
+ *
+ * ### Time Scale
+ *
+ * `Instant` uses the UTC-SLS (Coordinated Universal Time with Smoothed Leap Seconds) time scale.
+ * This means leap seconds are "smeared" over the last 1000 seconds of the day when they occur,
+ * rather than creating a discontinuity. This ensures that time always moves forward monotonically.
+ *
+ * ### Obtaining Instances
+ *
+ * Instants can be obtained in several ways:
+ * ```
+ * // Current moment
+ * val now = Clock.System.now()
+ * 
+ * // From epoch milliseconds
+ * val instant1 = Instant.fromEpochMilliseconds(1234567890123)
+ * 
+ * // From epoch seconds
+ * val instant2 = Instant.fromEpochSeconds(1234567890, nanosecondAdjustment = 123456789)
+ * 
+ * // Parsing ISO-8601 string
+ * val instant3 = Instant.parse("2023-01-15T12:30:45.123Z")
+ * ```
+ *
+ * ### Converting to Local Time
+ *
+ * To interpret an instant as a human-readable date and time, convert it using a time zone:
+ * ```
+ * val instant = Clock.System.now()
+ * val localDateTime = instant.toLocalDateTime(TimeZone.currentSystemDefault())
+ * println("Local time: ${localDateTime.date} ${localDateTime.time}")
+ * ```
+ *
+ * ### Arithmetic Operations
+ *
+ * Instants support arithmetic with [Duration]:
+ * ```
+ * val instant = Clock.System.now()
+ * val tomorrow = instant + 24.hours
+ * val yesterday = instant - 24.hours
+ * val difference = tomorrow - instant // Returns a Duration
+ * ```
+ *
+ * For calendar-based arithmetic (adding months, years), use [DateTimePeriod]:
+ * ```
+ * val instant = Clock.System.now()
+ * val nextMonth = instant.plus(1, DateTimeUnit.MONTH, TimeZone.UTC)
+ * ```
+ *
+ * ### Platform Specifics
+ *
+ * - **JVM**: Wraps `java.time.Instant`
+ * - **JS**: Uses millisecond precision internally
+ * - **Native**: Custom implementation with nanosecond precision
+ *
+ * ### Range Limitations
+ *
+ * The supported range of instants is platform-dependent but guaranteed to include at least:
+ * - From [Instant.DISTANT_PAST]: `-100001-12-31T23:59:59.999999999Z`
+ * - To [Instant.DISTANT_FUTURE]: `+100000-01-01T00:00:00Z`
+ *
+ * @see Clock.System.now for obtaining the current instant
+ * @see LocalDateTime for civil date-time representation
+ * @see TimeZone for converting between instant and local time
+ */
+@Serializable(with = InstantIso8601Serializer::class)
+public expect class Instant : Comparable<Instant> {
+
+    /**
+     * The number of seconds from the Unix epoch instant `1970-01-01T00:00:00Z`.
+     *
+     * The value is rounded towards negative infinity if the actual instant includes fractional seconds.
+     * Use [nanosecondsOfSecond] to get the fractional part.
+     *
+     * ### Example
+     * ```
+     * val instant = Instant.parse("2023-01-15T12:30:45.123456789Z")
+     * println(instant.epochSeconds) // Number of whole seconds since 1970-01-01T00:00:00Z
+     * println(instant.nanosecondsOfSecond) // 123456789
+     * ```
+     *
+     * Note that this number doesn't include leap seconds added or removed since the epoch.
+     *
+     * @see Instant.fromEpochSeconds for the inverse operation
+     * @see nanosecondsOfSecond for the fractional part
+     */
+    public val epochSeconds: Long
+
+    /**
+     * The number of nanoseconds by which this instant is later than [epochSeconds] from the epoch instant.
+     *
+     * The value is always positive and lies in the range `0..999_999_999`.
+     *
+     * ### Example
+     * ```
+     * val instant = Instant.fromEpochSeconds(1234567890, nanosecondAdjustment = 123456789)
+     * println(instant.epochSeconds) // 1234567890
+     * println(instant.nanosecondsOfSecond) // 123456789
+     * ```
+     *
+     * @see Instant.fromEpochSeconds for constructing instants from components
+     */
+    public val nanosecondsOfSecond: Int
+
+    /**
+     * Returns the number of milliseconds from the Unix epoch instant `1970-01-01T00:00:00Z`.
+     *
+     * Any fractional part of millisecond is rounded towards negative infinity.
+     *
+     * If the result does not fit in [Long], returns [Long.MAX_VALUE] for instants after the epoch
+     * or [Long.MIN_VALUE] for instants before the epoch.
+     *
+     * ### Example
+     * ```
+     * val instant = Clock.System.now()
+     * val millis = instant.toEpochMilliseconds()
+     * 
+     * // Round-trip conversion (may lose nanosecond precision)
+     * val restored = Instant.fromEpochMilliseconds(millis)
+     * ```
+     *
+     * @see Instant.fromEpochMilliseconds for the inverse operation
+     */
+    public fun toEpochMilliseconds(): Long
+
+    /**
+     * Returns an instant that is the result of adding the specified [duration] to this instant.
+     *
+     * If the [duration] is positive, the returned instant is later than this instant.
+     * If the [duration] is negative, the returned instant is earlier than this instant.
+     *
+     * ### Example
+     * ```
+     * val now = Clock.System.now()
+     * val inOneHour = now + 1.hours
+     * val yesterday = now + (-24).hours
+     * ```
+     *
+     * The return value is clamped to the platform-specific boundaries for [Instant] if the result exceeds them.
+     *
+     * @param duration the duration to add, can be negative
+     * @return the instant after adding the duration
+     */
+    public operator fun plus(duration: Duration): Instant
+
+    /**
+     * Returns an instant that is the result of subtracting the specified [duration] from this instant.
+     *
+     * If the [duration] is positive, the returned instant is earlier than this instant.
+     * If the [duration] is negative, the returned instant is later than this instant.
+     *
+     * ### Example
+     * ```
+     * val now = Clock.System.now()
+     * val oneHourAgo = now - 1.hours
+     * val tomorrow = now - (-24).hours
+     * ```
+     *
+     * The return value is clamped to the platform-specific boundaries for [Instant] if the result exceeds them.
+     *
+     * @param duration the duration to subtract, can be negative
+     * @return the instant after subtracting the duration
+     */
+    public operator fun minus(duration: Duration): Instant
+
+    /**
+     * Returns the [Duration] between two instants: [other] and `this`.
+     *
+     * The duration returned is positive if this instant is later than the other,
+     * and negative if this instant is earlier than the other.
+     *
+     * ### Example
+     * ```
+     * val start = Clock.System.now()
+     * // ... perform some operation ...
+     * val end = Clock.System.now()
+     * val elapsed = end - start
+     * println("Operation took: $elapsed")
+     * ```
+     *
+     * The result is never clamped, but note that for instants that are far apart,
+     * the value returned may represent the duration between them inexactly due to the loss of precision.
+     *
+     * @param other the instant to subtract from this one
+     * @return the duration between the instants
+     */
+    public operator fun minus(other: Instant): Duration
+
+    /**
+     * Compares this instant with the [other] instant.
+     * 
+     * Returns zero if this instant represents the same moment as the other,
+     * a negative number if this instant is earlier than the other,
+     * and a positive number if this instant is later than the other.
+     *
+     * ### Example
+     * ```
+     * val instant1 = Instant.parse("2023-01-15T12:00:00Z")
+     * val instant2 = Instant.parse("2023-01-15T13:00:00Z")
+     * 
+     * if (instant1 < instant2) {
+     *     println("instant1 is earlier")
+     * }
+     * ```
+     *
+     * @param other the instant to compare with
+     * @return the comparison result
+     */
+    public override operator fun compareTo(other: Instant): Int
+
+    /**
+     * Converts this instant to the ISO-8601 string representation.
+     *
+     * The format is: `yyyy-MM-ddTHH:mm:ss[.SSS]Z` where:
+     * - `yyyy` is the year (may include a sign for years outside 0000-9999)
+     * - `MM` is the month (01-12)
+     * - `dd` is the day (01-31)
+     * - `HH` is the hour (00-23)
+     * - `mm` is the minute (00-59)
+     * - `ss` is the second (00-59)
+     * - `SSS` is the fractional second (included only if non-zero, padded to multiples of 3)
+     * - `Z` indicates UTC
+     *
+     * ### Example
+     * ```
+     * val instant = Clock.System.now()
+     * println(instant.toString()) // e.g., "2023-01-15T12:30:45.123Z"
+     * ```
+     *
+     * The representation uses the UTC-SLS time scale. Leap seconds will not result in
+     * a seconds value of 60.
+     *
+     * @see Instant.parse for the inverse operation
+     * @see DateTimeComponents.Formats.ISO_DATE_TIME_OFFSET for a similar format
+     */
+    public override fun toString(): String
+
+
+    public companion object {
+        @Deprecated("Use Clock.System.now() instead", ReplaceWith("Clock.System.now()", "kotlinx.datetime.Clock"), level = DeprecationLevel.ERROR)
+        public fun now(): Instant
+
+        /**
+         * Creates an [Instant] from the number of milliseconds since the Unix epoch.
+         *
+         * The Unix epoch is `1970-01-01T00:00:00Z`.
+         *
+         * ### Example
+         * ```
+         * val millis = System.currentTimeMillis() // On JVM
+         * val instant = Instant.fromEpochMilliseconds(millis)
+         * 
+         * // Round-trip conversion
+         * val original = Clock.System.now()
+         * val converted = Instant.fromEpochMilliseconds(original.toEpochMilliseconds())
+         * // Note: may lose nanosecond precision
+         * ```
+         *
+         * The return value is clamped to the platform-specific boundaries for [Instant] if the result exceeds them.
+         *
+         * @param epochMilliseconds the number of milliseconds since 1970-01-01T00:00:00Z
+         * @return the corresponding instant
+         * @see toEpochMilliseconds for the inverse operation
+         */
+        public fun fromEpochMilliseconds(epochMilliseconds: Long): Instant
+
+        /**
+         * Creates an [Instant] from the number of seconds and nanoseconds since the Unix epoch.
+         *
+         * ### Example
+         * ```
+         * val instant = Instant.fromEpochSeconds(1234567890, nanosecondAdjustment = 123456789)
+         * // Equivalent to: Instant.fromEpochSeconds(1234567890, 123456789)
+         * 
+         * // Can also handle nanoseconds exceeding 999,999,999
+         * val instant2 = Instant.fromEpochSeconds(1000, nanosecondAdjustment = 1_500_000_000L)
+         * // Results in 1001 seconds and 500,000,000 nanoseconds
+         * ```
+         *
+         * @param epochSeconds the number of seconds since 1970-01-01T00:00:00Z
+         * @param nanosecondAdjustment the nanosecond adjustment, can be outside 0..999,999,999
+         * @return the corresponding instant
+         */
+        public fun fromEpochSeconds(epochSeconds: Long, nanosecondAdjustment: Long = 0): Instant
+
+        /**
+         * Creates an [Instant] from the number of seconds and nanoseconds since the Unix epoch.
+         *
+         * This is a convenience overload for when the nanosecond adjustment fits in an [Int].
+         *
+         * @param epochSeconds the number of seconds since 1970-01-01T00:00:00Z
+         * @param nanosecondAdjustment the nanosecond adjustment (0..999,999,999)
+         * @return the corresponding instant
+         */
+        public fun fromEpochSeconds(epochSeconds: Long, nanosecondAdjustment: Int): Instant
+
+        /**
+         * Parses an ISO-8601 instant string and returns the parsed [Instant] value.
+         *
+         * The string must include date, time, and UTC offset components.
+         * The format is generally: `yyyy-MM-ddTHH:mm:ss[.SSS]Z` or with an offset like `+01:00`.
+         *
+         * ### Example
+         * ```
+         * val instant1 = Instant.parse("2023-01-15T12:30:45Z")
+         * val instant2 = Instant.parse("2023-01-15T12:30:45.123456789Z")
+         * val instant3 = Instant.parse("2023-01-15T14:30:45+02:00")
+         * ```
+         *
+         * The string is interpreted on the UTC-SLS time scale. Leap seconds (like `23:59:60`)
+         * are not supported and will cause parsing to fail.
+         *
+         * @param input the string to parse
+         * @param format the format to use for parsing (defaults to ISO-8601)
+         * @return the parsed instant
+         * @throws IllegalArgumentException if the string cannot be parsed or is out of range
+         * @see toString for formatting
+         */
+        public fun parse(
+            input: CharSequence,
+            format: DateTimeFormat<DateTimeComponents> = DateTimeComponents.Formats.ISO_DATE_TIME_OFFSET
+        ): Instant
+
+        /**
+         * An instant value that is far in the past.
+         *
+         * This is defined as `-100001-12-31T23:59:59.999999999Z`.
+         *
+         * All instants in the range `DISTANT_PAST..DISTANT_FUTURE` can be [converted][Instant.toLocalDateTime] to
+         * [LocalDateTime] without exceptions on all supported platforms.
+         *
+         * ### Example
+         * ```
+         * val veryOldDate = Instant.DISTANT_PAST
+         * val dateTime = veryOldDate.toLocalDateTime(TimeZone.UTC)
+         * println(dateTime) // -100001-12-31T23:59:59.999999999
+         * ```
+         */
+        public val DISTANT_PAST: Instant
+
+        /**
+         * An instant value that is far in the future.
+         *
+         * This is defined as `+100000-01-01T00:00:00Z`.
+         *
+         * All instants in the range `DISTANT_PAST..DISTANT_FUTURE` can be [converted][Instant.toLocalDateTime] to
+         * [LocalDateTime] without exceptions on all supported platforms.
+         *
+         * ### Example
+         * ```
+         * val farFuture = Instant.DISTANT_FUTURE
+         * val dateTime = farFuture.toLocalDateTime(TimeZone.UTC)
+         * println(dateTime) // +100000-01-01T00:00:00
+         * ```
+         */
+        public val DISTANT_FUTURE: Instant
+
+        internal val MIN: Instant
+        internal val MAX: Instant
+    }
+}
+
+/** Returns true if the instant is [Instant.DISTANT_PAST] or earlier. */
+public val Instant.isDistantPast: Boolean
+    get() = this <= Instant.DISTANT_PAST
+
+/** Returns true if the instant is [Instant.DISTANT_FUTURE] or later. */
+public val Instant.isDistantFuture: Boolean
+    get() = this >= Instant.DISTANT_FUTURE
+
+/**
+ * @suppress
+ */
+@Deprecated("Removed to support more idiomatic code. See https://github.com/Kotlin/kotlinx-datetime/issues/339", ReplaceWith("Instant.parse(this)"), DeprecationLevel.WARNING)
+public fun String.toInstant(): Instant = Instant.parse(this)
+
+/**
+ * Returns an instant that is the result of adding components of [DateTimePeriod] to this instant. The components are
+ * added in the order from the largest units to the smallest, i.e. from years to nanoseconds.
+ *
+ * @throws DateTimeArithmeticException if this value or the results of intermediate computations are too large to fit in
+ * [LocalDateTime].
+ */
+public expect fun Instant.plus(period: DateTimePeriod, timeZone: TimeZone): Instant
+
+/**
+ * Returns an instant that is the result of subtracting components of [DateTimePeriod] from this instant. The components
+ * are subtracted in the order from the largest units to the smallest, i.e. from years to nanoseconds.
+ *
+ * @throws DateTimeArithmeticException if this value or the results of intermediate computations are too large to fit in
+ * [LocalDateTime].
+ */
+public fun Instant.minus(period: DateTimePeriod, timeZone: TimeZone): Instant =
+    /* An overflow can happen for any component, but we are only worried about nanoseconds, as having an overflow in
+    any other component means that `plus` will throw due to the minimum value of the numeric type overflowing the
+    platform-specific limits. */
+    if (period.totalNanoseconds != Long.MIN_VALUE) {
+        val negatedPeriod = with(period) { buildDateTimePeriod(-totalMonths, -days, -totalNanoseconds) }
+        plus(negatedPeriod, timeZone)
+    } else {
+        val negatedPeriod = with(period) { buildDateTimePeriod(-totalMonths, -days, -(totalNanoseconds+1)) }
+        plus(negatedPeriod, timeZone).plus(1, DateTimeUnit.NANOSECOND)
+    }
+
+/**
+ * Returns a [DateTimePeriod] representing the difference between `this` and [other] instants.
+ *
+ * The components of [DateTimePeriod] are calculated so that adding it to `this` instant results in the [other] instant.
+ *
+ * All components of the [DateTimePeriod] returned are:
+ * - positive or zero if this instant is earlier than the other,
+ * - negative or zero if this instant is later than the other,
+ * - exactly zero if this instant is equal to the other.
+ *
+ * @throws DateTimeArithmeticException if `this` or [other] instant is too large to fit in [LocalDateTime].
+ *     Or (only on the JVM) if the number of months between the two dates exceeds an Int.
+ */
+public expect fun Instant.periodUntil(other: Instant, timeZone: TimeZone): DateTimePeriod
+
+/**
+ * Returns the whole number of the specified date or time [units][unit] between `this` and [other] instants
+ * in the specified [timeZone].
+ *
+ * The value returned is:
+ * - positive or zero if this instant is earlier than the other,
+ * - negative or zero if this instant is later than the other,
+ * - zero if this instant is equal to the other.
+ *
+ * If the result does not fit in [Long], returns [Long.MAX_VALUE] for a positive result or [Long.MIN_VALUE] for a negative result.
+ *
+ * @throws DateTimeArithmeticException if `this` or [other] instant is too large to fit in [LocalDateTime].
+ */
+public expect fun Instant.until(other: Instant, unit: DateTimeUnit, timeZone: TimeZone): Long
+
+/**
+ * Returns the whole number of the specified time [units][unit] between `this` and [other] instants.
+ *
+ * The value returned is:
+ * - positive or zero if this instant is earlier than the other,
+ * - negative or zero if this instant is later than the other,
+ * - zero if this instant is equal to the other.
+ *
+ * If the result does not fit in [Long], returns [Long.MAX_VALUE] for a positive result or [Long.MIN_VALUE] for a negative result.
+ */
+public fun Instant.until(other: Instant, unit: DateTimeUnit.TimeBased): Long =
+    try {
+        multiplyAddAndDivide(other.epochSeconds - epochSeconds,
+            NANOS_PER_ONE.toLong(),
+            (other.nanosecondsOfSecond - nanosecondsOfSecond).toLong(),
+            unit.nanoseconds)
+    } catch (e: ArithmeticException) {
+        if (this < other) Long.MAX_VALUE else Long.MIN_VALUE
+    }
+
+/**
+ * Returns the number of whole days between two instants in the specified [timeZone].
+ *
+ * If the result does not fit in [Int], returns [Int.MAX_VALUE] for a positive result or [Int.MIN_VALUE] for a negative result.
+ *
+ * @see Instant.until
+ * @throws DateTimeArithmeticException if `this` or [other] instant is too large to fit in [LocalDateTime].
+ */
+public fun Instant.daysUntil(other: Instant, timeZone: TimeZone): Int =
+        until(other, DateTimeUnit.DAY, timeZone).clampToInt()
+
+/**
+ * Returns the number of whole months between two instants in the specified [timeZone].
+ *
+ * If the result does not fit in [Int], returns [Int.MAX_VALUE] for a positive result or [Int.MIN_VALUE] for a negative result.
+ *
+ * @see Instant.until
+ * @throws DateTimeArithmeticException if `this` or [other] instant is too large to fit in [LocalDateTime].
+ */
+public fun Instant.monthsUntil(other: Instant, timeZone: TimeZone): Int =
+        until(other, DateTimeUnit.MONTH, timeZone).clampToInt()
+
+/**
+ * Returns the number of whole years between two instants in the specified [timeZone].
+ *
+ * If the result does not fit in [Int], returns [Int.MAX_VALUE] for a positive result or [Int.MIN_VALUE] for a negative result.
+ *
+ * @see Instant.until
+ * @throws DateTimeArithmeticException if `this` or [other] instant is too large to fit in [LocalDateTime].
+ */
+public fun Instant.yearsUntil(other: Instant, timeZone: TimeZone): Int =
+        until(other, DateTimeUnit.YEAR, timeZone).clampToInt()
+
+/**
+ * Returns a [DateTimePeriod] representing the difference between [other] and `this` instants.
+ *
+ * The components of [DateTimePeriod] are calculated so that adding it back to the `other` instant results in this instant.
+ *
+ * All components of the [DateTimePeriod] returned are:
+ * - negative or zero if this instant is earlier than the other,
+ * - positive or zero if this instant is later than the other,
+ * - exactly zero if this instant is equal to the other.
+ *
+ * @throws DateTimeArithmeticException if `this` or [other] instant is too large to fit in [LocalDateTime].
+ *   Or (only on the JVM) if the number of months between the two dates exceeds an Int.
+ * @see Instant.periodUntil
+ */
+public fun Instant.minus(other: Instant, timeZone: TimeZone): DateTimePeriod =
+        other.periodUntil(this, timeZone)
+
+
+/**
+ * Returns an instant that is the result of adding one [unit] to this instant
+ * in the specified [timeZone].
+ *
+ * The returned instant is later than this instant.
+ *
+ * @throws DateTimeArithmeticException if this value or the result is too large to fit in [LocalDateTime].
+ */
+@Deprecated("Use the plus overload with an explicit number of units", ReplaceWith("this.plus(1, unit, timeZone)"))
+public expect fun Instant.plus(unit: DateTimeUnit, timeZone: TimeZone): Instant
+
+/**
+ * Returns an instant that is the result of subtracting one [unit] from this instant
+ * in the specified [timeZone].
+ *
+ * The returned instant is earlier than this instant.
+ *
+ * @throws DateTimeArithmeticException if this value or the result is too large to fit in [LocalDateTime].
+ */
+@Deprecated("Use the minus overload with an explicit number of units", ReplaceWith("this.minus(1, unit, timeZone)"))
+public fun Instant.minus(unit: DateTimeUnit, timeZone: TimeZone): Instant =
+    plus(-1, unit, timeZone)
+
+/**
+ * Returns an instant that is the result of adding one [unit] to this instant.
+ *
+ * The returned instant is later than this instant.
+ *
+ * The return value is clamped to the platform-specific boundaries for [Instant] if the result exceeds them.
+ */
+@Deprecated("Use the plus overload with an explicit number of units", ReplaceWith("this.plus(1, unit)"))
+public fun Instant.plus(unit: DateTimeUnit.TimeBased): Instant =
+    plus(1L, unit)
+
+/**
+ * Returns an instant that is the result of subtracting one [unit] from this instant.
+ *
+ * The returned instant is earlier than this instant.
+ *
+ * The return value is clamped to the platform-specific boundaries for [Instant] if the result exceeds them.
+ */
+@Deprecated("Use the minus overload with an explicit number of units", ReplaceWith("this.minus(1, unit)"))
+public fun Instant.minus(unit: DateTimeUnit.TimeBased): Instant =
+    plus(-1L, unit)
+
+/**
+ * Returns an instant that is the result of adding the [value] number of the specified [unit] to this instant
+ * in the specified [timeZone].
+ *
+ * If the [value] is positive, the returned instant is later than this instant.
+ * If the [value] is negative, the returned instant is earlier than this instant.
+ *
+ * @throws DateTimeArithmeticException if this value or the result is too large to fit in [LocalDateTime].
+ */
+public expect fun Instant.plus(value: Int, unit: DateTimeUnit, timeZone: TimeZone): Instant
+
+/**
+ * Returns an instant that is the result of subtracting the [value] number of the specified [unit] from this instant
+ * in the specified [timeZone].
+ *
+ * If the [value] is positive, the returned instant is earlier than this instant.
+ * If the [value] is negative, the returned instant is later than this instant.
+ *
+ * @throws DateTimeArithmeticException if this value or the result is too large to fit in [LocalDateTime].
+ */
+public expect fun Instant.minus(value: Int, unit: DateTimeUnit, timeZone: TimeZone): Instant
+
+/**
+ * Returns an instant that is the result of adding the [value] number of the specified [unit] to this instant.
+ *
+ * If the [value] is positive, the returned instant is later than this instant.
+ * If the [value] is negative, the returned instant is earlier than this instant.
+ *
+ * The return value is clamped to the platform-specific boundaries for [Instant] if the result exceeds them.
+ */
+public fun Instant.plus(value: Int, unit: DateTimeUnit.TimeBased): Instant =
+    plus(value.toLong(), unit)
+
+/**
+ * Returns an instant that is the result of subtracting the [value] number of the specified [unit] from this instant.
+ *
+ * If the [value] is positive, the returned instant is earlier than this instant.
+ * If the [value] is negative, the returned instant is later than this instant.
+ *
+ * The return value is clamped to the platform-specific boundaries for [Instant] if the result exceeds them.
+ */
+public fun Instant.minus(value: Int, unit: DateTimeUnit.TimeBased): Instant =
+    minus(value.toLong(), unit)
+
+/**
+ * Returns an instant that is the result of adding the [value] number of the specified [unit] to this instant
+ * in the specified [timeZone].
+ *
+ * If the [value] is positive, the returned instant is later than this instant.
+ * If the [value] is negative, the returned instant is earlier than this instant.
+ *
+ * @throws DateTimeArithmeticException if this value or the result is too large to fit in [LocalDateTime].
+ */
+public expect fun Instant.plus(value: Long, unit: DateTimeUnit, timeZone: TimeZone): Instant
+
+/**
+ * Returns an instant that is the result of subtracting the [value] number of the specified [unit] from this instant
+ * in the specified [timeZone].
+ *
+ * If the [value] is positive, the returned instant is earlier than this instant.
+ * If the [value] is negative, the returned instant is later than this instant.
+ *
+ * @throws DateTimeArithmeticException if this value or the result is too large to fit in [LocalDateTime].
+ */
+public fun Instant.minus(value: Long, unit: DateTimeUnit, timeZone: TimeZone): Instant =
+    if (value != Long.MIN_VALUE) {
+        plus(-value, unit, timeZone)
+    } else {
+        plus(-(value + 1), unit, timeZone).plus(1, unit, timeZone)
+    }
+
+/**
+ * Returns an instant that is the result of adding the [value] number of the specified [unit] to this instant.
+ *
+ * If the [value] is positive, the returned instant is later than this instant.
+ * If the [value] is negative, the returned instant is earlier than this instant.
+ *
+ * The return value is clamped to the platform-specific boundaries for [Instant] if the result exceeds them.
+ */
+public expect fun Instant.plus(value: Long, unit: DateTimeUnit.TimeBased): Instant
+
+/**
+ * Returns an instant that is the result of subtracting the [value] number of the specified [unit] from this instant.
+ *
+ * If the [value] is positive, the returned instant is earlier than this instant.
+ * If the [value] is negative, the returned instant is later than this instant.
+ *
+ * The return value is clamped to the platform-specific boundaries for [Instant] if the result exceeds them.
+ */
+public fun Instant.minus(value: Long, unit: DateTimeUnit.TimeBased): Instant =
+    if (value != Long.MIN_VALUE) {
+        plus(-value, unit)
+    } else {
+        plus(-(value + 1), unit).plus(1, unit)
+    }
+
+/**
+ * Returns the whole number of the specified date or time [units][unit] between [other] and `this` instants
+ * in the specified [timeZone].
+ *
+ * The value returned is negative or zero if this instant is earlier than the other,
+ * and positive or zero if this instant is later than the other.
+ *
+ * If the result does not fit in [Long], returns [Long.MAX_VALUE] for a positive result or [Long.MIN_VALUE] for a negative result.
+ *
+ * @throws DateTimeArithmeticException if `this` or [other] instant is too large to fit in [LocalDateTime].
+ * @see Instant.until
+ */
+public fun Instant.minus(other: Instant, unit: DateTimeUnit, timeZone: TimeZone): Long =
+        other.until(this, unit, timeZone)
+
+/**
+ * Returns the whole number of the specified time [units][unit] between [other] and `this` instants.
+ *
+ * The value returned is negative or zero if this instant is earlier than the other,
+ * and positive or zero if this instant is later than the other.
+ *
+ * If the result does not fit in [Long], returns [Long.MAX_VALUE] for a positive result or [Long.MIN_VALUE] for a negative result.
+ *
+ * @see Instant.until
+ */
+public fun Instant.minus(other: Instant, unit: DateTimeUnit.TimeBased): Long =
+    other.until(this, unit)
+
+/**
+ * Formats this value using the given [format] using the given [offset].
+ *
+ * Equivalent to calling [DateTimeFormat.format] on [format] and using [DateTimeComponents.setDateTimeOffset] in
+ * the lambda.
+ *
+ * [DateTimeComponents.Formats.ISO_DATE_TIME_OFFSET] is a format very similar to the one used by [toString].
+ * The only difference is that [Instant.toString] adds trailing zeros to the fraction-of-second component so that the
+ * number of digits after a dot is a multiple of three.
+ */
+public fun Instant.format(format: DateTimeFormat<DateTimeComponents>, offset: UtcOffset = UtcOffset.ZERO): String {
+    val instant = this
+    return format.format { setDateTimeOffset(instant, offset) }
+}
+
+internal const val DISTANT_PAST_SECONDS = -3217862419201
+internal const val DISTANT_FUTURE_SECONDS = 3093527980800
+[end of core/common/src/Instant.kt]
+[start of core/common/src/TimeZone.kt]
+/*
+ * Copyright 2019-2020 JetBrains s.r.o.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+@file:kotlin.jvm.JvmMultifileClass
+@file:kotlin.jvm.JvmName("TimeZoneKt")
+
+package kotlinx.datetime
+
+import kotlinx.datetime.serializers.*
+import kotlinx.serialization.Serializable
+
+/**
+ * A time zone, providing rules for converting between [Instant] and [LocalDateTime] values.
+ *
+ * A `TimeZone` defines how to interpret a [LocalDateTime] as an [Instant] (a specific moment in time)
+ * and vice versa. It encapsulates the rules for UTC offset changes, including daylight saving time (DST)
+ * transitions.
+ *
+ * ### Types of Time Zones
+ *
+ * There are two main types:
+ * - **Region-based zones** (e.g., `"Europe/Berlin"`, `"America/New_York"`): These follow the rules defined
+ *   in the IANA Time Zone Database, including historical changes and DST transitions.
+ * - **Fixed-offset zones** (e.g., `"UTC+02:00"`, `"GMT-05:00"`): These maintain a constant offset from UTC.
+ *   See [FixedOffsetTimeZone] for this special case.
+ *
+ * ### Obtaining Time Zones
+ *
+ * Time zones can be obtained in several ways:
+ * ```
+ * // System's current time zone
+ * val systemTZ = TimeZone.currentSystemDefault()
+ * 
+ * // UTC time zone
+ * val utc = TimeZone.UTC
+ * 
+ * // By IANA identifier
+ * val berlin = TimeZone.of("Europe/Berlin")
+ * 
+ * // Fixed offset
+ * val plus3 = TimeZone.of("+03:00")
+ * ```
+ *
+ * ### Converting Between Instant and LocalDateTime
+ *
+ * The primary use of `TimeZone` is converting between absolute time ([Instant]) and civil time ([LocalDateTime]):
+ * ```
+ * val zone = TimeZone.of("America/New_York")
+ * val instant = Clock.System.now()
+ * 
+ * // Convert instant to local time
+ * val localDateTime = instant.toLocalDateTime(zone)
+ * 
+ * // Convert local time to instant
+ * val instant2 = localDateTime.toInstant(zone)
+ * ```
+ *
+ * ### Daylight Saving Time
+ *
+ * During DST transitions, some local times may not exist (spring forward) or may occur twice (fall back):
+ * ```
+ * val zone = TimeZone.of("America/New_York")
+ * 
+ * // During "spring forward", 2:30 AM doesn't exist
+ * val nonExistent = LocalDateTime(2023, 3, 12, 2, 30)
+ * val instant = nonExistent.toInstant(zone) // Uses the offset before transition
+ * 
+ * // During "fall back", 1:30 AM occurs twice
+ * val ambiguous = LocalDateTime(2023, 11, 5, 1, 30)
+ * val instant2 = ambiguous.toInstant(zone) // Uses the earlier occurrence
+ * ```
+ *
+ * ### Available Time Zone IDs
+ *
+ * The set of available time zone IDs can be queried:
+ * ```
+ * val allZones = TimeZone.availableZoneIds
+ * println("Available zones: ${allZones.size}")
+ * ```
+ *
+ * ### Platform Specifics
+ *
+ * - **JVM**: Uses `java.time.ZoneId` internally
+ * - **JS**: Limited to system time zone and fixed offsets by default; full support requires `@js-joda/timezone` npm dependency
+ * - **Native**: Uses the IANA Time Zone Database
+ *
+ * @see Instant for absolute time representation
+ * @see LocalDateTime for civil time representation
+ * @see FixedOffsetTimeZone for zones with constant UTC offset
+ */
+@Serializable(with = TimeZoneSerializer::class)
+public expect open class TimeZone {
+    /**
+     * The identifier of this time zone.
+     *
+     * This identifier can be used with [TimeZone.of] to obtain the same time zone.
+     *
+     * ### Examples
+     * - For region-based zones: `"Europe/Berlin"`, `"America/New_York"`
+     * - For fixed-offset zones: `"UTC"`, `"+02:00"`, `"GMT-05:00"`
+     * - For system zones: the actual system zone ID
+     *
+     * @see TimeZone.of for parsing these identifiers
+     */
+    public val id: String
+
+    // TODO: Declare and document toString/equals/hashCode
+
+    public companion object {
+        /**
+         * Returns the current system's default time zone.
+         *
+         * The returned time zone is the one configured in the operating system.
+         * Note that this can change during the lifetime of the application if the user
+         * changes their system settings.
+         *
+         * ### Platform Behavior
+         *
+         * - **JVM**: Returns the JVM's default time zone (`java.time.ZoneId.systemDefault()`)
+         * - **JS**: Returns the browser's or Node.js system time zone
+         * - **Native**: Queries the operating system for the current time zone setting
+         *
+         * ### Example
+         * ```
+         * val systemZone = TimeZone.currentSystemDefault()
+         * println("System time zone: ${systemZone.id}")
+         * 
+         * val now = Clock.System.now()
+         * val localTime = now.toLocalDateTime(systemZone)
+         * ```
+         *
+         * ### Caching
+         *
+         * The result may be cached, but the cache is invalidated when system settings change.
+         * Multiple calls to this function may return the same instance or different instances
+         * representing the same time zone.
+         */
+        public fun currentSystemDefault(): TimeZone
+
+        /**
+         * The fixed time zone with zero offset from UTC.
+         *
+         * This is a [FixedOffsetTimeZone] with an offset of zero hours, minutes, and seconds.
+         * It's equivalent to `TimeZone.of("UTC")` or `TimeZone.of("Z")`.
+         *
+         * ### Example
+         * ```
+         * val instant = Clock.System.now()
+         * val utcDateTime = instant.toLocalDateTime(TimeZone.UTC)
+         * println("UTC time: $utcDateTime")
+         * ```
+         *
+         * @see FixedOffsetTimeZone for other fixed-offset zones
+         */
+        public val UTC: FixedOffsetTimeZone
+
+        /**
+         * Returns a time zone with the specified [zoneId].
+         *
+         * ### Supported ID Formats
+         *
+         * The following formats are supported:
+         * - **`Z`**, **`UTC`**, **`UT`**, or **`GMT`**: Returns [UTC]
+         * - **Fixed offsets**: Strings starting with `+`, `-`, or followed by offset
+         *   - Examples: `"+02:00"`, `"-05:00"`, `"GMT+03:00"`, `"UTC-04:30"`
+         *   - Format: `±HH:mm` or `±HHmm` or `±HH`
+         * - **Region IDs**: IANA Time Zone Database identifiers
+         *   - Examples: `"Europe/Berlin"`, `"America/New_York"`, `"Asia/Tokyo"`
+         *
+         * ### Examples
+         * ```
+         * val utc = TimeZone.of("UTC")
+         * val berlin = TimeZone.of("Europe/Berlin")
+         * val fixedPlus3 = TimeZone.of("+03:00")
+         * val gmtMinus5 = TimeZone.of("GMT-05:00")
+         * ```
+         *
+         * ### Platform Specifics
+         *
+         * - **JVM**: Supports all IANA time zone IDs available in the JVM
+         * - **JS**: Without additional dependencies, only supports UTC and system zone; 
+         *   with `@js-joda/timezone`, supports all IANA zones
+         * - **Native**: Supports all IANA time zone IDs from the bundled database
+         *
+         * @param zoneId the time zone identifier
+         * @return the corresponding TimeZone
+         * @throws IllegalTimeZoneException if [zoneId] has an invalid format or refers to an unknown zone
+         * @see availableZoneIds for the list of all available zone IDs
+         */
+        public fun of(zoneId: String): TimeZone
+
+        /**
+         * Returns the set of all available time zone identifiers.
+         *
+         * This includes all IANA Time Zone Database region IDs that can be used with [TimeZone.of].
+         * Fixed offset IDs (like `"+02:00"`) are not included in this set, but they are still valid
+         * for use with [TimeZone.of].
+         *
+         * ### Example
+         * ```
+         * val zones = TimeZone.availableZoneIds
+         * println("Total zones available: ${zones.size}")
+         * 
+         * // Find all zones for a specific region
+         * val europeanZones = zones.filter { it.startsWith("Europe/") }
+         * println("European zones: $europeanZones")
+         * ```
+         *
+         * ### Platform Specifics
+         *
+         * - **JVM**: Returns all zones from `java.time.ZoneId.getAvailableZoneIds()`
+         * - **JS**: Limited set without `@js-joda/timezone`; full set with the dependency
+         * - **Native**: Returns zones from the bundled IANA database
+         *
+         * The returned set is immutable and may be cached.
+         */
+        public val availableZoneIds: Set<String>
+    }
+
+    /**
+     * Converts this [Instant] to a [LocalDateTime] in this time zone.
+     *
+     * The returned [LocalDateTime] represents the same moment in time as this instant,
+     * but expressed in the civil time components of this time zone.
+     *
+     * ### Example
+     * ```
+     * val zone = TimeZone.of("America/New_York")
+     * val instant = Instant.parse("2023-06-15T10:00:00Z")
+     * 
+     * zone.run {
+     *     val local = instant.toLocalDateTime()
+     *     println(local) // Will show the time in New York
+     * }
+     * ```
+     *
+     * @receiver the instant to convert
+     * @return the corresponding LocalDateTime in this time zone
+     * @throws DateTimeArithmeticException if this instant is too large to fit in [LocalDateTime]
+     * @see LocalDateTime.toInstant for the inverse operation
+     */
+    public fun Instant.toLocalDateTime(): LocalDateTime
+
+    /**
+     * Converts this [LocalDateTime] to an [Instant] in this time zone.
+     *
+     * ### Handling Ambiguous or Non-Existent Times
+     *
+     * Due to daylight saving time transitions, the conversion may be ambiguous:
+     * - **Non-existent times** (spring forward): The local time doesn't exist.
+     *   The conversion uses the offset before the transition.
+     * - **Ambiguous times** (fall back): The local time occurs twice.
+     *   The conversion uses the earlier occurrence (before the transition).
+     *
+     * ### Example
+     * ```
+     * val zone = TimeZone.of("America/New_York")
+     * val localDateTime = LocalDateTime(2023, 6, 15, 14, 30)
+     * 
+     * zone.run {
+     *     val instant = localDateTime.toInstant()
+     *     println(instant) // The absolute moment this local time represents
+     * }
+     * ```
+     *
+     * @receiver the LocalDateTime to convert
+     * @return the corresponding Instant
+     * @see Instant.toLocalDateTime for the inverse operation
+     */
+    public fun LocalDateTime.toInstant(): Instant
+}
+
+/**
+ * A time zone with a fixed offset from UTC that never changes.
+ *
+ * This is a special case of [TimeZone] that maintains a constant offset from UTC,
+ * without any daylight saving time transitions or historical changes.
+ *
+ * ### Creating Fixed Offset Time Zones
+ *
+ * Fixed offset time zones can be created in several ways:
+ * ```
+ * // From UtcOffset
+ * val offset = UtcOffset(hours = 3)
+ * val zone1 = offset.asTimeZone()
+ * 
+ * // Using TimeZone.of with offset string
+ * val zone2 = TimeZone.of("+03:00") as FixedOffsetTimeZone
+ * 
+ * // Special case: UTC
+ * val utc = TimeZone.UTC // This is a FixedOffsetTimeZone
+ * ```
+ *
+ * ### Use Cases
+ *
+ * Fixed offset time zones are useful when:
+ * - Working with systems that don't observe DST
+ * - Storing or transmitting timestamps with a specific offset
+ * - Testing time-dependent code with predictable behavior
+ *
+ * ### Example
+ * ```
+ * val offset = UtcOffset(hours = 5, minutes = 30)
+ * val zone = offset.asTimeZone()
+ * 
+ * val instant = Clock.System.now()
+ * val localTime = instant.toLocalDateTime(zone)
+ * 
+ * // The offset is always the same
+ * val offset1 = zone.offsetAt(instant)
+ * val offset2 = zone.offsetAt(instant + 6.months)
+ * assert(offset1 == offset2) // Always true for fixed offset zones
+ * ```
+ *
+ * @see UtcOffset for creating offset values
+ * @see TimeZone for the general time zone interface
+ */
+@Serializable(with = FixedOffsetTimeZoneSerializer::class)
+public expect class FixedOffsetTimeZone : TimeZone {
+    /**
+     * Creates a fixed-offset time zone with the specified [offset] from UTC.
+     *
+     * ### Example
+     * ```
+     * val offset = UtcOffset(hours = 2)
+     * val zone = FixedOffsetTimeZone(offset)
+     * 
+     * // The zone ID will be the offset string
+     * println(zone.id) // "+02:00"
+     * ```
+     *
+     * @param offset the constant offset from UTC
+     */
+    public constructor(offset: UtcOffset)
+
+    /**
+     * The constant offset from UTC that this time zone maintains.
+     *
+     * This offset never changes, regardless of the date or time.
+     *
+     * ### Example
+     * ```
+     * val zone = TimeZone.of("+05:30") as FixedOffsetTimeZone
+     * println(zone.offset.totalSeconds) // 19800 (5.5 hours in seconds)
+     * ```
+     */
+    public val offset: UtcOffset
+
+    @Deprecated("Use offset.totalSeconds", ReplaceWith("offset.totalSeconds"))
+    public val totalSeconds: Int
+}
+
+@Deprecated("Use FixedOffsetTimeZone of UtcOffset instead", ReplaceWith("FixedOffsetTimeZone"))
+public typealias ZoneOffset = FixedOffsetTimeZone
+
+/**
+ * Returns the offset from UTC this time zone has at the specified [instant].
+ *
+ * For region-based time zones, the offset can vary depending on daylight saving time transitions
+ * and historical changes. For [FixedOffsetTimeZone], the offset is always the same.
+ *
+ * ### Example
+ * ```
+ * val zone = TimeZone.of("America/New_York")
+ * val summerInstant = Instant.parse("2023-07-15T12:00:00Z")
+ * val winterInstant = Instant.parse("2023-01-15T12:00:00Z")
+ * 
+ * val summerOffset = zone.offsetAt(summerInstant) // UTC-4 (EDT)
+ * val winterOffset = zone.offsetAt(winterInstant) // UTC-5 (EST)
+ * ```
+ *
+ * @param instant the instant to find the offset for
+ * @return the UTC offset at this instant
+ * @see Instant.offsetIn for a convenience extension
+ */
+public expect fun TimeZone.offsetAt(instant: Instant): UtcOffset
+
+/**
+ * Converts this instant to a [LocalDateTime] in the specified [timeZone].
+ *
+ * This is equivalent to calling `timeZone.run { toLocalDateTime() }`.
+ *
+ * ### Example
+ * ```
+ * val instant = Clock.System.now()
+ * 
+ * val utcTime = instant.toLocalDateTime(TimeZone.UTC)
+ * val localTime = instant.toLocalDateTime(TimeZone.currentSystemDefault())
+ * val tokyoTime = instant.toLocalDateTime(TimeZone.of("Asia/Tokyo"))
+ * 
+ * // All represent the same moment, but with different local times
+ * ```
+ *
+ * @param timeZone the time zone to use for conversion
+ * @return the LocalDateTime in the specified time zone
+ * @throws DateTimeArithmeticException if this instant is too large to fit in [LocalDateTime]
+ * @see LocalDateTime.toInstant for the inverse operation
+ */
+public expect fun Instant.toLocalDateTime(timeZone: TimeZone): LocalDateTime
+
+/**
+ * Returns a civil date/time value that this instant has in the specified [UTC offset][offset].
+ *
+ * @see LocalDateTime.toInstant
+ * @see Instant.offsetIn
+ */
+internal expect fun Instant.toLocalDateTime(offset: UtcOffset): LocalDateTime
+
+/**
+ * Returns the offset from UTC that the specified [timeZone] has at this instant.
+ *
+ * This is a convenience function equivalent to `timeZone.offsetAt(this)`.
+ *
+ * ### Example
+ * ```
+ * val instant = Clock.System.now()
+ * val offset = instant.offsetIn(TimeZone.currentSystemDefault())
+ * println("Current UTC offset: $offset")
+ * ```
+ *
+ * @param timeZone the time zone to query
+ * @return the UTC offset at this instant in the given time zone
+ * @see TimeZone.offsetAt
+ */
+public fun Instant.offsetIn(timeZone: TimeZone): UtcOffset =
+        timeZone.offsetAt(this)
+
+/**
+ * Converts this [LocalDateTime] to an [Instant] using the specified [timeZone].
+ *
+ * This is equivalent to calling `timeZone.run { toInstant() }`.
+ *
+ * ### Handling DST Transitions
+ *
+ * See [TimeZone.toInstant] for details on how ambiguous and non-existent times are handled.
+ *
+ * ### Example
+ * ```
+ * val localDateTime = LocalDateTime(2023, 6, 15, 14, 30)
+ * 
+ * val utcInstant = localDateTime.toInstant(TimeZone.UTC)
+ * val nyInstant = localDateTime.toInstant(TimeZone.of("America/New_York"))
+ * 
+ * // These represent different moments in time
+ * ```
+ *
+ * @param timeZone the time zone to use for conversion
+ * @return the corresponding Instant
+ * @see Instant.toLocalDateTime for the inverse operation
+ */
+public expect fun LocalDateTime.toInstant(timeZone: TimeZone): Instant
+
+/**
+ * Converts this [LocalDateTime] to an [Instant] using the specified UTC [offset].
+ *
+ * This performs a direct conversion without any DST considerations, as the offset is fixed.
+ *
+ * ### Example
+ * ```
+ * val localDateTime = LocalDateTime(2023, 6, 15, 14, 30)
+ * val offset = UtcOffset(hours = 3)
+ * 
+ * val instant = localDateTime.toInstant(offset)
+ * ```
+ *
+ * @param offset the UTC offset to use for conversion
+ * @return the corresponding Instant
+ * @see Instant.toLocalDateTime for the inverse operation
+ */
+public expect fun LocalDateTime.toInstant(offset: UtcOffset): Instant
+
+/**
+ * Returns an [Instant] that corresponds to the start of this date in the specified [timeZone].
+ *
+ * The "start of day" is usually midnight (00:00), but this is not always the case.
+ * For example, due to daylight saving time transitions, a day might start at 01:00 if
+ * the clock was moved forward from 23:59 to 01:00.
+ *
+ * ### Example
+ * ```
+ * val date = LocalDate(2023, 3, 26) // DST transition in Europe
+ * val berlin = TimeZone.of("Europe/Berlin")
+ * 
+ * val startOfDay = date.atStartOfDayIn(berlin)
+ * val localTime = startOfDay.toLocalDateTime(berlin)
+ * // localTime.time might not be 00:00 if there was a DST transition
+ * ```
+ *
+ * ### Comparison with Other Approaches
+ *
+ * This is more reliable than `date.atTime(0, 0).toInstant(timeZone)` because:
+ * - It handles cases where midnight doesn't exist due to DST
+ * - It correctly identifies the first valid moment of the day
+ *
+ * @param timeZone the time zone to determine the start of day
+ * @return the instant at the start of this date in the given time zone
+ */
+public expect fun LocalDate.atStartOfDayIn(timeZone: TimeZone): Instant
+[end of core/common/src/TimeZone.kt]

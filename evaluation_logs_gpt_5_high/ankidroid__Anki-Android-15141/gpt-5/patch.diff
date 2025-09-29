@@ -1,0 +1,407 @@
+[start of build.gradle]
+import org.gradle.internal.jvm.Jvm
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompilerExecutionStrategy
+
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+buildscript {
+    // The version for the Kotlin plugin and dependencies
+    // If changing this, make sure to update org.jetbrains.kotlin.plugin.serialization version too
+    ext.kotlin_version = '1.9.21'
+    ext.lint_version = '31.1.1'
+    ext.acra_version = '5.11.3'
+    // Bump backend to Anki 23.12
+    ext.ankidroid_backend_version = '0.1.33-anki23.12.1'
+    ext.hamcrest_version = '2.2'
+    ext.junit_version = '5.10.1'
+    ext.coroutines_version = '1.7.3'
+    ext.fragments_version = "1.6.2"
+    ext.espresso_version = '3.5.1'
+    ext.androidx_test_version = '1.5.0'
+    ext.androidx_test_junit_version = '1.1.5'
+    ext.robolectric_version = '4.11.1'
+    ext.android_gradle_plugin = "8.1.4"
+    ext.dokka_version = "1.9.10" // not the same with kotlin version!
+    ext.uiautomator_version = "2.3.0-alpha05"
+
+    configurations.configureEach {
+        resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == 'org.jetbrains.kotlinx'
+                    && details.requested.name.contains('kotlinx-serialization-runtime')
+                    && details.requested.version.contains('0.11.0')) {
+                details.useVersion "0.14.0"
+            }
+        }
+    }
+}
+
+plugins {
+    id 'com.android.application' version "$android_gradle_plugin" apply false
+    id 'com.android.library' version "$android_gradle_plugin" apply false
+    id 'org.jetbrains.kotlin.jvm' version "$kotlin_version" apply false
+    id 'org.jetbrains.kotlin.android' version "$kotlin_version" apply false
+    id 'org.jetbrains.kotlin.plugin.parcelize' version "$kotlin_version" apply false
+    id 'org.jetbrains.kotlin.plugin.serialization' version "$kotlin_version" apply false
+    id 'org.jlleitschuh.gradle.ktlint' version '11.6.1' apply false
+    id 'org.jetbrains.dokka' version "$dokka_version" apply false
+}
+
+Properties localProperties = new Properties()
+if (project.rootProject.file('local.properties').exists()) {
+    localProperties.load(project.rootProject.file('local.properties').newDataInputStream())
+}
+Boolean fatalWarnings = !(localProperties['fatal_warnings'] == "false")
+
+// Here we extract per-module "best practices" settings to a single top-level evaluation
+subprojects {
+    apply plugin: "org.jlleitschuh.gradle.ktlint"
+
+    afterEvaluate { project ->
+        if (project.hasProperty('android')) {
+            project.android.testOptions.unitTests {
+                includeAndroidResources = true
+            }
+            project.android.testOptions.unitTests.all {
+                // tell backend to avoid rollover time, and disable interval fuzzing
+                environment "ANKI_TEST_MODE", "1"
+
+                useJUnitPlatform()
+                testLogging {
+                    events "failed", "skipped"
+                    showStackTraces = true
+                    exceptionFormat = "full"
+                }
+
+                maxParallelForks = gradleTestMaxParallelForks
+                forkEvery = 40
+                systemProperties['junit.jupiter.execution.parallel.enabled'] = true
+                systemProperties['junit.jupiter.execution.parallel.mode.default'] = "concurrent"
+            }
+        }
+
+        /**
+         Kotlin allows concrete function implementations inside interfaces.
+         For those to work when Kotlin compilation targets the JVM backend, you have to enable the interoperability via
+         'freeCompilerArgs' in your gradle file, and you have to choose one of the appropriate '-Xjvm-default' modes.
+
+         https://kotlinlang.org/docs/java-to-kotlin-interop.html#default-methods-in-interfaces
+
+         and we used "all" because we don't have downstream consumers
+         https://docs.gradle.org/current/userguide/task_configuration_avoidance.html
+
+         Related to ExperimentalCoroutinesApi: this opt-in is added to enable usage of experimental
+            coroutines API, this targets all project modules with the exception of the "api" module,
+            which doesn't use coroutines so the annotation isn't not available. This would normally
+            result in a warning but we treat warnings as errors.
+            (see https://youtrack.jetbrains.com/issue/KT-28777/Using-experimental-coroutines-api-causes-unresolved-dependency)
+        */
+        tasks.withType(KotlinCompile).configureEach {
+            compilerOptions {
+                allWarningsAsErrors = fatalWarnings
+                def compilerArgs = ['-Xjvm-default=all']
+                if (project.name != "api") {
+                    compilerArgs += ['-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi']
+                }
+                freeCompilerArgs = compilerArgs
+            }
+        }
+    }
+}
+
+ext {
+
+    jvmVersion = Jvm.current().javaVersion.majorVersion
+    if (jvmVersion != "17" && jvmVersion != "21") {
+        println "\n\n\n"
+        println "**************************************************************************************************************"
+        println "\n\n\n"
+        println "ERROR: AnkiDroid builds with JVM version 17 or 21."
+        println "  Incompatible major version detected: '" + jvmVersion + "'"
+        println "\n\n\n"
+        println "  If you receive this error because you want to use a newer JDK, we may accept PRs to support new versions."
+        println "  Edit the main build.gradle file, find this message in the file, and add support for the new version."
+        println "  Please make sure the `jacocoTestReport` target works on an emulator with our minSdkVersion (currently 23)."
+        println "\n\n\n"
+        println "**************************************************************************************************************"
+        println "\n\n\n"
+        System.exit(1)
+    }
+    ciBuild = System.getenv("CI") == "true" // works for Travis CI or Github Actions
+    // allows for -Dpre-dex=false to be set
+    preDexEnabled = "true" == System.getProperty("pre-dex", "true")
+    // allows for universal APKs to be generated
+    universalApkEnabled = "true" == System.getProperty("universal-apk", "false")
+
+    if (System.getProperty("os.name") == "Mac OS X") {
+        // macOS reports hardware cores. This is accurate for CI, Intel (halved due to SMT) and Apple Silicon
+        gradleTestMaxParallelForks = "sysctl -n hw.physicalcpu".execute().text.toInteger()
+    } else if (ciBuild) {
+        // GitHub Actions run on Standard_DS2_v2 Azure Compute Units. They are 1:1 vCPU to CPU on Linux/Windows with two vCPU cores
+        // Sources to determine the correct Azure Compute Unit (and get CPU count) to tune this:
+        // Standard_DS2_v2 https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners/about-github-hosted-runners#supported-runners-and-hardware-resources
+        // Which is 1:1 https://docs.microsoft.com/en-gb/azure/virtual-machines/acu : DS1_v2 - DS15_v2 | 1:1
+        gradleTestMaxParallelForks = 2
+
+        // separate gradle compile process is a major speed improvement, but consumes 2x RAM
+        // the CI machines don't have enough RAM to do that without going in to swap quite a bit
+        // so for CI machines only - to improve reliability despite compilation speed hit, compile kotlin in process
+        println "CI build detected: setting compiler execution strategy to IN_PROCESS"
+        tasks.withType(KotlinCompile).configureEach {
+            compilerExecutionStrategy.set(KotlinCompilerExecutionStrategy.IN_PROCESS)
+        }
+    } else {
+        // Use 50% of cores to account for SMT which doesn't help this workload
+        gradleTestMaxParallelForks = Runtime.runtime.availableProcessors().intdiv(2) ?: 1
+    }
+}
+[end of build.gradle]
+[start of README.md]
+<p align="center">
+<img src="docs/graphics/logos/banner_readme.png"/>
+</p>
+
+<a href="https://github.com/ankidroid/Anki-Android/releases"><img src="https://img.shields.io/github/v/release/ankidroid/Anki-Android" alt="release"/></a>
+<a href="https://github.com/ankidroid/Anki-Android/actions"><img src="https://img.shields.io/github/checks-status/ankidroid/Anki-Android/main?label=build" alt="build"/></a>
+<a href="https://opencollective.com/ankidroid"><img src="https://img.shields.io/opencollective/all/ankidroid" alt="Open Collective backers and sponsors"/></a>
+<a href="https://github.com/ankidroid/Anki-Android/issues"><img src="https://img.shields.io/github/commit-activity/m/ankidroid/Anki-Android" alt="commit-activity"/></a>
+<a href="https://github.com/ankidroid/Anki-Android/network/members"><img src="https://img.shields.io/github/forks/ankidroid/Anki-Android" alt="forks"/></a>
+<a href="https://github.com/ankidroid/Anki-Android/stargazers"><img src="https://img.shields.io/github/stars/ankidroid/Anki-Android" alt="stars"/></a>
+<a href="https://crowdin.com/project/ankidroid"><img src="https://badges.crowdin.net/ankidroid/localized.svg"></img></a>
+<a href="https://github.com/ankidroid/Anki-Android/graphs/contributors"><img src="https://img.shields.io/github/contributors/ankidroid/Anki-Android" alt="contributors"/></a>
+<a href="https://discord.gg/qjzcRTx"><img src="https://img.shields.io/discord/368267295601983490"></img></a>
+<a href="https://github.com/ankidroid/Anki-Android/blob/main/COPYING"><img src="https://img.shields.io/github/license/ankidroid/Anki-Android" alt="license"/></a>
+
+# AnkiDroid
+A semi-official port of the open source [Anki](https://apps.ankiweb.net/index.html) spaced repetition flashcard system to Android. Memorize anything with AnkiDroid!
+
+<img src="docs/graphics/logos/ankidroid_logo.png" align="right" width="40%" height="100%"></img>
+
+### Features
+
+<div style="display:flex;">
+ 
+- Night mode
+- Whiteboard 
+- Progress widget
+- Detailed statistics
+- Syncing with AnkiWeb
+- Write answers (optional)
+- Text-to-speech integration
+- More than 6000 premade decks
+- Modern scheduling (FSRS algorithm)
+- Supported contents: text, images, sounds, MathJax
+- Add cards by intent from other applications like dictionaries
+
+</div>
+
+Install
+---------
+<div style="display:flex;">
+
+<a href="https://play.google.com/store/apps/details?id=com.ichi2.anki&utm_source=global_co&utm_medium=prtnr&utm_content=Mar2515&utm_campaign=PartBadge&pcampaignid=MKT-Other-global-all-co-prtnr-py-PartBadge-Mar2515-1">
+    <img alt="Get it on Google Play" height="80"
+        src="docs/graphics/logos/google-badge.png" /></a>
+
+<a href="https://f-droid.org/repository/browse/?fdid=com.ichi2.anki">
+    <img alt="Get it on F-Droid" height="80"
+        src="docs/graphics/logos/f-droid-badge.png"></a>
+
+<a href="http://www.amazon.com/gp/product/B004L1G7T2/ref=mas_pm_ankidroid_flashcards">
+    <img alt="Get it on Amazon app store" height="80"
+        src="docs/graphics/logos/amazon-badge.png"/></a>
+
+</div>
+
+Wiki
+----
+View [Wiki](https://github.com/ankidroid/Anki-Android/wiki)
+
+Help
+----
+Check the [user manual](https://ankidroid.org/docs/manual.html) and the wiki for usage instructions. See the [help page](https://ankidroid.org/docs/help.html) 
+for how to submit a bug report or contact a project member, etc.
+
+Contribute
+----------
+You can contribute to AnkiDroid by beta testing, translating, or submitting code. 
+See the [contribution wiki page](https://github.com/ankidroid/Anki-Android/wiki/Contributing) for more info.
+
+Join Us On
+----------
+
+<a href="https://discord.gg/qjzcRTx"><img src="docs/graphics/logos/discord_logo_color.png" height="50px"/></a>
+<a href="https://www.reddit.com/r/Anki"><img src="docs/graphics/logos/reddit_logo_color.png" height="50px"/></a>
+<a href="https://www.facebook.com/AnkiDroid/"><img src="docs/graphics/logos/facebook_logo_color.png" height="50px"/></a>
+<a href="https://twitter.com/ankidroid"><img src="docs/graphics/logos/twitter_logo_color.png" height="50px"/></a>
+<a href="https://forums.ankiweb.net/"><img src="/docs/graphics/logos/anki_forums_logo.png" height="50px"/></a>
+
+## Credits
+<!--- Do not rename this section. AnkiDroid contains a deep link to the section
+header - see https://github.com/ankidroid/Anki-Android/pull/11803 --->
+
+### Code Contributors
+
+Thanks to these awesome code contributors who keep this project going
+
+<a href="https://github.com/ankidroid/Anki-Android/graphs/contributors"><img src="https://opencollective.com/ankidroid/contributors.svg?width=890&button=false" /></a>
+
+### [Sponsors](https://opencollective.com/ankidroid#sponsor)
+<a href="https://opencollective.com/ankidroid#sponsor" target="_blank">
+  <img src="https://opencollective.com/Ankidroid/sponsors.svg?width=890" />
+</a>
+
+### [Backers](https://opencollective.com/ankidroid#backer)
+
+A big thank you to each of our backers 🙏
+<a href="https://opencollective.com/Ankidroid#backers" target="_blank"><img width=110 src="https://opencollective.com/Ankidroid/backers/badge.svg?"></a>
+
+<p>Your generous donations mean the world to us, and we can't express our gratitude enough. Your support fuels our mission and helps us make a real difference</p>
+
+<a href="https://opencollective.com/Ankidroid/donate" target="_blank">
+  <img src="https://opencollective.com/Ankidroid/donate/button@2x.png?color=blue" width=200 />
+</a>
+
+### [Translators](https://crowdin.com/project/ankidroid/activity-stream)
+
+Thanks to our 1400 translators, for allowing us to be available, partially or totally, in 99 languages as of July 2022.
+
+License
+-------
+* [GPL-3.0 License](https://github.com/ankidroid/Anki-Android/blob/main/COPYING)
+* [AGPL-3.0 Licence](https://github.com/ankitects/anki/blob/main/LICENSE) for some part of the back-end
+[end of README.md]
+[start of AnkiDroid/src/main/java/com/ichi2/anki/pages/AnkiServer.kt]
+/*
+ *  Copyright (c) 2022 Mani <infinyte01@gmail.com>
+ *  Copyright (c) 2022 Brayan Oliveira <brayandso.dev@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or modify it under
+ *  the terms of the GNU General Public License as published by the Free Software
+ *  Foundation; either version 3 of the License, or (at your option) any later
+ *  version.
+ *
+ *  This program is distributed in the hope that it will be useful, but WITHOUT ANY
+ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+ *  PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with
+ *  this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+package com.ichi2.anki.pages
+
+import fi.iki.elonen.NanoHTTPD
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.runBlocking
+import timber.log.Timber
+import java.io.ByteArrayInputStream
+
+const val PORT = 0
+// const val PORT = 40001
+
+// local debugging:
+// ~/Local/Android/Sdk/platform-tools/adb forward tcp:40001 tcp:40001
+
+open class AnkiServer(
+    private val postHandler: PostRequestHandler
+) : NanoHTTPD(LOCALHOST, PORT) {
+
+    fun baseUrl(): String {
+        return "http://$LOCALHOST:$listeningPort/"
+    }
+
+    // it's faster to serve local files without GZip. see 'page render' in logs
+    // This also removes 'W/System: A resource failed to call end.'
+    override fun useGzipWhenAccepted(r: Response?) = false
+
+    override fun serve(session: IHTTPSession): Response {
+        val uri = session.uri
+        val mime = getMimeFromUri(uri)
+
+        if (session.method == Method.GET) {
+            val resourcePath = "web$uri"
+            val stream = this.javaClass.classLoader!!.getResourceAsStream(resourcePath)
+            Timber.d("GET: Requested %s (%s), found? %b", uri, resourcePath, stream != null)
+            return newChunkedResponse(Response.Status.OK, mime, stream)
+        }
+
+        if (session.method == Method.POST) {
+            Timber.d("POST: Requested %s", uri)
+            val inputBytes = getSessionBytes(session)
+            return buildResponse {
+                postHandler.handlePostRequest(uri, inputBytes)
+            }
+        }
+        return newFixedLengthResponse(null)
+    }
+
+    private fun buildResponse(
+        block: suspend CoroutineScope.() -> ByteArray
+    ): Response {
+        return try {
+            val data = runBlocking {
+                block()
+            }
+            newChunkedResponse(data)
+        } catch (exc: Exception) {
+            newChunkedResponse(exc.localizedMessage?.encodeToByteArray(), status = Response.Status.INTERNAL_ERROR)
+        }
+    }
+
+    companion object {
+        const val LOCALHOST = "127.0.0.1"
+
+        /** Common prefix used on Anki requests */
+        const val ANKI_PREFIX = "/_anki/"
+        const val ANKIDROID_JS_PREFIX = "/jsapi/"
+
+        fun getMimeFromUri(uri: String): String {
+            val ext = uri.substringAfterLast(".", missingDelimiterValue = "").lowercase()
+            return when (ext) {
+                "ico" -> "image/x-icon"
+                "css" -> "text/css"
+                "js" -> "text/javascript"
+                "mjs" -> "text/javascript"
+                "html" -> "text/html"
+                "json" -> "application/json"
+                "map" -> "application/json"
+                "svg" -> "image/svg+xml"
+                "png" -> "image/png"
+                "jpg", "jpeg" -> "image/jpeg"
+                "gif" -> "image/gif"
+                "webp" -> "image/webp"
+                "woff2" -> "font/woff2"
+                "woff" -> "font/woff"
+                "ttf" -> "font/ttf"
+                "otf" -> "font/otf"
+                "wasm" -> "application/wasm"
+                "mp3" -> "audio/mpeg"
+                "ogg" -> "audio/ogg"
+                "wav" -> "audio/wav"
+                "mp4" -> "video/mp4"
+                "webm" -> "video/webm"
+                else -> "application/octet-stream"
+            }
+        }
+
+        fun getSessionBytes(session: IHTTPSession): ByteArray {
+            val contentLength = session.headers["content-length"]!!.toInt()
+            val bytes = ByteArray(contentLength)
+            session.inputStream.read(bytes, 0, contentLength)
+            return bytes
+        }
+
+        fun newChunkedResponse(
+            data: ByteArray?,
+            mimeType: String = "application/binary",
+            status: Response.IStatus = Response.Status.OK
+        ): Response {
+            return if (data == null) {
+                newFixedLengthResponse(null)
+            } else {
+                newChunkedResponse(status, mimeType, ByteArrayInputStream(data))
+            }
+        }
+    }
+}
+[end of AnkiDroid/src/main/java/com/ichi2/anki/pages/AnkiServer.kt]

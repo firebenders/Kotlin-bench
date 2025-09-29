@@ -1,0 +1,198 @@
+[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoConsecutiveBlankLinesRule.kt]
+package com.pinterest.ktlint.ruleset.standard.rules
+
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE
+import com.pinterest.ktlint.rule.engine.core.api.RuleId
+import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+import com.pinterest.ktlint.ruleset.standard.StandardRule
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+import org.jetbrains.kotlin.com.intellij.psi.PsiWhiteSpace
+import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
+import org.jetbrains.kotlin.kdoc.psi.api.KDoc
+
+public class NoConsecutiveBlankLinesRule : StandardRule("no-consecutive-blank-lines") {
+    
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        if (node.elementType == FILE) {
+            checkConsecutiveBlankLines(node, emit, autoCorrect)
+        }
+    }
+    
+    private fun checkConsecutiveBlankLines(
+        fileNode: ASTNode,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+        autoCorrect: Boolean
+    ) {
+        var currentNode: ASTNode? = fileNode.firstChildNode
+        
+        while (currentNode != null) {
+            if (currentNode.psi is PsiWhiteSpace) {
+                val whitespaceText = currentNode.text
+                val newlineCount = whitespaceText.count { it == '\n' }
+                
+                if (newlineCount > 2) {
+                    // More than 2 newlines means there are consecutive blank lines
+                    // But we need to check if this is between KDoc comments
+                    val prevNonWhitespaceNode = findPrevNonWhitespaceNode(currentNode)
+                    val nextNonWhitespaceNode = findNextNonWhitespaceNode(currentNode)
+                    
+                    val isPrevKDoc = prevNonWhitespaceNode?.psi is KDoc || 
+                        (prevNonWhitespaceNode?.text?.endsWith("*/") == true)
+                    val isNextKDoc = nextNonWhitespaceNode?.psi is KDoc ||
+                        (nextNonWhitespaceNode?.text?.startsWith("/**") == true)
+                    
+                    // Don't flag consecutive blank lines between KDoc comments
+                    if (!(isPrevKDoc && isNextKDoc)) {
+                        emit(
+                            currentNode.startOffset,
+                            "Needless blank line(s)",
+                            true
+                        )
+                        
+                        if (autoCorrect) {
+                            // Keep only one blank line (two newlines)
+                            val indentation = whitespaceText.substringAfterLast('\n')
+                            val replacement = "\n\n$indentation"
+                            (currentNode as LeafPsiElement).rawReplaceWithText(replacement)
+                        }
+                    }
+                }
+            }
+            currentNode = currentNode.treeNext
+        }
+    }
+    
+    private fun findPrevNonWhitespaceNode(node: ASTNode): ASTNode? {
+        var current = node.treePrev
+        while (current != null && current.psi is PsiWhiteSpace) {
+            current = current.treePrev
+        }
+        return current
+    }
+    
+    private fun findNextNonWhitespaceNode(node: ASTNode): ASTNode? {
+        var current = node.treeNext
+        while (current != null && current.psi is PsiWhiteSpace) {
+            current = current.treeNext
+        }
+        return current
+    }
+}
+
+public val NO_CONSECUTIVE_BLANK_LINES_RULE_ID: RuleId = NoConsecutiveBlankLinesRule().ruleId
+[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoConsecutiveBlankLinesRule.kt]
+[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRule.kt]
+package com.pinterest.ktlint.ruleset.standard.rules
+
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
+import com.pinterest.ktlint.rule.engine.core.api.RuleId
+import com.pinterest.ktlint.rule.engine.core.api.children
+import com.pinterest.ktlint.ruleset.standard.StandardRule
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+import org.jetbrains.kotlin.com.intellij.psi.PsiComment
+import org.jetbrains.kotlin.com.intellij.psi.PsiElement
+import org.jetbrains.kotlin.com.intellij.psi.PsiWhiteSpace
+import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
+import org.jetbrains.kotlin.kdoc.psi.api.KDoc
+import org.jetbrains.kotlin.psi.KtAnnotationEntry
+import org.jetbrains.kotlin.psi.KtDeclaration
+import org.jetbrains.kotlin.psi.psiUtil.getPrevSiblingIgnoringWhitespaceAndComments
+import org.jetbrains.kotlin.psi.psiUtil.prevLeaf
+import org.jetbrains.kotlin.psi.psiUtil.prevLeafs
+
+/**
+ * @see https://youtrack.jetbrains.com/issue/KT-35106
+ */
+public class SpacingBetweenDeclarationsWithAnnotationsRule : StandardRule("spacing-between-declarations-with-annotations") {
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        if (node.elementType == MODIFIER_LIST && node.hasAnnotationsAsChildren()) {
+            val declaration = node.psi.parent as? KtDeclaration
+            val prevDeclaration =
+                declaration?.getPrevSiblingIgnoringWhitespaceAndComments(withItself = false) as? KtDeclaration
+            val whiteSpaceAfterPreviousDeclaration = prevDeclaration?.nextSibling as? PsiWhiteSpace
+            val startOfDeclarationIncludingLeadingComment = node.psi.parent.getPrevLeafIgnoringCommentAndWhitespaceExceptBlankLines()
+            
+            // Check if there are consecutive KDoc comments before this declaration
+            val hasConsecutiveKDocComments = hasConsecutiveKDocCommentsBeforeDeclaration(declaration)
+            
+            if (whiteSpaceAfterPreviousDeclaration?.text != null &&
+                startOfDeclarationIncludingLeadingComment?.text?.count { it == '\n' } == 1 &&
+                !hasConsecutiveKDocComments // Don't apply the rule if there are consecutive KDoc comments
+            ) {
+                emit(
+                    node.startOffset,
+                    "Declarations and declarations with annotations should have an empty space between.",
+                    true,
+                )
+                if (autoCorrect) {
+                    val indent = whiteSpaceAfterPreviousDeclaration.text.substringAfter('\n')
+                    (whiteSpaceAfterPreviousDeclaration.node as LeafPsiElement).rawReplaceWithText("\n\n$indent")
+                }
+            }
+        }
+    }
+
+    /**
+     * Check if there are consecutive KDoc comments before the given declaration.
+     * This helps avoid false positives when there are multiple KDoc comments in a row.
+     */
+    private fun hasConsecutiveKDocCommentsBeforeDeclaration(declaration: KtDeclaration?): Boolean {
+        if (declaration == null) return false
+        
+        var current: PsiElement? = declaration.prevLeaf()
+        var kDocCount = 0
+        
+        // Look backwards through the elements to find KDoc comments
+        while (current != null) {
+            when {
+                current is KDoc || current.text.trim().startsWith("/**") -> {
+                    kDocCount++
+                    if (kDocCount >= 2) return true
+                }
+                current is PsiWhiteSpace -> {
+                    // Continue looking past whitespace
+                }
+                else -> {
+                    // Stop if we hit something else
+                    break
+                }
+            }
+            current = current.prevLeaf()
+        }
+        
+        return false
+    }
+
+    /**
+     * Gets the previous element but ignores white whitespaces (excluding blank lines) and comments. Note the difference
+     * with method [PsiElement.getPrevSiblingIgnoringWhitespaceAndComments] which excludes blank lines as well.
+     */
+    private fun PsiElement.getPrevLeafIgnoringCommentAndWhitespaceExceptBlankLines(): PsiElement? {
+        var prevLeaf: PsiElement? = this.prevLeaf()
+        val iterator = prevLeafs.iterator()
+        while (iterator.hasNext()) {
+            val psiElement = iterator.next()
+            if (psiElement is PsiComment || 
+                psiElement is KDoc ||
+                (psiElement is PsiWhiteSpace && psiElement.text?.count { it == '\n' } == 1)) {
+                prevLeaf = psiElement
+            } else {
+                break
+            }
+        }
+        return prevLeaf
+    }
+
+    private fun ASTNode.hasAnnotationsAsChildren(): Boolean = children().find { it.psi is KtAnnotationEntry } != null
+}
+
+public val SPACING_BETWEEN_DECLARATIONS_WITH_ANNOTATIONS_RULE_ID: RuleId = SpacingBetweenDeclarationsWithAnnotationsRule().ruleId
+[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRule.kt]

@@ -1,0 +1,1042 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "An internal error in ktlint has been reported, which occurs when an empty enum class is present in the codebase. The error is a `java.util.NoSuchElementException` originating from the `TrailingCommaOnDeclarationSiteRule`. This happens because the rule attempts to find the last enum entry in an enum class, which fails when there are no entries.\n\nTo resolve this, I will modify the `TrailingCommaOnDeclarationSiteRule` to handle empty enum classes gracefully. Specifically, I will adjust the logic to check for the existence of enum entries before attempting to process them. This prevents the `NoSuchElementException` and allows ktlint to correctly handle empty enum classes without crashing.\n\nHere are the changes for the affected file:\n\n[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/TrailingCommaOnDeclarationSiteRule.kt]\n```kotlin\npackage com.pinterest.ktlint.ruleset.standard.rules\n\nimport com.pinterest.ktlint.rule.engine.core.api.EditorConfigProperties\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.ARROW\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.DESTRUCTURING_DECLARATION\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.FUNCTION_LITERAL\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.FUNCTION_TYPE\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PARAMETER_LIST\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER_LIST\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.WHEN_ENTRY\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE\nimport com.pinterest.ktlint.rule.engine.core.api.RuleId\nimport com.pinterest.ktlint.rule.engine.core.api.children\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfigProperty\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.UsesEditorConfigProperties\nimport com.pinterest.ktlint.rule.engine.core.api.isCodeLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.lineIndent\nimport com.pinterest.ktlint.rule.engine.core.api.noNewLineInClosedRange\nimport com.pinterest.ktlint.rule.engine.core.api.prevCodeLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.prevLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe\nimport com.pinterest.ktlint.ruleset.standard.StandardRule\nimport org.ec4j.core.model.PropertyType\nimport org.ec4j.core.model.PropertyType.PropertyValueParser\nimport org.jetbrains.kotlin.com.intellij.lang.ASTNode\nimport org.jetbrains.kotlin.com.intellij.psi.PsiElement\nimport org.jetbrains.kotlin.com.intellij.psi.PsiWhiteSpace\nimport org.jetbrains.kotlin.com.intellij.psi.tree.TokenSet\nimport org.jetbrains.kotlin.psi.KtClass\nimport org.jetbrains.kotlin.psi.KtCollectionLiteralExpression\nimport org.jetbrains.kotlin.psi.KtDestructuringDeclaration\nimport org.jetbrains.kotlin.psi.KtEnumEntry\nimport org.jetbrains.kotlin.psi.KtFunctionLiteral\nimport org.jetbrains.kotlin.psi.KtParameterList\nimport org.jetbrains.kotlin.psi.KtPsiFactory\nimport org.jetbrains.kotlin.psi.KtValueArgumentList\nimport org.jetbrains.kotlin.psi.KtWhenEntry\nimport org.jetbrains.kotlin.psi.KtWhenExpression\nimport org.jetbrains.kotlin.psi.psiUtil.anyDescendantOfType\nimport org.jetbrains.kotlin.psi.psiUtil.collectDescendantsOfType\nimport org.jetbrains.kotlin.psi.psiUtil.nextLeaf\nimport org.jetbrains.kotlin.psi.psiUtil.parents\nimport org.jetbrains.kotlin.psi.psiUtil.prevLeaf\nimport org.jetbrains.kotlin.utils.addToStdlib.cast\nimport kotlin.properties.Delegates\n\n/**\n * Linting trailing comma for declaration site.\n *\n * @see [Kotlin Style Guide](https://kotlinlang.org/docs/coding-conventions.html#trailing-commas)\n */\npublic class TrailingCommaOnDeclarationSiteRule :\n    StandardRule(\n        id = \"trailing-comma-on-declaration-site\",\n        visitorModifiers = setOf(\n            VisitorModifier.RunAfterRule(\n                ruleId = WRAPPING_RULE_ID,\n                loadOnlyWhenOtherRuleIsLoaded = true,\n                runOnlyWhenOtherRuleIsEnabled = true,\n            ),\n            VisitorModifier.RunAsLateAsPossible,\n        ),\n    ),\n    UsesEditorConfigProperties {\n    override val editorConfigProperties: List<EditorConfigProperty<*>> = listOf(\n        TRAILING_COMMA_ON_DECLARATION_SITE_PROPERTY,\n    )\n\n    private var allowTrailingComma by Delegates.notNull<Boolean>()\n\n    private fun ASTNode.isTrailingCommaAllowed() = elementType in TYPES_ON_DECLARATION_SITE && allowTrailingComma\n\n    override fun beforeFirstNode(editorConfigProperties: EditorConfigProperties) {\n        allowTrailingComma = editorConfigProperties.getEditorConfigValue(TRAILING_COMMA_ON_DECLARATION_SITE_PROPERTY)\n    }\n\n    override fun beforeVisitChildNodes(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        // Keep processing of element types in sync with Intellij Kotlin formatting settings.\n        // https://github.com/JetBrains/intellij-kotlin/blob/master/formatter/src/org/jetbrains/kotlin/idea/formatter/trailingComma/util.kt\n        when (node.elementType) {\n            CLASS -> visitClass(node, emit, autoCorrect)\n            DESTRUCTURING_DECLARATION -> visitDestructuringDeclaration(node, autoCorrect, emit)\n            FUNCTION_LITERAL -> visitFunctionLiteral(node, autoCorrect, emit)\n            TYPE_PARAMETER_LIST -> visitTypeList(node, autoCorrect, emit)\n            VALUE_PARAMETER_LIST -> visitValueList(node, autoCorrect, emit)\n            WHEN_ENTRY -> visitWhenEntry(node, autoCorrect, emit)\n            else -> Unit\n        }\n    }\n\n    private fun visitDestructuringDeclaration(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        val inspectNode = node\n            .children()\n            .last { it.elementType == ElementType.RPAR }\n        node.reportAndCorrectTrailingCommaNodeBefore(\n            inspectNode = inspectNode,\n            isTrailingCommaAllowed = node.isTrailingCommaAllowed(),\n            autoCorrect = autoCorrect,\n            emit = emit,\n        )\n    }\n\n    private fun visitFunctionLiteral(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        val inspectNode = node\n            .children()\n            .lastOrNull { it.elementType == ARROW }\n            ?: // lambda w/o an arrow -> no arguments -> no commas\n            return\n        node.reportAndCorrectTrailingCommaNodeBefore(\n            inspectNode = inspectNode,\n            isTrailingCommaAllowed = node.isTrailingCommaAllowed(),\n            autoCorrect = autoCorrect,\n            emit = emit,\n        )\n    }\n\n    private fun visitValueList(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        if (node.treeParent.elementType != FUNCTION_LITERAL) {\n            node\n                .children()\n                .lastOrNull { it.elementType == ElementType.RPAR }\n                ?.let { inspectNode ->\n                    node.reportAndCorrectTrailingCommaNodeBefore(\n                        inspectNode = inspectNode,\n                        isTrailingCommaAllowed = node.isTrailingCommaAllowed(),\n                        autoCorrect = autoCorrect,\n                        emit = emit,\n                    )\n                }\n        }\n    }\n\n    private fun visitTypeList(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        val inspectNode = node\n            .children()\n            .first { it.elementType == ElementType.GT }\n        node.reportAndCorrectTrailingCommaNodeBefore(\n            inspectNode = inspectNode,\n            isTrailingCommaAllowed = node.isTrailingCommaAllowed(),\n            autoCorrect = autoCorrect,\n            emit = emit,\n        )\n    }\n\n    private fun visitWhenEntry(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        val psi = node.psi\n        require(psi is KtWhenEntry)\n        if (psi.isElse || psi.parent.cast<KtWhenExpression>().leftParenthesis == null) {\n            // no commas for \"else\" or when there are no opening parenthesis for the when-expression\n            return\n        }\n\n        val inspectNode = node\n            .children()\n            .first { it.elementType == ARROW }\n        node.reportAndCorrectTrailingCommaNodeBefore(\n            inspectNode = inspectNode,\n            isTrailingCommaAllowed = node.isTrailingCommaAllowed(),\n            autoCorrect = autoCorrect,\n            emit = emit,\n        )\n    }\n    private fun visitClass(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        val psi = node.psi\n        require(psi is KtClass)\n\n        node\n            .takeIf { psi.isEnum() }\n            ?.findChildByType(ElementType.CLASS_BODY)\n            ?.takeUnless {\n                // Do nothing when last two entries are on same line as no trailing comma should be inserted\n                it.lastTwoEnumEntriesAreOnSameLine()\n            }?.let { classBody ->\n                classBody.findNodeAfterTrailingCommaPosition()?.let { nodeAfterTrailingCommaPosition ->\n                    node.reportAndCorrectTrailingCommaNodeBefore(\n                        inspectNode = nodeAfterTrailingCommaPosition,\n                        isTrailingCommaAllowed = node.isTrailingCommaAllowed(),\n                        autoCorrect = autoCorrect,\n                        emit = emit,\n                    )\n                }\n            }\n    }\n\n    /**\n     * Determines the [ASTNode] before which the trailing comma is allowed.\n     *\n     * If the list of enumeration entries is terminated by a semicolon, that semicolon will be returned. Otherwise, the\n     * last element of the class.\n     */\n    private fun ASTNode.findNodeAfterTrailingCommaPosition(): ASTNode? {\n        val lastEnumEntry =\n            children()\n                .lastOrNull { it.psi is KtEnumEntry }\n                ?: return null\n\n        val semicolonAfterLastEnumEntry = lastEnumEntry\n            .children()\n            .singleOrNull { it.elementType == ElementType.SEMICOLON }\n\n        return semicolonAfterLastEnumEntry ?: lastChildNode\n    }\n\n    private fun ASTNode.lastTwoEnumEntriesAreOnSameLine(): Boolean {\n        val lastTwoEnumEntries =\n            children()\n                .filter { it.psi is KtEnumEntry }\n                .toList()\n                .takeLast(2)\n\n        return lastTwoEnumEntries.count() == 2 && noNewLineInClosedRange(lastTwoEnumEntries[0], lastTwoEnumEntries[1])\n    }\n\n    private fun ASTNode.reportAndCorrectTrailingCommaNodeBefore(\n        inspectNode: ASTNode,\n        isTrailingCommaAllowed: Boolean,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        val prevLeaf = inspectNode.prevLeaf()\n        val trailingCommaNode = prevLeaf?.findPreviousTrailingCommaNodeOrNull()\n        val trailingCommaState = when {\n            isMultiline(psi) -> if (trailingCommaNode != null) TrailingCommaState.EXISTS else TrailingCommaState.MISSING\n            else -> if (trailingCommaNode != null) TrailingCommaState.REDUNDANT else TrailingCommaState.NOT_EXISTS\n        }\n        when (trailingCommaState) {\n            TrailingCommaState.EXISTS ->\n                if (isTrailingCommaAllowed) {\n                    inspectNode\n                        .treeParent\n                        .takeIf { it.elementType == WHEN_ENTRY }\n                        ?.findChildByType(ARROW)\n                        ?.prevLeaf()\n                        ?.let { lastNodeBeforeArrow ->\n                            if (lastNodeBeforeArrow.elementType != WHITE_SPACE || !lastNodeBeforeArrow.textContains('\\n')) {\n                                emit(\n                                    trailingCommaNode!!.startOffset,\n                                    \"Expected a newline between the trailing comma and  \\\"${inspectNode.text}\\\"\",\n                                    true,\n                                )\n                                if (autoCorrect) {\n                                    val parentIndent = \"\\n\" + inspectNode.getWhenEntryIndent()\n                                    lastNodeBeforeArrow.upsertWhitespaceAfterMe(parentIndent)\n                                }\n                            }\n                        }\n                } else {\n                    emit(\n                        trailingCommaNode!!.startOffset,\n                        \"Unnecessary trailing comma before \\\"${inspectNode.text}\\\"\",\n                        true,\n                    )\n                    if (autoCorrect) {\n                        this.removeChild(trailingCommaNode)\n                    }\n                }\n            TrailingCommaState.MISSING ->\n                if (isTrailingCommaAllowed) {\n                    val addNewLineBeforeArrowInWhenEntry = addNewLineBeforeArrowInWhen()\n                    val prevNode = inspectNode.prevCodeLeaf()!!\n                    if (addNewLineBeforeArrowInWhenEntry) {\n                        emit(\n                            prevNode.startOffset + prevNode.textLength,\n                            \"Missing trailing comma and newline before \\\"${inspectNode.text}\\\"\",\n                            true,\n                        )\n                    } else {\n                        emit(\n                            prevNode.startOffset + prevNode.textLength,\n                            \"Missing trailing comma before \\\"${inspectNode.text}\\\"\",\n                            true,\n                        )\n                    }\n                    if (autoCorrect) {\n                        if (addNewLineBeforeArrowInWhenEntry) {\n                            val parentIndent = \"\\n\" + prevNode.getWhenEntryIndent()\n                            val leafBeforeArrow = (psi as KtWhenEntry).arrow?.prevLeaf()\n                            if (leafBeforeArrow != null && leafBeforeArrow is PsiWhiteSpace) {\n                                val newLine = KtPsiFactory(prevNode.psi).createWhiteSpace(parentIndent)\n                                leafBeforeArrow.replace(newLine)\n                            } else {\n                                val newLine = KtPsiFactory(prevNode.psi).createWhiteSpace(parentIndent)\n                                prevNode.psi.parent.addAfter(newLine, prevNode.psi)\n                            }\n                        }\n\n                        val comma = KtPsiFactory(prevNode.psi).createComma()\n                        if (inspectNode.treeParent.elementType == ElementType.ENUM_ENTRY) {\n                            with(KtPsiFactory(prevNode.psi)) {\n                                val parentIndent =\n                                    (prevNode.psi.parent.prevLeaf() as? PsiWhiteSpace)?.text\n                                        ?: \"\\n${prevNode.lineIndent()}\"\n                                val newline = createWhiteSpace(parentIndent)\n                                val enumEntry = inspectNode.treeParent.psi\n                                enumEntry.apply {\n                                    inspectNode.psi.replace(comma)\n                                    add(newline)\n                                    add(createSemicolon())\n                                }\n                            }\n                            Unit\n                        } else {\n                            prevNode.psi.parent.addAfter(comma, prevNode.psi)\n                        }\n                    }\n                }\n            TrailingCommaState.REDUNDANT -> {\n                emit(\n                    trailingCommaNode!!.startOffset,\n                    \"Unnecessary trailing comma before \\\"${inspectNode.text}\\\"\",\n                    true,\n                )\n                if (autoCorrect) {\n                    this.removeChild(trailingCommaNode)\n                }\n            }\n            TrailingCommaState.NOT_EXISTS -> Unit\n        }\n    }\n\n    private fun ASTNode.getWhenEntryIndent() =\n        // The when entry can be a simple value but might also be a complex expression.\n        parents()\n            .last { it.elementType == WHEN_ENTRY }\n            .lineIndent()\n\n    private fun isMultiline(element: PsiElement): Boolean =\n        when {\n            element.parent is KtFunctionLiteral -> {\n                isMultiline(element.parent)\n            }\n            element is KtFunctionLiteral -> {\n                containsLineBreakInLeavesRange(element.valueParameterList!!, element.arrow!!)\n            }\n            element is KtWhenEntry -> {\n                containsLineBreakInLeavesRange(element.firstChild, element.arrow!!)\n            }\n            element is KtDestructuringDeclaration -> {\n                containsLineBreakInLeavesRange(element.lPar!!, element.rPar!!)\n            }\n            element is KtValueArgumentList &&\n                element.children.size == 1 &&\n                element.anyDescendantOfType<KtCollectionLiteralExpression>() -> {\n                // special handling for collection literal\n                // @Annotation([\n                //    \"something\",\n                // ])\n                val lastChild = element.collectDescendantsOfType<KtCollectionLiteralExpression>().last()\n                containsLineBreakInLeavesRange(lastChild.rightBracket!!, element.rightParenthesis!!)\n            }\n            element is KtParameterList && element.parameters.isEmpty() -> {\n                false\n            }\n            else -> {\n                element.textContains('\\n')\n            }\n        }\n\n    private fun ASTNode.addNewLineBeforeArrowInWhen() =\n        if (psi is KtWhenEntry) {\n            val leafBeforeArrow = (psi as KtWhenEntry).arrow?.prevLeaf()\n            !(leafBeforeArrow is PsiWhiteSpace && leafBeforeArrow.textContains('\\n'))\n        } else {\n            false\n        }\n\n    private fun ASTNode.findPreviousTrailingCommaNodeOrNull(): ASTNode? {\n        val codeLeaf = if (isCodeLeaf()) {\n            this\n        } else {\n            prevCodeLeaf()\n        }\n        return codeLeaf?.takeIf { it.elementType == ElementType.COMMA }\n    }\n\n    private fun containsLineBreakInLeavesRange(\n        from: PsiElement,\n        to: PsiElement,\n    ): Boolean {\n        var leaf: PsiElement? = from\n        while (leaf != null && !leaf.isEquivalentTo(to)) {\n            if (leaf.textContains('\\n')) {\n                return true\n            }\n            leaf = leaf.nextLeaf(skipEmptyElements = false)\n        }\n        return leaf?.textContains('\\n') ?: false\n    }\n\n    private enum class TrailingCommaState {\n        /**\n         * The trailing comma is needed and exists\n         */\n        EXISTS,\n\n        /**\n         * The trailing comma is needed and doesn't exist\n         */\n        MISSING,\n\n        /**\n         * The trailing comma isn't needed and doesn't exist\n         */\n        NOT_EXISTS,\n\n        /**\n         * The trailing comma isn't needed, but exists\n         */\n        REDUNDANT,\n    }\n\n    public companion object {\n        private val BOOLEAN_VALUES_SET = setOf(\"true\", \"false\")\n\n        public val TRAILING_COMMA_ON_DECLARATION_SITE_PROPERTY: EditorConfigProperty<Boolean> =\n            EditorConfigProperty(\n                type = PropertyType.LowerCasingPropertyType(\n                    \"ij_kotlin_allow_trailing_comma\",\n                    \"Defines whether a trailing comma (or no trailing comma) should be enforced on the defining \" +\n                        \"side, e.g. parameter-list, type-argument-list, lambda-value-parameters, enum-entries, etc.\" +\n                        \"When set, IntelliJ IDEA uses this property to allow usage of a trailing comma by discretion \" +\n                        \"of the developer. KtLint however uses this setting to enforce consistent usage of the \" +\n                        \"trailing comma when set.\",\n                    PropertyValueParser.BOOLEAN_VALUE_PARSER,\n                    BOOLEAN_VALUES_SET,\n                ),\n                defaultValue = true,\n                androidStudioCodeStyleDefaultValue = false,\n            )\n\n        @Deprecated(\n            message = \"Marked for removal in KtLint 0.49\",\n            replaceWith = ReplaceWith(\"TRAILING_COMMA_ON_DECLARATION_SITE_PROPERTY\"),\n        )\n        @Suppress(\"ktlint:property-naming\")\n        public val allowTrailingCommaProperty: EditorConfigProperty<Boolean> =\n            TRAILING_COMMA_ON_DECLARATION_SITE_PROPERTY\n\n        private val TYPES_ON_DECLARATION_SITE = TokenSet.create(\n            CLASS,\n            DESTRUCTURING_DECLARATION,\n            FUNCTION_LITERAL,\n            FUNCTION_TYPE,\n            TYPE_PARAMETER_LIST,\n            VALUE_PARAMETER_LIST,\n            WHEN_ENTRY,\n        )\n    }\n}\n\npublic val TRAILING_COMMA_ON_DECLARATION_SITE_RULE_ID: RuleId = TrailingCommaOnDeclarationSiteRule().ruleId\n```\n[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/TrailingCommaOnDeclarationSiteRule.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 1151,
+            "endIndex": 1342,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 1213,
+            "endIndex": 1803,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 1868,
+            "endIndex": 2125,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 2419,
+            "endIndex": 2794,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 2902,
+            "endIndex": 3103,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 4111,
+            "endIndex": 4302,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 4173,
+            "endIndex": 5044,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 5372,
+            "endIndex": 5645,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 5445,
+            "endIndex": 5707,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 6288,
+            "endIndex": 6489,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 6903,
+            "endIndex": 7106,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 7821,
+            "endIndex": 8022,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 8227,
+            "endIndex": 8418,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 8289,
+            "endIndex": 8781,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 8911,
+            "endIndex": 9184,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 9452,
+            "endIndex": 9800,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 10001,
+            "endIndex": 10192,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 10063,
+            "endIndex": 10555,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 10685,
+            "endIndex": 11399,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 11456,
+            "endIndex": 11657,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 12337,
+            "endIndex": 12538,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 12582,
+            "endIndex": 12773,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 12644,
+            "endIndex": 13136,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 13291,
+            "endIndex": 13580,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 13832,
+            "endIndex": 14023,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 13894,
+            "endIndex": 15420,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 15549,
+            "endIndex": 15740,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 15611,
+            "endIndex": 16103,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 16233,
+            "endIndex": 16506,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 16655,
+            "endIndex": 17009,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 17078,
+            "endIndex": 17279,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 17460,
+            "endIndex": 17580,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 17652,
+            "endIndex": 17836,
+            "uri": "https://github.com/pankaj1920/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 17849,
+            "endIndex": 18019,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 18005,
+            "endIndex": 18167,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 18080,
+            "endIndex": 18249,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 18252,
+            "endIndex": 18398,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 18326,
+            "endIndex": 18490,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 18454,
+            "endIndex": 18616,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 18634,
+            "endIndex": 18775,
+            "uri": "https://github.com/detekt/detekt/blob/main/detekt-formatting/src/main/kotlin/io/gitlab/arturbosch/detekt/formatting/wrappers/ChainWrapping.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 18738,
+            "endIndex": 19035,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 18998,
+            "endIndex": 19167,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19105,
+            "endIndex": 19259,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19249,
+            "endIndex": 19449,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19444,
+            "endIndex": 19611,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19617,
+            "endIndex": 19769,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19679,
+            "endIndex": 19865,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 19891,
+            "endIndex": 20077,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 20070,
+            "endIndex": 20190,
+            "uri": "https://jar-download.com/artifacts/io.gitlab.arturbosch.detekt/detekt-rules/1.1.0/source-code/io/gitlab/arturbosch/detekt/rules/exceptions/SwallowedException.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 20130,
+            "endIndex": 20282,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 20276,
+            "endIndex": 20506,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 20435,
+            "endIndex": 20639,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 20661,
+            "endIndex": 21028,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 20925,
+            "endIndex": 21314,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 21191,
+            "endIndex": 21521,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 21526,
+            "endIndex": 21709,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 21778,
+            "endIndex": 22030,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 21910,
+            "endIndex": 22696,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 22647,
+            "endIndex": 22901,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 22746,
+            "endIndex": 23250,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 23180,
+            "endIndex": 23524,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 23360,
+            "endIndex": 23851,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 23712,
+            "endIndex": 24118,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 24015,
+            "endIndex": 24588,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 24437,
+            "endIndex": 24794,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 24639,
+            "endIndex": 25317,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 25155,
+            "endIndex": 25524,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 25509,
+            "endIndex": 25968,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 25839,
+            "endIndex": 26331,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 26461,
+            "endIndex": 27175,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 27244,
+            "endIndex": 27731,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 27531,
+            "endIndex": 27793,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 27815,
+            "endIndex": 28221,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 28081,
+            "endIndex": 28473,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 28440,
+            "endIndex": 29442,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 29170,
+            "endIndex": 29790,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29679,
+            "endIndex": 31028,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 30746,
+            "endIndex": 31234,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 31091,
+            "endIndex": 31765,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 31543,
+            "endIndex": 31978,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 31853,
+            "endIndex": 32345,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32122,
+            "endIndex": 32942,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32681,
+            "endIndex": 33250,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32989,
+            "endIndex": 33625,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 33532,
+            "endIndex": 34206,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 34044,
+            "endIndex": 34551,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 34478,
+            "endIndex": 34854,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 34839,
+            "endIndex": 35212,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 35134,
+            "endIndex": 35355,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 35370,
+            "endIndex": 35566,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 35453,
+            "endIndex": 35829,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 35836,
+            "endIndex": 36396,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 36221,
+            "endIndex": 36575,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 36446,
+            "endIndex": 36775,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 36627,
+            "endIndex": 36831,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 36833,
+            "endIndex": 37343,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 37340,
+            "endIndex": 37558,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 37564,
+            "endIndex": 37891,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 37795,
+            "endIndex": 38105,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 38953,
+            "endIndex": 39073,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39086,
+            "endIndex": 39270,
+            "uri": "https://github.com/pankaj1920/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39283,
+            "endIndex": 39453,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39439,
+            "endIndex": 39601,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39514,
+            "endIndex": 39683,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39686,
+            "endIndex": 39832,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39760,
+            "endIndex": 39924,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39888,
+            "endIndex": 40050,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40068,
+            "endIndex": 40209,
+            "uri": "https://github.com/detekt/detekt/blob/main/detekt-formatting/src/main/kotlin/io/gitlab/arturbosch/detekt/formatting/wrappers/ChainWrapping.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 40172,
+            "endIndex": 40469,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40432,
+            "endIndex": 40601,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40539,
+            "endIndex": 40693,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40683,
+            "endIndex": 40883,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40878,
+            "endIndex": 41045,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 41051,
+            "endIndex": 41203,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 41113,
+            "endIndex": 41299,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 41325,
+            "endIndex": 41511,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 41504,
+            "endIndex": 41624,
+            "uri": "https://jar-download.com/artifacts/io.gitlab.arturbosch.detekt/detekt-rules/1.1.0/source-code/io/gitlab/arturbosch/detekt/rules/exceptions/SwallowedException.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 41564,
+            "endIndex": 41716,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 41710,
+            "endIndex": 41940,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 41869,
+            "endIndex": 42073,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 42095,
+            "endIndex": 42462,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42359,
+            "endIndex": 42748,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42625,
+            "endIndex": 42955,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 42960,
+            "endIndex": 43143,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 43212,
+            "endIndex": 43464,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 43344,
+            "endIndex": 44130,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 44081,
+            "endIndex": 44335,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 44180,
+            "endIndex": 44684,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 44614,
+            "endIndex": 44958,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 44794,
+            "endIndex": 45285,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 45146,
+            "endIndex": 45552,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 45449,
+            "endIndex": 46022,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 45871,
+            "endIndex": 46228,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 46073,
+            "endIndex": 46751,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 46589,
+            "endIndex": 46958,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 46943,
+            "endIndex": 47402,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 47273,
+            "endIndex": 47765,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 47895,
+            "endIndex": 48638,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 48711,
+            "endIndex": 49198,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 48998,
+            "endIndex": 49260,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 49282,
+            "endIndex": 49688,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 49548,
+            "endIndex": 49940,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 49907,
+            "endIndex": 50909,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 50637,
+            "endIndex": 51257,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 51146,
+            "endIndex": 52495,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 52213,
+            "endIndex": 52701,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 52558,
+            "endIndex": 53232,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 53010,
+            "endIndex": 53445,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 53320,
+            "endIndex": 53812,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 53589,
+            "endIndex": 54409,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54148,
+            "endIndex": 54717,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54456,
+            "endIndex": 55092,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 54999,
+            "endIndex": 55673,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 55511,
+            "endIndex": 56018,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 55945,
+            "endIndex": 56321,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 56306,
+            "endIndex": 56679,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 56601,
+            "endIndex": 56822,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 56837,
+            "endIndex": 57033,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 56920,
+            "endIndex": 57296,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57303,
+            "endIndex": 57863,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 57688,
+            "endIndex": 58042,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57913,
+            "endIndex": 58242,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 58094,
+            "endIndex": 58298,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 58300,
+            "endIndex": 58810,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 58807,
+            "endIndex": 59025,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 59031,
+            "endIndex": 59358,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 59262,
+            "endIndex": 59572,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 59595,
+            "endIndex": 59715,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 47761,
+    "candidatesTokenCount": 4988,
+    "totalTokenCount": 61728,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 47761
+      }
+    ],
+    "thoughtsTokenCount": 8979
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "vIlDaO2nKrur1MkP3KLsyAM"
+}

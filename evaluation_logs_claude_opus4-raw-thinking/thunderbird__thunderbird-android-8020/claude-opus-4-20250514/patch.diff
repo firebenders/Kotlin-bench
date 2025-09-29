@@ -1,0 +1,89 @@
+[start of legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt]
+package com.fsck.k9.view
+
+import com.fsck.k9.mail.Address
+import org.apache.james.mime4j.util.CharsetUtil
+
+/**
+ * Used to parse name & email address pairs entered by the user.
+ *
+ * TODO: Build a custom implementation that can deal with typical inputs from users who are not familiar with the
+ *  RFC 5322 address-list syntax. See (ignored) tests in `UserInputEmailAddressParserTest`.
+ */
+internal class UserInputEmailAddressParser {
+
+    @Throws(NonAsciiEmailAddressException::class, InvalidEmailAddressException::class)
+    fun parse(input: String): List<Address> {
+        return Address.parseUnencoded(input)
+            .mapNotNull { address ->
+                when {
+                    address.isIncomplete() -> null
+                    address.isNonAsciiAddress() -> throw NonAsciiEmailAddressException(address.address)
+                    !address.isValidRfc5321Address() -> throw InvalidEmailAddressException(address.address)
+                    else -> Address.parse(address.toEncodedString()).firstOrNull()
+                }
+            }
+    }
+
+    private fun Address.isIncomplete() = hostname.isNullOrBlank()
+
+    private fun Address.isNonAsciiAddress() = !CharsetUtil.isASCII(address)
+
+    private fun Address.isValidRfc5321Address(): Boolean {
+        // Basic RFC-5321 validation
+        val emailAddress = address ?: return false
+        
+        // Check for empty address
+        if (emailAddress.isBlank()) return false
+        
+        // Split into local and domain parts
+        val parts = emailAddress.split('@')
+        if (parts.size != 2) return false
+        
+        val localPart = parts[0]
+        val domainPart = parts[1]
+        
+        // Check local part
+        if (localPart.isBlank() || localPart.length > 64) return false
+        
+        // Check domain part
+        if (domainPart.isBlank() || domainPart.length > 255) return false
+        
+        // Check for invalid characters in domain part
+        // RFC-5321 doesn't allow trailing slashes or other special characters at the end
+        if (domainPart.endsWith("/") || domainPart.endsWith("\\") || 
+            domainPart.endsWith(" ") || domainPart.endsWith("\t")) {
+            return false
+        }
+        
+        // Check for invalid starting/ending characters in domain
+        if (domainPart.startsWith(".") || domainPart.endsWith(".") ||
+            domainPart.startsWith("-") || domainPart.endsWith("-")) {
+            return false
+        }
+        
+        // Check for consecutive dots
+        if (domainPart.contains("..")) return false
+        
+        // Basic character validation for domain part
+        // RFC-5321 allows letters, digits, hyphens, and dots in domain names
+        val domainPattern = Regex("^[a-zA-Z0-9.-]+$")
+        if (!domainPattern.matches(domainPart)) return false
+        
+        // Check each domain label
+        val labels = domainPart.split('.')
+        for (label in labels) {
+            if (label.isBlank()) return false
+            if (label.startsWith("-") || label.endsWith("-")) return false
+            if (label.length > 63) return false
+        }
+        
+        return true
+    }
+}
+
+internal class NonAsciiEmailAddressException(message: String) : Exception(message)
+
+internal class InvalidEmailAddressException(val emailAddress: String) : 
+    Exception("Invalid email address format: $emailAddress")
+[end of legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt]

@@ -1,0 +1,159 @@
+[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt]
+```kotlin
+package com.pinterest.ktlint.ruleset.standard.rules
+
+import com.pinterest.ktlint.rule.engine.core.api.ASTNode
+import com.pinterest.ktlint.rule.engine.core.api.ElementType
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.COLON
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN_KEYWORD
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
+import com.pinterest.ktlint.rule.engine.core.api.Rule
+import com.pinterest.ktlint.rule.engine.core.api.RuleId
+import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue
+import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfigProperty
+import com.pinterest.ktlint.rule.engine.core.api.editorconfig.PropertyType
+import com.pinterest.ktlint.rule.engine.core.api.getRootNode
+import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe
+import com.pinterest.ktlint.ruleset.standard.StandardRule
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+
+public class FunctionReturnTypeSpacingRule :
+    StandardRule("function-return-type-spacing"),
+    Rule.Experimental {
+    private var maxLineLength: Int = MAX_LINE_LENGTH_PROPERTY_OFF_FOR_THIS_RULE
+
+    // Companion object to hold the EditorConfigProperty definition for max_line_length
+    private companion object {
+        // Define a constant for when max_line_length is off, mirroring ktlint's internal constant.
+        private const val MAX_LINE_LENGTH_PROPERTY_OFF_FOR_THIS_RULE = Int.MAX_VALUE
+
+        // Define an EditorConfigProperty for 'max_line_length'. This is a simplified version
+        // of the one in MaxLineLengthRule.kt, adapted for use here.
+        // It's necessary because the original is internal.
+        val MAX_LINE_LENGTH_CONFIG_PROPERTY: EditorConfigProperty<Int> =
+            EditorConfigProperty(
+                type = PropertyType.LowerCasingPropertyType(
+                    "max_line_length",
+                    "Maximum line length (default: $MAX_LINE_LENGTH_PROPERTY_OFF_FOR_THIS_RULE meaning no limit)",
+                    PropertyType.PropertyValueParser.POSITIVE_INT_VALUE_PARSER,
+                    setOf("off", "-1"), // Define "off" and -1 as special values indicating no limit
+                ),
+                defaultValue = MAX_LINE_LENGTH_PROPERTY_OFF_FOR_THIS_RULE,
+                propertyMapper = { property, codeStyleValue ->
+                    when {
+                        property?.isUnset == true && codeStyleValue == CodeStyleValue.android_studio -> 100
+                        property?.isUnset == true -> MAX_LINE_LENGTH_PROPERTY_OFF_FOR_THIS_RULE
+                        property?.value == -1 -> MAX_LINE_LENGTH_PROPERTY_OFF_FOR_THIS_RULE // Value of -1 means "off"
+                        property?.sourceValue == "off" -> MAX_LINE_LENGTH_PROPERTY_OFF_FOR_THIS_RULE // Value of "off" means "off"
+                        else -> property?.value ?: MAX_LINE_LENGTH_PROPERTY_OFF_FOR_THIS_RULE
+                    }
+                },
+            )
+    }
+
+    override val usesEditorConfigProperties: Set<EditorConfigProperty<*>> =
+        setOf(MAX_LINE_LENGTH_CONFIG_PROPERTY)
+
+    override fun beforeFirstNode(editorConfig: EditorConfig) {
+        maxLineLength = editorConfig[MAX_LINE_LENGTH_CONFIG_PROPERTY]
+    }
+
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        node
+            .takeIf { node.elementType == ElementType.FUN }
+            ?.let { node.findChildByType(COLON) }
+            ?.let { colonNode ->
+                removeWhiteSpaceBetweenClosingParenthesisAndColon(colonNode, emit, autoCorrect)
+                fixWhiteSpaceBetweenColonAndReturnType(colonNode, node, autoCorrect, emit)
+            }
+    }
+
+    private fun removeWhiteSpaceBetweenClosingParenthesisAndColon(
+        node: ASTNode,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+        autoCorrect: Boolean,
+    ) {
+        require(node.elementType == COLON)
+        node
+            .prevLeaf()
+            ?.takeIf { it.elementType == WHITE_SPACE }
+            ?.let { whitespaceBeforeColonNode ->
+                emit(whitespaceBeforeColonNode.startOffset, "Unexpected whitespace", true)
+                if (autoCorrect) {
+                    whitespaceBeforeColonNode.treeParent?.removeChild(whitespaceBeforeColonNode)
+                }
+            }
+    }
+
+    private fun fixWhiteSpaceBetweenColonAndReturnType(
+        colonNode: ASTNode,
+        funNode: ASTNode, // The FUN ASTNode
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        require(colonNode.elementType == COLON)
+        val whiteSpaceAfterColon = colonNode.nextLeaf()?.takeIf { it.elementType == WHITE_SPACE }
+        val returnTypeNode = colonNode.nextLeaf { it.elementType != WHITE_SPACE && it.elementType != COLON } ?: return
+
+        if (whiteSpaceAfterColon != null && whiteSpaceAfterColon.textContains('\n')) {
+            // Return type is on a new line. Check if moving it up would exceed max_line_length.
+            if (maxLineLength != MAX_LINE_LENGTH_PROPERTY_OFF_FOR_THIS_RULE) {
+                val funKeywordNode = funNode.findChildByType(FUN_KEYWORD) ?: return
+                val rootNode = funNode.getRootNode()
+                val fileText = rootNode.text
+
+                // Calculate indent length for the line
+                var lineStartOffset = funKeywordNode.startOffset
+                while (lineStartOffset > 0 && fileText[lineStartOffset - 1] != '\n') {
+                    lineStartOffset--
+                }
+                val indentLength = funKeywordNode.startOffset - lineStartOffset
+
+                // Calculate length of "fun ... ():" part
+                val signaturePartLength = (colonNode.startOffset + colonNode.textLength) - funKeywordNode.startOffset
+
+                // Calculate length of " ReturnType" part
+                val returnTypePartLength = 1 + returnTypeNode.textLength // 1 for the space
+
+                // Calculate length of the part after return type (e.g., " {" or " =")
+                val nextNonWhitespaceAfterReturnType = returnTypeNode.nextLeaf { it.elementType != WHITE_SPACE }
+                val afterReturnTypeLength =
+                    when (nextNonWhitespaceAfterReturnType?.elementType) {
+                        ElementType.EQ -> 1 + nextNonWhitespaceAfterReturnType.textLength // " ="
+                        ElementType.LBRACE -> 1 + nextNonWhitespaceAfterReturnType.textLength // " {"
+                        else -> 0 // No body or unexpected token (e.g., interface/abstract fun)
+                    }
+
+                val projectedLineLength = indentLength + signaturePartLength + returnTypePartLength + afterReturnTypeLength
+
+                if (projectedLineLength > maxLineLength) {
+                    // Exceeds max line length, so keep the newline. Do not autocorrect to single line.
+                    // Also, do not report an error, as the newline is justified by max_line_length.
+                    return
+                }
+            }
+            // If it fits, or max_line_length is off, then proceed to enforce single space.
+            emit(colonNode.startOffset + 1, "Single space expected between colon and return type", true)
+            if (autoCorrect) {
+                colonNode.upsertWhitespaceAfterMe(" ")
+            }
+        } else if (whiteSpaceAfterColon == null || whiteSpaceAfterColon.text != " ") {
+            // Return type is on the same line, but spacing is not a single space (or no space at all).
+            emit(colonNode.startOffset + 1, "Single space expected between colon and return type", true)
+            if (autoCorrect) {
+                colonNode.upsertWhitespaceAfterMe(" ")
+            }
+        }
+    }
+}
+
+public val FUNCTION_RETURN_TYPE_SPACING_RULE_ID: RuleId = FunctionReturnTypeSpacingRule().ruleId
+```
+[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt]

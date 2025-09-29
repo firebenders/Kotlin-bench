@@ -59,6 +59,9 @@ MODEL_LIMITS = {
     "claude-3-5-sonnet-20241022": 200_000,
     "claude-3-7-sonnet-20250219": 200_000,
     "claude-3-7-sonnet-20250219-thinking": 200_000,
+    "claude-sonnet-4-20250514": 200_000,
+    "claude-opus-4-20250514": 200_000,
+    "claude-opus-4-1-20250805": 200_000,
     "gpt-3.5-turbo-16k-0613": 16_385,
     "gpt-3.5-turbo-0613": 4_097,
     "gpt-3.5-turbo-1106": 16_385,
@@ -72,6 +75,13 @@ MODEL_LIMITS = {
     "o3-mini": 200_000,
     "o3": 200_000,
     "o4-mini": 200_000,
+    "gpt-5": 400_000,
+    "gpt-5-2025-08-07": 400_000,
+    "gpt-5-mini": 400_000,
+    "gpt-5-mini-2025-08-07": 400_000,
+    "gpt-5-nano": 400_000,
+    "gpt-5-nano-2025-08-07": 400_000,
+    "gpt-5-chat-latest": 400_000,
     "gpt-4.5-preview": 128_000,
     "deepseek-r1": 160_000,
     "deepseek-v3": 128_000,
@@ -79,6 +89,8 @@ MODEL_LIMITS = {
     "llama-v3p3-70b-instruct": 128_000,
     "qwen2p5-coder-32b-instruct": 128_000,
     "gemini-2.5-pro-exp-03-25": 1_000_000,
+    "gemini-2.5-pro-preview-05-06": 1_000_000,
+    "gemini-2.5-pro-preview-06-05": 1_000_000,
     "gpt-4o-2024-11-20": 128_000,
     "llama4-maverick-instruct-basic": 1_000_000,
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": 524_288,  # Will be increased to 1M
@@ -97,6 +109,9 @@ MODEL_COST_PER_INPUT = {
     "claude-3-5-sonnet-20241022": 0.000003,
     "claude-3-7-sonnet-20250219": 0.000003,
     "claude-3-7-sonnet-20250219-thinking": 0.000003,
+    "claude-sonnet-4-20250514": 0.000003,
+    "claude-opus-4-20250514": 0.000003,
+    "claude-opus-4-1-20250805": 0.000003,
     "gpt-3.5-turbo-16k-0613": 0.0000015,
     "gpt-3.5-turbo-0613": 0.0000015,
     "gpt-3.5-turbo-1106": 0.000001,
@@ -113,6 +128,13 @@ MODEL_COST_PER_INPUT = {
     "o3-mini": 0.00000110,
     "o3": 0.000010,  # $10.00/1M tokens for input
     "o4-mini": 0.00000110,  # $1.10/1M tokens for input
+    "gpt-5": 0.00000125,  # $1.25/1M tokens for input
+    "gpt-5-2025-08-07": 0.00000125,  # $1.25/1M tokens for input
+    "gpt-5-mini": 0.00000025,  # $0.25/1M tokens for input
+    "gpt-5-mini-2025-08-07": 0.00000025,  # $0.25/1M tokens for input
+    "gpt-5-nano": 0.00000005,  # $0.05/1M tokens for input
+    "gpt-5-nano-2025-08-07": 0.00000005,  # $0.05/1M tokens for input
+    "gpt-5-chat-latest": 0.00000125,  # $1.25/1M tokens for input
     "gpt-4.5-preview": 0.000075,
     "deepseek-r1": 0.000003,
     "deepseek-v3": 0.0000009,
@@ -120,6 +142,8 @@ MODEL_COST_PER_INPUT = {
     "llama-v3p3-70b-instruct": 0.0000009,
     "qwen2p5-coder-32b-instruct": 0.0000009,
     "gemini-2.5-pro-exp-03-25": 0.000005,  # $0.005/1K tokens for input
+    "gemini-2.5-pro-preview-05-06": 0.000005,  # $0.005/1K tokens for input
+    "gemini-2.5-pro-preview-06-05": 0.000005,  # $0.005/1K tokens for input
     "gpt-4o-2024-11-20": 0.0000025,  # $2.50/1M tokens for input
     "llama4-maverick-instruct-basic": 0.0000009,  # Estimated cost similar to other Llama models
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": 0.0000009,  # Actual pricing from Together AI
@@ -138,6 +162,9 @@ MODEL_COST_PER_OUTPUT = {
     "claude-3-5-sonnet-20241022": 0.000015,
     "claude-3-7-sonnet-20250219": 0.000015,
     "claude-3-7-sonnet-20250219-thinking": 0.000015,
+    "claude-sonnet-4-20250514": 0.000015,
+    "claude-opus-4-20250514": 0.000015,
+    "claude-opus-4-1-20250805": 0.000015,
     "gpt-3.5-turbo-16k-0613": 0.000002,
     "gpt-3.5-turbo-16k": 0.000002,
     "gpt-3.5-turbo-1106": 0.000002,
@@ -154,6 +181,13 @@ MODEL_COST_PER_OUTPUT = {
     "o3-mini": 0.00000440,
     "o3": 0.000040,  # $40.00/1M tokens for output
     "o4-mini": 0.00000440,  # $4.40/1M tokens for output
+    "gpt-5": 0.00001,  # $10.00/1M tokens for output
+    "gpt-5-2025-08-07": 0.00001,  # $10.00/1M tokens for output
+    "gpt-5-mini": 0.000002,  # $2.00/1M tokens for output
+    "gpt-5-mini-2025-08-07": 0.000002,  # $2.00/1M tokens for output
+    "gpt-5-nano": 0.0000004,  # $0.40/1M tokens for output
+    "gpt-5-nano-2025-08-07": 0.0000004,  # $0.40/1M tokens for output
+    "gpt-5-chat-latest": 0.00001,  # $10.00/1M tokens for output
     "gpt-4.5-preview": 0.000150,
     "deepseek-r1": 0.000008,
     "deepseek-v3": 0.0000009,
@@ -161,6 +195,8 @@ MODEL_COST_PER_OUTPUT = {
     "llama-v3p3-70b-instruct": 0.0000009,
     "qwen2p5-coder-32b-instruct": 0.0000009,
     "gemini-2.5-pro-exp-03-25": 0.000015,  # $0.015/1K tokens for output
+    "gemini-2.5-pro-preview-05-06": 0.000015,  # $0.015/1K tokens for output
+    "gemini-2.5-pro-preview-06-05": 0.000015,  # $0.015/1K tokens for output
     "gpt-4o-2024-11-20": 0.00001,  # $10.00/1M tokens for output
     "llama4-maverick-instruct-basic": 0.0000009,  # Estimated cost similar to other Llama models
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": 0.0000009,  # Actual pricing from Together AI
@@ -273,17 +309,17 @@ def validate_and_extract_patch(completion_text: str, output_dir: str = None, ins
         tuple[str|None, str|None]: (patch_text, error_message)
     """
     # First extract the patch
-    # patch_text = extract_full_file_patch(completion_text)
-    # if not patch_text:
-    #     return None, "No valid full file patch found in completion"
-    
-    patch_text = extract_diff(completion_text)
+    patch_text = extract_full_file_patch(completion_text)
     if not patch_text:
-        return None, "No valid patch found in completion"
+        return None, "No valid full file patch found in completion: " + completion_text[:200] + "..."
     
-    # Optionally validate patch format here
-    if not validate_patch_format(patch_text):
-        return None, "Patch format validation failed"
+    # patch_text = extract_diff(completion_text)
+    # if not patch_text:
+    #     return None, "No valid patch found in completion"
+    
+    # # Optionally validate patch format here
+    # if not validate_patch_format(patch_text):
+    #     return None, "Patch format validation failed"
 
     return patch_text, None
 
@@ -390,7 +426,7 @@ def claude_tokenize(string: str, api) -> int:
     """Returns the number of tokens in a text string."""
     try:
         response = api.messages.count_tokens(
-            model="claude-3-sonnet-20240229",
+            model="claude-opus-4-1-20250805",
             messages=[{
                 "role": "user",
                 "content": string
@@ -410,7 +446,7 @@ def call_chat(model_name_or_path, inputs, use_azure, temperature, top_p, instanc
     """
     Calls the openai API to generate completions for the given inputs.
     """
-    logger.info(f"Making API call for instance {instance_id}")
+    logger.info(f"Making chat API call for instance {instance_id}")
     system_messages = inputs.split("\n", 1)[0]
     user_message = inputs.split("\n", 1)[1]
     try:
@@ -425,6 +461,8 @@ def call_chat(model_name_or_path, inputs, use_azure, temperature, top_p, instanc
         request_args = model_args.copy()
         
         # Handle max tokens parameter based on model type
+        if model_name_or_path.startswith("gpt-5"):
+            request_args["max_completion_tokens"] = 128_000
         if model_name_or_path.startswith(("o3")):
             request_args["max_completion_tokens"] = request_args.pop("max_tokens", 20_000)
         elif model_name_or_path.startswith("o4"):
@@ -434,6 +472,9 @@ def call_chat(model_name_or_path, inputs, use_azure, temperature, top_p, instanc
             request_args["max_tokens"] = 32_768
         else:
             request_args["max_tokens"] = 16_384
+
+        # Remove max_tokens from request_args if present, as per instruction
+        request_args.pop("max_tokens", None)
         
         # Special handling for O-level models
         if model_name_or_path.startswith("o1") or model_name_or_path.startswith("o3") or model_name_or_path.startswith("o4"):
@@ -455,6 +496,8 @@ def call_chat(model_name_or_path, inputs, use_azure, temperature, top_p, instanc
                 base_url="https://pnlpopenai3.openai.azure.com/",
                 api_version="2023-05-15"
             )
+            print(f"additional_args: {additional_args}")
+            print(f"request_args: {request_args}")
             # For Azure, we use deployment_id instead of model
             response = client.chat.completions.create(
                 deployment_id=ENGINES[model_name_or_path] if use_azure else None,
@@ -462,7 +505,6 @@ def call_chat(model_name_or_path, inputs, use_azure, temperature, top_p, instanc
                     {"role": "system", "content": system_messages},
                     {"role": "user", "content": user_message},
                 ],
-                temperature=temperature_param,
                 top_p=top_p_param,
                 **additional_args,
                 **request_args,
@@ -482,8 +524,6 @@ def call_chat(model_name_or_path, inputs, use_azure, temperature, top_p, instanc
                 }
                 
                 # Only add temperature and top_p if they're not None
-                if temperature_param is not None:
-                    create_args["temperature"] = temperature_param
                 if top_p_param is not None:
                     create_args["top_p"] = top_p_param
                 
@@ -503,13 +543,14 @@ def call_chat(model_name_or_path, inputs, use_azure, temperature, top_p, instanc
         if hasattr(e, 'code') and e.code == "context_length_exceeded":
             print("Context length exceeded")
             return None
+        print(f"Error calling OpenAI API with model {model_name_or_path}: {e}")
         raise e
 
 def call_responses_api(model_name_or_path, inputs, temperature, top_p, instance_id=None, **model_args):
     """
     Calls the OpenAI Responses API for o1 series models.
     """
-    logger.info(f"Making API call for instance {instance_id}")
+    logger.info(f"Making responses API call for instance {instance_id}")
     system_messages = inputs.split("\n", 1)[0]
     user_message = inputs.split("\n", 1)[1]
     
@@ -550,11 +591,12 @@ def call_responses_api(model_name_or_path, inputs, temperature, top_p, instance_
     elif not "max_tokens" in request_args:
         request_args["max_tokens"] = 16_384
 
+    if model_name_or_path.startswith("gpt-5"):
+        request_args["max_output_tokens"] = 128_000
+        request_args.pop("max_tokens", None)
+
     # Special handling for O-level models
-    if model_name_or_path.startswith("o1") or model_name_or_path.startswith("o3") or model_name_or_path.startswith("o4"):
-        # Add reasoning_effort for o-level models
-        additional_args["reasoning_effort"] = "high"  # Changed from "low" to "high"
-        
+    if model_name_or_path.startswith("o1") or model_name_or_path.startswith("o3") or model_name_or_path.startswith("o4") or model_name_or_path.startswith("gpt-5"):
         # O-level models don't support temperature parameter
         # Don't pass temperature or top_p
         temperature_param = None
@@ -565,7 +607,6 @@ def call_responses_api(model_name_or_path, inputs, temperature, top_p, instance_
         top_p_param = top_p
     
     try:
-        logger.info(f"Making API call for instance {instance_id}")
         # Print instructions before making API call
         response = client.responses.create(
             model=model_name_or_path,
@@ -573,6 +614,9 @@ def call_responses_api(model_name_or_path, inputs, temperature, top_p, instance_
             instructions=system_messages,
             temperature=temperature_param,
             top_p=top_p_param,
+            reasoning={
+                "effort": "high"
+            },
             **request_args,
         )
         
@@ -619,7 +663,6 @@ def call_chat_with_validation(model_name_or_path, inputs, use_azure, temperature
     Calls the OpenAI Chat API and validates the response patch. Retries on validation failure.
     Returns (response, cost, patch_text) tuple if successful, or (None, 0, None) if all attempts fail.
     """
-    logger.info(f"Making API call for instance {instance_id}")
     response, cost = call_chat(model_name_or_path, inputs, use_azure, temperature, top_p, instance_id=instance_id, **model_args)
     if response is None:
         return None, 0, None
@@ -645,8 +688,9 @@ def call_responses_with_validation(model_name_or_path, inputs, temperature, top_
     """
     response, cost = call_responses_api(model_name_or_path, inputs, temperature, top_p, instance_id=instance_id, **model_args)
     if response is None:
+        print(f"Responses api returned None")
         return None, 0, None
-        
+
     completion = response["choices"][0]["message"]["content"]
     patch_text, error_msg = validate_and_extract_patch(
         completion,
@@ -701,7 +745,7 @@ def openai_inference(
     
     # Set up for parallel processing - use more workers for GPT-4.1 which has higher throughput
     max_workers = model_args.pop("max_workers", 10)  # Default to 10 parallel workers
-    max_concurrent_requests = model_args.pop("max_concurrent_requests", 5)  # Default to 5 concurrent API calls
+    max_concurrent_requests = model_args.pop("max_concurrent_requests", 10)  # Default to 5 concurrent API calls
     
     # Increase workers for GPT-4.1
     if model_name_or_path.startswith("gpt-4.1"):
@@ -759,7 +803,7 @@ def openai_inference(
             while retry_attempts < max_retries and not stop_processing.is_set():
                 try:
                     # Choose appropriate API based on model name
-                    if output_dict["model_name_or_path"].startswith("o1"):
+                    if output_dict["model_name_or_path"].startswith("o1") or output_dict["model_name_or_path"].startswith("gpt-5"):
                         response, cost, patch_text = call_responses_with_validation(
                             output_dict["model_name_or_path"],
                             output_dict["text"],
@@ -787,7 +831,7 @@ def openai_inference(
                         break
                     
                     # Store the validated response
-                    if output_dict["model_name_or_path"].startswith("o1"):
+                    if output_dict["model_name_or_path"].startswith("o1") or output_dict["model_name_or_path"].startswith("gpt-5"):
                         output_dict["full_output"] = response["choices"][0]["message"]["content"]
                     else:
                         output_dict["full_output"] = response.choices[0].message.content
@@ -910,21 +954,22 @@ def call_anthropic(
         time.sleep(20)
         return None
 
-def call_anthropic_v2(
+def call_anthropic_v2_streaming(
     inputs, anthropic, model_name_or_path, temperature, top_p, instance_id=None, **model_args
 ):
     """
-    Calls the anthropic API to generate completions for the given inputs.
+    Calls the anthropic API with streaming enabled for handling longer responses.
+    Returns the complete response accumulated from the stream.
     """
-    logger.info(f"Making API call for instance {instance_id}")
+    logger.info(f"Making streaming API call for instance {instance_id}")
     system_messages = inputs.split("\n", 1)[0]
     user_message = inputs.split("\n", 1)[1]
     
     # Check if using the thinking version of Claude 3.7 Sonnet
-    using_thinking = "-thinking" in model_name_or_path
+    using_thinking = "-thinking" in model_name_or_path or "claude-sonnet-4-20250514" in model_name_or_path or "claude-opus-4-20250514" in model_name_or_path or "claude-opus-4-1-20250805" in model_name_or_path
     # Extract the base model name without the "-thinking" suffix
     base_model_name = model_name_or_path.replace("-thinking", "")
-    
+
     try:
         messages = [
             {"role": "user", "content": user_message},
@@ -932,9 +977,9 @@ def call_anthropic_v2(
         
         request_args = {
             "messages": messages,
-            "max_tokens": 8192,
             "model": base_model_name,
             "system": system_messages,
+            "stream": True,
         }
         
         # Add thinking parameters if using the thinking version
@@ -950,12 +995,49 @@ def call_anthropic_v2(
         # Add any remaining model_args
         request_args.update(model_args)
         
-        response = anthropic.messages.create(**request_args)
+        logger.info(f"Max tokens: {request_args['max_tokens']}")
+        if using_thinking:
+            logger.info(f"Thinking budget: {request_args['thinking']['budget_tokens']}")
         
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
-        cost = calc_cost(response.model, input_tokens, output_tokens)
-        return response, cost
+        # Create streaming request
+        stream = anthropic.messages.create(**request_args)
+        
+        # Accumulate the response content
+        accumulated_content = []
+        accumulated_text = ""
+        thinking_content = []
+        
+        # Process the stream
+        for event in stream:
+            if event.type == "content_block_delta":
+                # Handle content block deltas
+                if event.delta.type == "text_delta":
+                    # For normal text content
+                    accumulated_text += event.delta.text
+                elif event.delta.type == "thinking_delta" and hasattr(event.delta, "thinking"):
+                    # For thinking content
+                    thinking_content.append(event.delta.thinking)
+            elif event.type == "content_block_start":
+                # Initialize a new content block
+                if hasattr(event, "content_block") and event.content_block.type == "text":
+                    accumulated_text = ""
+            elif event.type == "content_block_stop":
+                # Finalize a content block
+                if hasattr(event, "content_block") and event.content_block.type == "text":
+                    accumulated_content.append({
+                        "type": "text",
+                        "text": accumulated_text
+                    })
+        
+        # Write accumulated content to file periodically
+        if instance_id and len(accumulated_text) > 0 and len(accumulated_text) % 1000 == 0:
+            output_path = os.path.join("anthropic_completions", f"{instance_id}.txt")
+            os.makedirs("anthropic_completions", exist_ok=True)
+            with open(output_path, "w") as f:
+                f.write(accumulated_text)
+        
+        # Calculate cost
+        return accumulated_text, 0
     except Exception as e:
         logger.error(e)
         logger.error(f"Inputs: {inputs}")
@@ -963,54 +1045,34 @@ def call_anthropic_v2(
         time.sleep(20)
         return None
 
-@retry(wait=wait_random_exponential(min=60, max=600), stop=stop_after_attempt(3))
-def call_anthropic_with_validation(
+@retry(wait=wait_random_exponential(min=60, max=600), stop=stop_after_attempt(1))
+def call_anthropic_v2_streaming_with_validation(
     inputs, anthropic, model_name_or_path, temperature, top_p, output_dir=None, instance_id=None, **model_args
 ):
     """
-    Calls the Anthropic API and validates the response patch. Retries on validation failure.
+    Calls the Anthropic v2 API with streaming enabled and validates the response patch.
+    Retries on validation failure.
     Returns (response, cost, patch_text) tuple if successful, or (None, 0, None) if all attempts fail.
     """
-    logger.info(f"Making API call for instance {instance_id}")
-    response, cost = call_anthropic(inputs, anthropic, model_name_or_path, temperature, top_p, instance_id=instance_id, **model_args)
-    if response is None:
-        return None, 0, None
-        
-    completion = response.completion
-    patch_text, error_msg = validate_and_extract_patch(
-        completion,
-        output_dir=output_dir,
-        instance_id=instance_id
-    )
-    
-    if patch_text is None:
-        # Validation failed - raise exception to trigger retry
-        raise ValueError(f"Patch validation failed: {error_msg}")
-        
-    return response, cost, patch_text
-
-@retry(wait=wait_random_exponential(min=60, max=600), stop=stop_after_attempt(3))
-def call_anthropic_v2_with_validation(
-    inputs, anthropic, model_name_or_path, temperature, top_p, output_dir=None, instance_id=None, **model_args
-):
-    """
-    Calls the Anthropic v2 API and validates the response patch. Retries on validation failure.
-    Returns (response, cost, patch_text) tuple if successful, or (None, 0, None) if all attempts fail.
-    """
-    logger.info(f"Making API call for instance {instance_id}")
-    response, cost = call_anthropic_v2(inputs, anthropic, model_name_or_path, temperature, top_p, instance_id=instance_id, **model_args)
+    logger.info(f"Making streaming API call for instance {instance_id}")
+    response, cost = call_anthropic_v2_streaming(inputs, anthropic, model_name_or_path, temperature, top_p, instance_id=instance_id, **model_args)
     if response is None:
         return None, 0, None
     
     # For models with thinking, get only the text content for validation
-    if "-thinking" in model_name_or_path:
-        text_content = ""
-        for content_block in response.content:
-            if content_block.type == "text":
-                text_content += content_block.text
-        completion = text_content
+    if "-thinking" in model_name_or_path or "claude-sonnet-4-20250514" in model_name_or_path or "claude-opus-4-20250514" in model_name_or_path or "claude-opus-4-1-20250805" in model_name_or_path:
+        completion = response
     else:
-        completion = response.content[0].text
+        completion = response
+
+    # Create directory if it doesn't exist
+    os.makedirs("./anthropic_completions", exist_ok=True)
+    
+    # Save completion to file
+    completion_file = f"./anthropic_completions/{instance_id}.txt"
+    with open(completion_file, "w") as f:
+        f.write(completion)
+    logger.info(f"Saved Anthropic completion to {completion_file}")
         
     patch_text, error_msg = validate_and_extract_patch(
         completion,
@@ -1033,7 +1095,7 @@ def anthropic_inference(
     max_cost,
 ):
     """
-    Runs inference on a dataset using the anthropic API.
+    Runs inference on a dataset using the anthropic API with parallel processing.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY", None)
     if api_key is None:
@@ -1044,20 +1106,18 @@ def anthropic_inference(
     anthropic = Anthropic(api_key=api_key)
     
     # Check if using the thinking version
-    using_thinking = "-thinking" in model_name_or_path
-    
-    max_tokens = 8192
-    thinking_budget = 1024
+    using_thinking = "-thinking" in model_name_or_path or "claude-sonnet-4-20250514" in model_name_or_path or "claude-opus-4-20250514" in model_name_or_path or "claude-opus-4-1-20250805" in model_name_or_path
+    max_tokens = 32_000
+    thinking_budget = 16_000
     
     # Calculate available tokens based on model configuration
+    model_args["max_tokens"] = max_tokens
     if using_thinking:
         model_args["thinking"] = {
             "type": "enabled",
             "budget_tokens": thinking_budget
         }
-        available_tokens = MODEL_LIMITS[model_name_or_path] - max_tokens - thinking_budget
-    else:
-        available_tokens = MODEL_LIMITS[model_name_or_path] - max_tokens
+    available_tokens = MODEL_LIMITS[model_name_or_path] - max_tokens
     
     def check_tokens(text):
         try:
@@ -1078,68 +1138,194 @@ def anthropic_inference(
     basic_args = {
         "model_name_or_path": model_name_or_path,
     }
-    total_cost = 0
-    print(f"Filtered to {len(test_dataset)} instances")
-
-    # All Claude 3 models use the v2 API
-    call_api_with_validation = call_anthropic_v2_with_validation
     
-    with open(output_file, "a+") as f:
-        for datum in tqdm(test_dataset, desc=f"Inference for {model_name_or_path}"):
-            instance_id = datum["instance_id"]
-            if instance_id in existing_ids:
-                continue
-            output_dict = {"instance_id": instance_id}
-            output_dict.update(basic_args)
-            output_dict["text_inputs"] = f"{datum['text']}\n"
+    # Set up for parallel processing
+    max_workers = model_args.pop("max_workers", 10)  # Default to 10 parallel workers
+    max_concurrent_requests = model_args.pop("max_concurrent_requests", 5)  # Default to 5 concurrent API calls
+    
+    # Define the token threshold for when to use streaming
+    streaming_token_threshold = 16000  # Use streaming for inputs with more than 16K tokens
+    
+    # Prepare data for parallel processing
+    data_to_process = []
+    for datum in test_dataset:
+        instance_id = datum["instance_id"]
+        if instance_id in existing_ids:
+            continue
             
-            try:
-                response, cost, patch_text = call_api_with_validation(
-                    output_dict["text_inputs"],
-                    anthropic,
-                    model_name_or_path,
-                    temperature,
-                    top_p,
-                    output_dir=os.path.dirname(output_file),
-                    instance_id=instance_id,
-                    **model_args,
-                )
-                
-                if response is None:
-                    continue
-                
-                total_cost += cost
-                print(f"Total Cost: {total_cost:.2f}")
-                
-                # Extract the text content from the response
-                if using_thinking:
-                    # For models with thinking, get only the text content for the output
-                    text_content = ""
-                    thinking_content = []
+        output_dict = {"instance_id": instance_id}
+        output_dict.update(basic_args)
+        output_dict["text_inputs"] = f"{datum['text']}\n"
+        
+        # Count tokens in the input to determine whether to use streaming
+        try:
+            token_count = claude_tokenize(datum["text"], anthropic)
+            output_dict["use_streaming"] = token_count > streaming_token_threshold
+            logger.info(f"Instance {instance_id} has {token_count} tokens, {'using' if output_dict['use_streaming'] else 'not using'} streaming")
+        except Exception as e:
+            logger.error(f"Error counting tokens: {e}")
+            output_dict["use_streaming"] = False
+            
+        data_to_process.append((instance_id, output_dict, model_args.copy()))
+    
+    if not data_to_process:
+        logger.info(f"No new instances to process for {model_name_or_path}")
+        return 0
+    
+    total_cost = 0
+    processed_count = 0
+    
+    # Create thread-safe locks for shared resources
+    output_lock = threading.Lock()
+    cost_lock = threading.Lock()
+    
+    # Semaphore to limit concurrent API requests
+    api_semaphore = threading.Semaphore(max_concurrent_requests)
+    
+    # Flag to signal early termination
+    stop_processing = threading.Event()
+    
+    # Progress bar
+    pbar = tqdm(total=len(data_to_process), desc=f"Inference for {model_name_or_path}")
+    
+    def process_instance(args):
+        """Worker function to process a single instance with retry logic"""
+        nonlocal total_cost, processed_count
+        
+        instance_id, output_dict, instance_args = args
+        output_dir = os.path.dirname(output_file)
+        
+        # Skip if we've reached max cost
+        if stop_processing.is_set():
+            return None
+        
+        # Limit concurrent API requests
+        with api_semaphore:
+            max_retries = 1
+            retry_attempts = 0
+            
+            while retry_attempts < max_retries and not stop_processing.is_set():
+                try:
+                    # Use streaming for longer responses
+                    logger.info(f"[{instance_id}] Using streaming API")
+                    response, cost, patch_text = call_anthropic_v2_streaming_with_validation(
+                        output_dict["text_inputs"],
+                        anthropic,
+                        model_name_or_path,
+                        temperature,
+                        top_p,
+                        output_dir=output_dir,
+                        instance_id=instance_id,
+                        **model_args,
+                    )
                     
-                    for content_block in response.content:
-                        if content_block.type == "text":
-                            text_content += content_block.text
-                        elif content_block.type == "thinking":
-                            thinking_content.append(content_block.thinking)
+                    # Skip if no valid response
+                    if response is None:
+                        logger.warning(f"[{instance_id}] Generated invalid response")
+                        break
                     
-                    output_dict["full_output"] = text_content
-                    output_dict["thinking_output"] = thinking_content
-                else:
-                    # For normal models, just get the text content
-                    output_dict["full_output"] = response.content[0].text
+                    # Extract the text content from the response
+                    # if using_thinking:
+                    #     # For models with thinking, get only the text content for the output
+                    #     text_content = ""
+                    #     thinking_content = []
+                        
+                    #     for content_block in response.content:
+                    #         if content_block.type == "text":
+                    #             text_content += content_block.text
+                    #         elif content_block.type == "thinking":
+                    #             thinking_content.append(content_block.thinking)
+                        
+                    #     output_dict["full_output"] = text_content
+                    #     output_dict["thinking_output"] = thinking_content
+                    # else:
+                    #     # For normal models, just get the text content
+
+                    output_dict["full_output"] = response
+                    output_dict["model_patch"] = patch_text
+                    
+                    # Update costs and write output in a thread-safe way
+                    with cost_lock:
+                        total_cost += cost
+                        current_cost = total_cost
+                        
+                        # Check if we've hit max cost
+                        if max_cost is not None and current_cost >= max_cost:
+                            stop_processing.set()
+                    
+                    # Write to output file
+                    with output_lock:
+                        with open(output_file, "a+") as f:
+                            print(json.dumps(output_dict), file=f, flush=True)
+                        
+                        # Log cost occasionally
+                        with cost_lock:
+                            processed_count += 1
+                            if processed_count % 5 == 0:  # Log every 5 completed instances
+                                print(f"Processed {processed_count}/{len(data_to_process)}, Total Cost: ${current_cost:.4f}")
+                    
+                    return True
+                    
+                except Exception as e:
+                    retry_attempts += 1
+                    # Check for rate limit errors
+                    if "rate limit" in str(e).lower() or "too many requests" in str(e).lower():
+                        wait_time = min(2 ** retry_attempts, 60)  # Exponential backoff capped at 60 seconds
+                        logger.warning(f"[{instance_id}] Rate limit hit, retrying in {wait_time}s (attempt {retry_attempts}/{max_retries})")
+                        time.sleep(wait_time)
+                    elif retry_attempts < max_retries:
+                        wait_time = min(2 ** retry_attempts, 30)
+                        logger.warning(f"[{instance_id}] Error: {e}, retrying in {wait_time}s (attempt {retry_attempts}/{max_retries})")
+                        time.sleep(wait_time)
+                    else:
+                        # For other errors on last attempt, log and break
+                        logger.error(f"[{instance_id}] Error: {e}")
+                        traceback.print_exc()
+                        break
+            
+            return False
+    
+    try:
+        print(f"Processing {len(data_to_process)} instances with {max_workers} workers")
+        
+        # Process instances in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks to the executor
+            future_to_instance = {
+                executor.submit(process_instance, args): args[0]  # Map future to instance_id
+                for args in data_to_process
+            }
+            
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_instance):
+                instance_id = future_to_instance[future]
+                try:
+                    result = future.result()
+                    if stop_processing.is_set():
+                        logger.info(f"Skipping remaining instances due to max cost or interrupt")
+                        # Cancel any pending futures
+                        for pending_future in future_to_instance:
+                            if not pending_future.done():
+                                pending_future.cancel()
+                except Exception as e:
+                    logger.error(f"[{instance_id}] Worker thread error: {e}")
+                    traceback.print_exc()
                 
-                output_dict["model_patch"] = patch_text
-                print(json.dumps(output_dict), file=f, flush=True)
+                # Update progress bar
+                pbar.update(1)
                 
-                if max_cost is not None and total_cost >= max_cost:
-                    print(f"Reached max cost {max_cost}, exiting")
+                # Check for early termination
+                if stop_processing.is_set():
                     break
-                
-            except Exception as e:
-                logger.error(f"Error processing instance {instance_id}: {e}")
-                traceback.print_exc()
-                continue
+    
+    finally:
+        pbar.close()
+    
+    print(f"Completed Anthropic inference for {model_name_or_path}")
+    print(f"Processed {processed_count}/{len(data_to_process)} instances")
+    print(f"Total Cost: ${total_cost:.4f}")
+    
+    return total_cost
 
 
 #####################################
@@ -1174,7 +1360,7 @@ def call_fireworks(model_name_or_path, inputs, temperature, top_p, instance_id=N
     # Additional parameters for DeepSeek models
     additional_args = {}
     if "r1" in model_name_or_path.lower():
-        additional_args["reasoning_effort"] = "low"
+        additional_args["reasoning_effort"] = "high"
     
     # Add max_tokens to model_args
     model_args = model_args.copy()
@@ -1334,6 +1520,7 @@ def call_gemini(model_name_or_path, inputs, temperature, top_p, instance_id=None
     
     gemini_key = os.environ.get("GEMINI_API_KEY", None)
     if gemini_key is None:
+        logger.error(f"No Gemini API key found")
         raise ValueError(
             "Must provide an api key. Expected in GEMINI_API_KEY environment variable."
         )
@@ -1353,7 +1540,7 @@ def call_gemini(model_name_or_path, inputs, temperature, top_p, instance_id=None
         "generationConfig": {
             "temperature": temperature,
             "topP": top_p,
-            "maxOutputTokens": 20_000
+            "maxOutputTokens": 65_536
         }
     }
     
@@ -1371,10 +1558,19 @@ def call_gemini(model_name_or_path, inputs, temperature, top_p, instance_id=None
         response.raise_for_status()
         
         result = response.json()
+
+        # Create directory if it doesn't exist
+        os.makedirs("./gemini_completions", exist_ok=True)
+        
+        # Save completion to file
+        completion_file = f"./gemini_completions/{instance_id}.json"
+        with open(completion_file, "w") as f:
+            f.write(json.dumps(result, indent=2))
+        logger.info(f"Saved Gemini completion to {completion_file}")
         
         # Debug logging
-        logger.info("Gemini API Response Structure:")
-        logger.info(json.dumps(result, indent=2))
+        # logger.info("Gemini API Response Structure:")
+        # logger.info(json.dumps(result, indent=2))
         
         # Check for error responses
         if "error" in result:
@@ -1445,7 +1641,7 @@ def call_gemini(model_name_or_path, inputs, temperature, top_p, instance_id=None
         traceback.print_exc()
         raise e
 
-@retry(wait=wait_random_exponential(min=30, max=600), stop=stop_after_attempt(3))
+@retry(wait=wait_random_exponential(min=30, max=600), stop=stop_after_attempt(1))
 def call_gemini_with_validation(model_name_or_path, inputs, temperature, top_p, output_dir=None, instance_id=None, **model_args):
     """
     Calls the Gemini API and validates the response patch. Retries on validation failure.
@@ -1465,6 +1661,7 @@ def call_gemini_with_validation(model_name_or_path, inputs, temperature, top_p, 
     
     if patch_text is None:
         # Validation failed - raise exception to trigger retry
+        logger.error(f"Gemini patch validation failed: {error_msg}")
         raise ValueError(f"Patch validation failed: {error_msg}")
         
     return response, cost, patch_text
@@ -1478,7 +1675,7 @@ def gemini_inference(
     max_cost,
 ):
     """
-    Runs inference on a dataset using the Gemini API.
+    Runs inference on a dataset using the Gemini API with parallel processing.
     """
     api_key = os.environ.get("GEMINI_API_KEY", None)
     if api_key is None:
@@ -1488,6 +1685,16 @@ def gemini_inference(
     
     print(f"Using Gemini API key {'*' * max(0, len(api_key)-5) + api_key[-5:]}")
     
+    # Filter the dataset to include only instances that fit within the context window
+    encoding = model_name_or_path  # Pass the model name instead of the encoding object
+    print(f"Model name: {model_name_or_path}")
+    print(f"Model limits: {MODEL_LIMITS[model_name_or_path]}")
+    test_dataset = test_dataset.filter(
+        lambda x: gpt_tokenize(x["text"], encoding) <= MODEL_LIMITS[model_name_or_path],
+        desc="Filtering",
+        load_from_cache_file=False,
+    )
+    
     temperature = model_args.pop("temperature", 0.2)
     top_p = model_args.pop("top_p", 0.95 if temperature > 0 else 1)
     print(f"Using temperature={temperature}, top_p={top_p}")
@@ -1496,50 +1703,161 @@ def gemini_inference(
         "model_name_or_path": model_name_or_path,
     }
     
-    total_cost = 0
+    # Set up for parallel processing
+    max_workers = model_args.pop("max_workers", 10)  # Default to 10 parallel workers
+    max_concurrent_requests = model_args.pop("max_concurrent_requests", 5)  # Default to 5 concurrent API calls
     
-    with open(output_file, "a+") as f:
-        for datum in tqdm(test_dataset, desc=f"Inference for {model_name_or_path}"):
-            instance_id = datum["instance_id"]
-            if instance_id in existing_ids:
-                continue
+    # Prepare data for parallel processing
+    data_to_process = []
+    for datum in test_dataset:
+        instance_id = datum["instance_id"]
+        if instance_id in existing_ids:
+            continue
             
-            output_dict = {"instance_id": instance_id}
-            output_dict.update(basic_args)
-            output_dict["text"] = f"{datum['text']}\n\n"
+        output_dict = {"instance_id": instance_id}
+        output_dict.update(basic_args)
+        output_dict["text"] = f"{datum['text']}\n\n"
+        data_to_process.append((instance_id, output_dict, model_args.copy()))
+    
+    if not data_to_process:
+        logger.info(f"No new instances to process for {model_name_or_path}")
+        return 0
+    
+    total_cost = 0
+    processed_count = 0
+    
+    # Create thread-safe locks for shared resources
+    output_lock = threading.Lock()
+    cost_lock = threading.Lock()
+    
+    # Semaphore to limit concurrent API requests
+    api_semaphore = threading.Semaphore(max_concurrent_requests)
+    
+    # Flag to signal early termination
+    stop_processing = threading.Event()
+    
+    # Progress bar
+    pbar = tqdm(total=len(data_to_process), desc=f"Inference for {model_name_or_path}")
+    
+    def process_instance(args):
+        """Worker function to process a single instance with retry logic"""
+        nonlocal total_cost, processed_count
+        
+        instance_id, output_dict, instance_args = args
+        output_dir = os.path.dirname(output_file)
+        
+        # Skip if we've reached max cost
+        if stop_processing.is_set():
+            return None
+        
+        # Limit concurrent API requests
+        with api_semaphore:
+            retry_attempts = 0
+            max_retries = 3
             
-            try:
-                response, cost, patch_text = call_gemini_with_validation(
-                    model_name_or_path,
-                    output_dict["text"],
-                    temperature,
-                    top_p,
-                    output_dir=os.path.dirname(output_file),
-                    instance_id=instance_id,
-                    **model_args,
-                )
+            while retry_attempts < max_retries and not stop_processing.is_set():
+                try:
+                    response, cost, patch_text = call_gemini_with_validation(
+                        model_name_or_path,
+                        output_dict["text"],
+                        temperature,
+                        top_p,
+                        output_dir=output_dir,
+                        instance_id=instance_id,
+                        **instance_args
+                    )
+                    
+                    # Skip if no valid response
+                    if response is None:
+                        logger.warning(f"[{instance_id}] Generated invalid response")
+                        break
+                    
+                    # Update the output dictionary with results
+                    output_dict["full_output"] = response.choices[0].message.content
+                    output_dict["model_patch"] = patch_text
+                    
+                    # Update costs and write output in a thread-safe way
+                    with cost_lock:
+                        total_cost += cost
+                        current_cost = total_cost
+                        
+                        # Check if we've hit max cost
+                        if max_cost is not None and current_cost >= max_cost:
+                            stop_processing.set()
+                    
+                    # Write to output file
+                    with output_lock:
+                        with open(output_file, "a+") as f:
+                            print(json.dumps(output_dict), file=f, flush=True)
+                        
+                        # Log cost occasionally
+                        with cost_lock:
+                            processed_count += 1
+                            if processed_count % 5 == 0:  # Log every 5 completed instances
+                                print(f"Processed {processed_count}/{len(data_to_process)}, Total Cost: ${current_cost:.4f}")
+                    
+                    return True
+                    
+                except Exception as e:
+                    retry_attempts += 1
+                    # Check for rate limit errors
+                    if "rate limit" in str(e).lower() or "too many requests" in str(e).lower():
+                        wait_time = min(2 ** retry_attempts, 60)  # Exponential backoff capped at 60 seconds
+                        logger.warning(f"[{instance_id}] Rate limit hit, retrying in {wait_time}s (attempt {retry_attempts}/{max_retries})")
+                        time.sleep(wait_time)
+                    elif retry_attempts < max_retries:
+                        wait_time = min(2 ** retry_attempts, 30)
+                        logger.warning(f"[{instance_id}] Error: {e}, retrying in {wait_time}s (attempt {retry_attempts}/{max_retries})")
+                        time.sleep(wait_time)
+                    else:
+                        # For other errors on last attempt, log and break
+                        logger.error(f"[{instance_id}] Error: {e}")
+                        traceback.print_exc()
+                        break
+            
+            return False
+    
+    try:
+        print(f"Processing {len(data_to_process)} instances with {max_workers} workers")
+        
+        # Process instances in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks to the executor
+            future_to_instance = {
+                executor.submit(process_instance, args): args[0]  # Map future to instance_id
+                for args in data_to_process
+            }
+            
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_instance):
+                instance_id = future_to_instance[future]
+                try:
+                    result = future.result()
+                    if stop_processing.is_set():
+                        logger.info(f"Skipping remaining instances due to max cost or interrupt")
+                        # Cancel any pending futures
+                        for pending_future in future_to_instance:
+                            if not pending_future.done():
+                                pending_future.cancel()
+                except Exception as e:
+                    logger.error(f"[{instance_id}] Worker thread error: {e}")
+                    traceback.print_exc()
                 
-                # Skip this instance if response is None (context length exceeded)
-                if response is None:
-                    logger.warning(f"{instance_id} failed")
-                    continue
+                # Update progress bar
+                pbar.update(1)
                 
-                total_cost += cost
-                print(f"Total Cost: {total_cost:.2f}")
-                
-                output_dict["full_output"] = response.choices[0].message.content
-                output_dict["model_patch"] = patch_text
-                
-                print(json.dumps(output_dict), file=f, flush=True)
-                
-                if max_cost is not None and total_cost >= max_cost:
-                    print(f"Reached max cost {max_cost}, exiting")
+                # Check for early termination
+                if stop_processing.is_set():
                     break
-                
-            except Exception as e:
-                logger.error(f"Error processing instance {instance_id}: {e}")
-                traceback.print_exc()
-                continue
+    
+    finally:
+        pbar.close()
+    
+    print(f"Completed Gemini inference for {model_name_or_path}")
+    print(f"Processed {processed_count}/{len(data_to_process)} instances")
+    print(f"Total Cost: ${total_cost:.4f}")
+    
+    return total_cost
 
 
 #####################################
@@ -2314,6 +2632,49 @@ def main(
             traceback.print_exc()
     
     logger.info(f"Finished inference for all models!")
+
+def update_full_file_patches():
+    """
+    Updates the model_patch field in prediction files using extract_full_file_patch on full_output.
+    
+    Args:
+        path (str): Path to a prediction file (.jsonl) or directory of prediction files
+    """
+    prediction_path = "./predictions/o3/o3__Kotlin-bench__full_file_gen__fs-oracle__test.jsonl"
+    if not prediction_path:
+        raise ValueError("prediction_path must be specified")
+        
+    prediction_path = Path(prediction_path)
+    if not prediction_path.exists():
+        raise ValueError(f"Prediction path {prediction_path} does not exist")
+        
+    # Create temporary file for writing updates
+    temp_file = prediction_path.with_suffix('.jsonl.tmp')
+    updated_count = 0
+    
+    try:
+        with open(prediction_path, 'r') as f_in, open(temp_file, 'w') as f_out:
+            for line in f_in:
+                entry = json.loads(line)
+                if 'full_output' in entry:
+                    # Extract and update the model_patch field
+                    new_patch = extract_full_file_patch(entry['full_output'])
+                    if new_patch is not None:
+                        entry['model_patch'] = new_patch
+                        updated_count += 1
+                
+                # Write the entry back (updated or not)
+                print(json.dumps(entry), file=f_out)
+        
+        # Replace original file with updated version
+        temp_file.replace(prediction_path)
+        logger.info(f"Updated {updated_count} entries in {prediction_path}")
+        
+    except Exception as e:
+        logger.error(f"Error processing {prediction_path}: {str(e)}")
+        if temp_file.exists():
+            temp_file.unlink()  # Delete temp file if it exists
+        raise e
 
 
 if __name__ == "__main__":

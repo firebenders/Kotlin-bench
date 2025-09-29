@@ -1,0 +1,85 @@
+[start of WordPress/src/main/java/org/wordpress/android/usecase/social/GetJetpackSocialShareLimitStatusUseCase.kt]
+package org.wordpress.android.usecase.social
+
+import org.wordpress.android.fluxc.model.SiteModel
+import org.wordpress.android.fluxc.store.SiteStore
+import org.wordpress.android.fluxc.store.SiteStore.FetchedJetpackSocialResult
+import org.wordpress.android.util.extensions.doesNotContain
+import javax.inject.Inject
+
+class GetJetpackSocialShareLimitStatusUseCase @Inject constructor(
+    private val siteStore: SiteStore,
+) {
+    suspend fun execute(siteModel: SiteModel): ShareLimit {
+        // Jetpack Social share limits should not be shown for any WP.com site, including Atomic.
+        // Also, if the site has the 1000-shares feature, limits UI should be hidden.
+        val isWpComOrAtomic = siteModel.isWpComOrAtomic()
+        val has1000SharesFeature =
+            siteModel.planActiveFeatures
+                ?.split(",")
+                ?.doesNotContain(FEATURE_SOCIAL_SHARES_1000) == false
+
+        if (isWpComOrAtomic || has1000SharesFeature) {
+            return ShareLimit.Disabled
+        }
+
+        val result = siteStore.fetchJetpackSocial(siteModel)
+        return if (result is FetchedJetpackSocialResult.Success) {
+            with(result.jetpackSocial) {
+                ShareLimit.Enabled(
+                    shareLimit = shareLimit,
+                    publicizedCount = publicizedCount,
+                    sharedPostsCount = sharedPostsCount,
+                    sharesRemaining = sharesRemaining,
+                )
+            }
+        } else {
+            ShareLimit.Disabled
+        }
+    }
+}
+
+sealed interface ShareLimit {
+    data class Enabled(
+        val shareLimit: Int,
+        val publicizedCount: Int,
+        val sharedPostsCount: Int,
+        val sharesRemaining: Int,
+    ) : ShareLimit
+
+    object Disabled : ShareLimit
+}
+
+private const val FEATURE_SOCIAL_SHARES_1000 = "social-shares-1000"
+
+/**
+ * Returns true if the site is a WP.com site (simple or Atomic).
+ *
+ * We primarily rely on isHostedAtWPCom, but to be more robust across variations of SiteModel
+ * we also try common boolean getters via reflection (isWPCom, isWpCom, isWPComAtomic, isWpComAtomic, isAtomic).
+ */
+private fun SiteModel.isWpComOrAtomic(): Boolean {
+    return isHostedAtWPCom || isWpCom() || isWpComAtomic()
+}
+
+private fun SiteModel.isWpCom(): Boolean {
+    return callBooleanGetterOrNull("isWPCom", "isWpCom") ?: false
+}
+
+private fun SiteModel.isWpComAtomic(): Boolean {
+    return callBooleanGetterOrNull("isWPComAtomic", "isWpComAtomic", "isAtomic") ?: false
+}
+
+private fun SiteModel.callBooleanGetterOrNull(vararg methodNames: String): Boolean? {
+    for (name in methodNames) {
+        try {
+            val method = this::class.java.getMethod(name)
+            val result = method.invoke(this)
+            if (result is Boolean) return result
+        } catch (_: Exception) {
+            // ignore and try the next name
+        }
+    }
+    return null
+}
+[end of WordPress/src/main/java/org/wordpress/android/usecase/social/GetJetpackSocialShareLimitStatusUseCase.kt]

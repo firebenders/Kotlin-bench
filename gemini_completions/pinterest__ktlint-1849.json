@@ -1,0 +1,454 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I've analyzed the issue and the provided codebase. The problem lies in the `AnnotationRule`, which incorrectly formats multiple annotations on a type within a `TypeArgumentList`. The rule was designed for annotations on declarations and doesn't correctly handle this specific case of type annotations.\n\nThe fix is to prevent the rule from adding a newline when annotations are inside a `TypeArgumentList`. I'll modify `ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt` to implement this logic.\n\nHere are the regenerated file contents:\n\n[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt]\n```kotlin\npackage com.pinterest.ktlint.ruleset.standard.rules\n\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATED_EXPRESSION\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE_ANNOTATION_LIST\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_ARGUMENT_LIST\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT_LIST\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE\nimport com.pinterest.ktlint.rule.engine.core.api.RuleId\nimport com.pinterest.ktlint.rule.engine.core.api.children\nimport com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf\nimport com.pinterest.ktlint.rule.engine.core.api.isPartOf\nimport com.pinterest.ktlint.rule.engine.core.api.isPartOfComment\nimport com.pinterest.ktlint.rule.engine.core.api.isWhiteSpace\nimport com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline\nimport com.pinterest.ktlint.rule.engine.core.api.lastChildLeafOrSelf\nimport com.pinterest.ktlint.rule.engine.core.api.nextCodeLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.nextLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.prevLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe\nimport com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceBeforeMe\nimport com.pinterest.ktlint.ruleset.standard.StandardRule\nimport org.jetbrains.kotlin.com.intellij.lang.ASTNode\nimport org.jetbrains.kotlin.com.intellij.psi.PsiWhiteSpace\nimport org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement\nimport org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.PsiWhiteSpaceImpl\nimport org.jetbrains.kotlin.descriptors.annotations.AnnotationUseSiteTarget\nimport org.jetbrains.kotlin.psi.KtAnnotationEntry\nimport org.jetbrains.kotlin.psi.psiUtil.leaves\nimport org.jetbrains.kotlin.psi.psiUtil.siblings\nimport org.jetbrains.kotlin.utils.addToStdlib.safeAs\n\n/**\n * Ensures multiple annotations are not on the same line as the annotated declaration. Also ensures that annotations\n * with parameters are placed on separate lines.\n *\n * https://kotlinlang.org/docs/reference/coding-conventions.html#annotation-formatting\n *\n * @see [AnnotationSpacingRule] for white space rules. Moved since\n */\npublic class AnnotationRule : StandardRule(\"annotation\") {\n    override fun beforeVisitChildNodes(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        when (node.elementType) {\n            FILE_ANNOTATION_LIST -> {\n                visitFileAnnotationList(node, emit, autoCorrect)\n            }\n            ANNOTATION -> {\n                visitAnnotation(node, emit, autoCorrect)\n            }\n            ANNOTATION_ENTRY ->\n                visitAnnotationEntry(node, emit, autoCorrect)\n        }\n    }\n\n    private fun visitAnnotationEntry(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        require(node.elementType == ANNOTATION_ENTRY)\n\n        if (node.isAnnotationEntryWithValueArgumentList() &&\n            node.treeParent.treeParent.elementType != VALUE_PARAMETER && // fun fn(@Ann(\"blah\") a: String)\n            node.treeParent.treeParent.elementType != VALUE_ARGUMENT && // fn(@Ann(\"blah\") \"42\")\n            !node.isPartOf(TYPE_ARGUMENT_LIST) && // val property: Map<@Ann(\"blah\") String, Int>\n            node.isNotReceiverTargetAnnotation()\n        ) {\n            checkForAnnotationWithParameterToBePlacedOnSeparateLine(node, emit, autoCorrect)\n        }\n\n        if ((node.isFollowedByOtherAnnotationEntry() && node.isOnSameLineAsNextAnnotationEntry()) ||\n            (node.isPrecededByOtherAnnotationEntry() && node.isOnSameLineAsAnnotatedConstruct())\n        ) {\n            checkForAnnotationToBePlacedOnSeparateLine(node, emit, autoCorrect)\n        }\n\n        if (node.treeParent.elementType != ANNOTATION &&\n            node.isPrecededByOtherAnnotationEntry() &&\n            node.isOnSameLineAsAnnotatedConstruct() &&\n            !node.isPartOf(TYPE_ARGUMENT_LIST)\n        ) {\n            checkForMultipleAnnotationsOnSameLineAsAnnotatedConstruct(node, emit, autoCorrect)\n        }\n    }\n\n    private fun checkForAnnotationWithParameterToBePlacedOnSeparateLine(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        if (node.isPrecededByOtherAnnotationEntry() && node.isOnSameLineAsPreviousAnnotationEntry()) {\n            emit(\n                node.startOffset,\n                \"Annotation with parameter(s) should be placed on a separate line prior to the annotated construct\",\n                true,\n            )\n            if (autoCorrect) {\n                node\n                    .firstChildLeafOrSelf()\n                    .upsertWhitespaceBeforeMe(\" \")\n            }\n        }\n\n        if (node.isOnSameLineAsNextAnnotationEntryOrAnnotatedConstruct()) {\n            emit(\n                node.startOffset,\n                \"Annotation with parameter(s) should be placed on a separate line prior to the annotated construct\",\n                // Annotated expressions for which the annotation contains a parameter can be hard to correct\n                // automatically. See examples below. For now, let them be fixed manually.\n                // fun foo1() = @Suppress(\"DEPRECATION\") bar()\n                // if (@Suppress(\"DEPRECATION\") bar()) { .. }\n                node.treeParent.elementType != ANNOTATED_EXPRESSION,\n            )\n            if (autoCorrect) {\n                node\n                    .lastChildLeafOrSelf()\n                    .nextLeaf()\n                    .safeAs<LeafPsiElement>()\n                    ?.let {\n                        if (it.elementType == WHITE_SPACE) {\n                            it.replaceWithText(getNewlineWithIndent(node.treeParent))\n                        } else {\n                            it.rawInsertBeforeMe(\n                                PsiWhiteSpaceImpl(getNewlineWithIndent(node.treeParent)),\n                            )\n                        }\n                    }\n            }\n        }\n    }\n\n    private fun checkForMultipleAnnotationsOnSameLineAsAnnotatedConstruct(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        if (node.isLastAnnotationEntry()) {\n            val noAnnotationWithParameters =\n                node\n                    .siblings(forward = false)\n                    .none { it.isAnnotationEntryWithValueArgumentList() }\n            if (noAnnotationWithParameters) {\n                emit(\n                    node.treeParent.startOffset,\n                    \"Multiple annotations should not be placed on the same line as the annotated construct\",\n                    true,\n                )\n                if (autoCorrect) {\n                    node\n                        .lastChildLeafOrSelf()\n                        .nextCodeLeaf()\n                        ?.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))\n                }\n            }\n        }\n    }\n\n    private fun checkForAnnotationToBePlacedOnSeparateLine(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        val isFollowedWithAnnotationHavingValueArgumentList =\n            node\n                .siblings(forward = true)\n                .any { it.isAnnotationEntryWithValueArgumentList() }\n        val isPrecededWithAnnotationOnOtherLine =\n            node\n                .siblings(forward = false)\n                .any { it.isWhiteSpaceWithNewline() }\n        if (isFollowedWithAnnotationHavingValueArgumentList || isPrecededWithAnnotationOnOtherLine) {\n            emit(\n                node.startOffset,\n                \"Annotation must be placed on separate line\",\n                true,\n            )\n            if (autoCorrect) {\n                node\n                    .lastChildLeafOrSelf()\n                    .nextLeaf()\n                    ?.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))\n            }\n        }\n    }\n\n    private fun ASTNode.isNotReceiverTargetAnnotation() = getAnnotationUseSiteTarget() != AnnotationUseSiteTarget.RECEIVER\n\n    private fun ASTNode.getAnnotationUseSiteTarget() =\n        psi\n            .safeAs<KtAnnotationEntry>()\n            ?.useSiteTarget\n            ?.getAnnotationUseSiteTarget()\n\n    private fun ASTNode.isAnnotationEntryWithValueArgumentList() = getAnnotationEntryValueArgumentList() != null\n\n    private fun ASTNode.getAnnotationEntryValueArgumentList() =\n        takeIf { it.elementType == ANNOTATION_ENTRY }\n            ?.findChildByType(VALUE_ARGUMENT_LIST)\n\n    private fun ASTNode.isLastAnnotationEntry() =\n        treeParent\n            .children()\n            .lastOrNull { it.elementType == ANNOTATION_ENTRY }\n            .let { it == this }\n\n    private fun ASTNode.isPrecededByOtherAnnotationEntry() = siblings(forward = false).any { it.elementType == ANNOTATION_ENTRY }\n\n    private fun ASTNode.isOnSameLineAsPreviousAnnotationEntry() =\n        siblings(forward = false)\n            .takeWhile { it.elementType != ANNOTATION_ENTRY }\n            .none { it.isWhiteSpaceWithNewline() }\n\n    private fun ASTNode.isFollowedByOtherAnnotationEntry() = siblings(forward = true).any { it.elementType == ANNOTATION_ENTRY }\n\n    private fun ASTNode.isOnSameLineAsNextAnnotationEntry() =\n        siblings(forward = true)\n            .takeWhile { it.elementType != ANNOTATION_ENTRY }\n            .none { it.isWhiteSpaceWithNewline() }\n\n    private fun ASTNode.isOnSameLineAsAnnotatedConstruct() =\n        lastChildLeafOrSelf()\n            .leaves(forward = true)\n            .takeWhile { it.isWhiteSpace() || it.isPartOfComment() }\n            .none { it.isWhiteSpaceWithNewline() }\n\n    private fun ASTNode.isOnSameLineAsNextAnnotationEntryOrAnnotatedConstruct() =\n        if (isFollowedByOtherAnnotationEntry()) {\n            isOnSameLineAsNextAnnotationEntry()\n        } else {\n            isOnSameLineAsAnnotatedConstruct()\n        }\n\n    private fun visitFileAnnotationList(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        node\n            .lastChildLeafOrSelf()\n            .nextCodeLeaf()\n            ?.let { codeLeaf ->\n                val whitespaceBefore = codeLeaf.prevLeaf { it.isWhiteSpace() }\n\n                if (whitespaceBefore == null || whitespaceBefore.text != \"\\n\\n\") {\n                    emit(\n                        codeLeaf.startOffset,\n                        \"File annotations should be separated from file contents with a blank line\",\n                        true,\n                    )\n                    if (autoCorrect) {\n                        codeLeaf.upsertWhitespaceBeforeMe(\"\\n\\n\")\n                    }\n                }\n            }\n    }\n\n    private fun visitAnnotation(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        require(node.elementType == ANNOTATION)\n\n        if ((node.isFollowedByOtherAnnotationEntry() && node.isOnSameLineAsNextAnnotationEntry()) ||\n            (node.isPrecededByOtherAnnotationEntry() && node.isOnSameLineAsPreviousAnnotationEntry())\n        ) {\n            emit(\n                node.startOffset,\n                \"@[...] style annotations should be on a separate line from other annotations.\",\n                true,\n            )\n            if (autoCorrect) {\n                if (node.isFollowedByOtherAnnotationEntry()) {\n                    node.upsertWhitespaceAfterMe(getNewlineWithIndent(node.treeParent))\n                } else if (node.isPrecededByOtherAnnotationEntry()) {\n                    node.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))\n                }\n            }\n        }\n    }\n\n    private fun getNewlineWithIndent(modifierListRoot: ASTNode): String {\n        val nodeBeforeAnnotations = modifierListRoot.treeParent.treePrev as? PsiWhiteSpace\n        // If there is no whitespace before the annotation, the annotation is the first\n        // text in the file\n        val newLineWithIndent = nodeBeforeAnnotations?.text ?: \"\\n\"\n        return if (newLineWithIndent.contains('\\n')) {\n            // Make sure we only insert a single newline\n            newLineWithIndent.substring(newLineWithIndent.lastIndexOf('\\n'))\n        } else {\n            newLineWithIndent\n        }\n    }\n}\n\npublic val ANNOTATION_RULE_ID: RuleId = AnnotationRule().ruleId\n```\n[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 2211,
+            "endIndex": 2547,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 2410,
+            "endIndex": 2714,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 3078,
+            "endIndex": 3342,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 3848,
+            "endIndex": 4686,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 4607,
+            "endIndex": 4869,
+            "uri": "https://github.com/leinardi/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 5163,
+            "endIndex": 5335,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 5228,
+            "endIndex": 5745,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 5608,
+            "endIndex": 6200,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 6085,
+            "endIndex": 6450,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 7568,
+            "endIndex": 8431,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 8185,
+            "endIndex": 8578,
+            "uri": "https://github.com/leinardi/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 9164,
+            "endIndex": 9500,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 9363,
+            "endIndex": 9583,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 10967,
+            "endIndex": 11264,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 11620,
+            "endIndex": 11792,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 11685,
+            "endIndex": 12202,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 12065,
+            "endIndex": 12657,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 12542,
+            "endIndex": 12907,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 13073,
+            "endIndex": 13245,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 13138,
+            "endIndex": 13655,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 13518,
+            "endIndex": 14110,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 13995,
+            "endIndex": 14291,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 14811,
+            "endIndex": 14958,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 15062,
+            "endIndex": 15900,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 15821,
+            "endIndex": 16083,
+            "uri": "https://github.com/leinardi/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 17480,
+            "endIndex": 17690,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 18991,
+            "endIndex": 19163,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 19056,
+            "endIndex": 19573,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 19436,
+            "endIndex": 20028,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 19913,
+            "endIndex": 20278,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 20391,
+            "endIndex": 20563,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 20456,
+            "endIndex": 20973,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 20836,
+            "endIndex": 21428,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 21313,
+            "endIndex": 21609,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 23568,
+            "endIndex": 23727,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 23695,
+            "endIndex": 23898,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 23845,
+            "endIndex": 23986,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 23927,
+            "endIndex": 24214,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 24104,
+            "endIndex": 24279,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24248,
+            "endIndex": 24410,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24428,
+            "endIndex": 24548,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24498,
+            "endIndex": 24667,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24621,
+            "endIndex": 24790,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24756,
+            "endIndex": 24925,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24825,
+            "endIndex": 24994,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24952,
+            "endIndex": 25172,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 25076,
+            "endIndex": 25306,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 25398,
+            "endIndex": 25580,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 25478,
+            "endIndex": 25626,
+            "uri": "https://github.com/google/ksp",
+            "license": ""
+          },
+          {
+            "startIndex": 25604,
+            "endIndex": 25878,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 25761,
+            "endIndex": 26083,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 25958,
+            "endIndex": 26109,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 26310,
+            "endIndex": 26712,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 26547,
+            "endIndex": 26873,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 26766,
+            "endIndex": 27283,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 27146,
+            "endIndex": 27738,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 27623,
+            "endIndex": 27919,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 28005,
+            "endIndex": 28722,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 28525,
+            "endIndex": 28924,
+            "uri": "https://github.com/leinardi/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 28752,
+            "endIndex": 30958,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 30712,
+            "endIndex": 31106,
+            "uri": "https://github.com/leinardi/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 30989,
+            "endIndex": 31944,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 31865,
+            "endIndex": 32127,
+            "uri": "https://github.com/leinardi/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32066,
+            "endIndex": 34301,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 34174,
+            "endIndex": 35170,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 35048,
+            "endIndex": 35351,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 35264,
+            "endIndex": 36126,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 36002,
+            "endIndex": 36241,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 36200,
+            "endIndex": 36602,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 36427,
+            "endIndex": 36662,
+            "uri": "https://github.com/leinardi/ktlint",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 91016,
+    "candidatesTokenCount": 3377,
+    "totalTokenCount": 100165,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 91016
+      }
+    ],
+    "thoughtsTokenCount": 5772
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "zo9DaIXhO6WN_uMPuvjBmAU"
+}

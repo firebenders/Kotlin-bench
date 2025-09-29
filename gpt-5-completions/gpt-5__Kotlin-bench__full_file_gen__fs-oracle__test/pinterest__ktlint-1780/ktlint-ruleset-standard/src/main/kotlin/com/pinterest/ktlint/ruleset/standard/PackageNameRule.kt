@@ -1,0 +1,40 @@
+package com.pinterest.ktlint.ruleset.standard
+
+import com.pinterest.ktlint.core.Rule
+import com.pinterest.ktlint.core.ast.ElementType
+import com.pinterest.ktlint.core.ast.ElementType.PACKAGE_DIRECTIVE
+import com.pinterest.ktlint.core.ast.nextCodeSibling
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+
+/**
+ * https://kotlinlang.org/docs/coding-conventions.html#naming-rules
+ */
+public class PackageNameRule : Rule("package-name") {
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        node
+            .takeIf { node.elementType == PACKAGE_DIRECTIVE }
+            ?.firstChildNode
+            ?.nextCodeSibling()
+            ?.takeIf { it.elementType == ElementType.DOT_QUALIFIED_EXPRESSION || it.elementType == ElementType.REFERENCE_EXPRESSION }
+            ?.let { expression ->
+                if (expression.text.contains('_')) {
+                    // The Kotlin inspections (preference > Editor > Inspections) for 'Package naming convention' allows
+                    // underscores as well. But as this has been forbidden by KtLint since early versions, this is still
+                    // prohibited.
+                    emit(expression.startOffset, "Package name must not contain underscore", false)
+                } else if (!expression.text.matches(VALID_PACKAGE_NAME_REGEXP)) {
+                    emit(expression.startOffset, "Package name contains a disallowed character", false)
+                }
+            }
+    }
+
+    private companion object {
+        // Allow Unicode letters in package names. Each segment must start with a lowercase letter,
+        // subsequent characters may be any Unicode letter or digit (underscore is handled separately above).
+        val VALID_PACKAGE_NAME_REGEXP = Regex("[\\p{Ll}_][\\p{L}\\d_]*(\\.[\\p{Ll}_][\\p{L}\\d_]*)*")
+    }
+}

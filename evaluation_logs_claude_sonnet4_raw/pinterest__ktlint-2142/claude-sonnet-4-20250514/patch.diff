@@ -1,0 +1,162 @@
+[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt]
+package com.pinterest.ktlint.ruleset.standard.rules
+
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELSE
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELSE_KEYWORD
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.IF
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.LBRACE
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.RBRACE
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.THEN
+import com.pinterest.ktlint.rule.engine.core.api.Rule
+import com.pinterest.ktlint.rule.engine.core.api.RuleId
+import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpace
+import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+import com.pinterest.ktlint.ruleset.standard.StandardRule
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
+
+/**
+ * Lints and formats the if/else statement. The else statement should start on a new line.
+ */
+public class MultiLineIfElseRule : StandardRule("multiline-if-else") {
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        if (node.elementType == IF) {
+            visitIfStatement(node, autoCorrect, emit)
+        }
+    }
+
+    private fun visitIfStatement(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        val thenNode = node.findChildByType(THEN)
+        val elseNode = node.findChildByType(ELSE)
+        val elseKeywordNode = elseNode?.findChildByType(ELSE_KEYWORD)
+
+        if (thenNode != null && elseNode != null && elseKeywordNode != null) {
+            visitThenElse(thenNode, elseKeywordNode, autoCorrect, emit)
+        }
+    }
+
+    private fun visitThenElse(
+        thenNode: ASTNode,
+        elseKeywordNode: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        val thenIsMultiline = thenNode.textContains('\n')
+        val elseIsMultiline = elseKeywordNode.treeParent.textContains('\n')
+
+        if (thenIsMultiline || elseIsMultiline) {
+            val thenFirstChild = thenNode.firstChildNode
+            // Add null check to prevent NPE when THEN block is empty
+            if (thenFirstChild != null && thenFirstChild.elementType != BLOCK) {
+                visitThenNodeNotWrappedInBlock(thenNode, autoCorrect, emit)
+            }
+
+            val elseFirstChild = elseKeywordNode.treeParent.firstChildNode
+            // Add null check to prevent NPE when ELSE block is empty  
+            if (elseFirstChild != null && elseFirstChild.elementType != IF && elseFirstChild.elementType != BLOCK) {
+                visitElseNodeNotWrappedInBlock(elseKeywordNode.treeParent, autoCorrect, emit)
+            }
+
+            visitElseKeywordOnSameLineAsPrecedingRightBrace(thenNode, elseKeywordNode, autoCorrect, emit)
+        }
+    }
+
+    private fun visitThenNodeNotWrappedInBlock(
+        thenNode: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        val firstChild = thenNode.firstChildNode
+        // Additional safety check
+        if (firstChild == null) {
+            return
+        }
+        
+        emit(
+            firstChild.startOffset,
+            "Missing { ... }",
+            true,
+        )
+        if (autoCorrect) {
+            autocorrectThenNodeNotWrappedInBlock(thenNode)
+        }
+    }
+
+    private fun visitElseNodeNotWrappedInBlock(
+        elseNode: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        val firstChild = elseNode.firstChildNode
+        // Additional safety check
+        if (firstChild == null) {
+            return
+        }
+        
+        emit(
+            firstChild.startOffset,
+            "Missing { ... }",
+            true,
+        )
+        if (autoCorrect) {
+            autocorrectElseNodeNotWrappedInBlock(elseNode)
+        }
+    }
+
+    private fun visitElseKeywordOnSameLineAsPrecedingRightBrace(
+        thenNode: ASTNode,
+        elseKeywordNode: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        val thenFirstChild = thenNode.firstChildNode
+        // Add null check here as well
+        if (thenFirstChild?.elementType == BLOCK) {
+            val rightBraceBeforeElse =
+                elseKeywordNode
+                    .prevLeaf()
+                    ?.takeIf { it.elementType == RBRACE }
+            if (rightBraceBeforeElse != null) {
+                val whiteSpaceBetweenRightBraceAndElse =
+                    rightBraceBeforeElse
+                        .nextLeaf()
+                        ?.takeIf { it.isWhiteSpace() }
+                if (whiteSpaceBetweenRightBraceAndElse?.text?.contains('\n') != true) {
+                    emit(
+                        elseKeywordNode.startOffset,
+                        "Expected a newline",
+                        true,
+                    )
+                    if (autoCorrect) {
+                        (whiteSpaceBetweenRightBraceAndElse as LeafPsiElement).rawReplaceWithText(" ")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun autocorrectThenNodeNotWrappedInBlock(thenNode: ASTNode) {
+        val firstChild = thenNode.firstChildNode ?: return
+        thenNode.addChild(LeafPsiElement(LBRACE, "{"), firstChild)
+        thenNode.addChild(LeafPsiElement(RBRACE, "}"), null)
+    }
+
+    private fun autocorrectElseNodeNotWrappedInBlock(elseNode: ASTNode) {
+        val firstChild = elseNode.firstChildNode ?: return
+        elseNode.addChild(LeafPsiElement(LBRACE, "{"), firstChild)
+        elseNode.addChild(LeafPsiElement(RBRACE, "}"), null)
+    }
+}
+
+public val MULTILINE_IF_ELSE_RULE_ID: RuleId = MultiLineIfElseRule().ruleId
+[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt]

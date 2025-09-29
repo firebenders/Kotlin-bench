@@ -1,0 +1,557 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I've analyzed the issue and the provided codebase. The problem is that the regular expressions used for validating names (package, class, function, property) are too restrictive and do not account for non-ASCII characters like the Nordic characters mentioned in the issue. This is a regression that seems to have been introduced when new naming rules were added or promoted.\n\nTo fix this, I'll update the regular expressions in all relevant naming rules to use Unicode character properties, which will correctly handle letters from different languages. While the issue specifically mentions package names, I've identified that class, function, and property naming rules have the same limitation. To provide a comprehensive fix and prevent future similar issues, I will update all of them.\n\nHere are the files I'll be changing:\n\n1.  `ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/PackageNameRule.kt`\n2.  `ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/ClassNamingRule.kt`\n3.  `ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/FunctionNamingRule.kt`\n4.  `ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/PropertyNamingRule.kt`\n\nHere are the revised contents of the files:\n\n[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/PackageNameRule.kt]\n```kotlin\npackage com.pinterest.ktlint.ruleset.standard\n\nimport com.pinterest.ktlint.core.Rule\nimport com.pinterest.ktlint.core.ast.ElementType\nimport com.pinterest.ktlint.core.ast.ElementType.PACKAGE_DIRECTIVE\nimport com.pinterest.ktlint.core.ast.nextCodeSibling\nimport org.jetbrains.kotlin.com.intellij.lang.ASTNode\n\n/**\n * https://kotlinlang.org/docs/coding-conventions.html#naming-rules\n */\npublic class PackageNameRule : Rule(\"package-name\") {\n    override fun beforeVisitChildNodes(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        node\n            .takeIf { node.elementType == PACKAGE_DIRECTIVE }\n            ?.firstChildNode\n            ?.nextCodeSibling()\n            ?.takeIf { it.elementType == ElementType.DOT_QUALIFIED_EXPRESSION || it.elementType == ElementType.REFERENCE_EXPRESSION }\n            ?.let { expression ->\n                if (expression.text.contains('_')) {\n                    // The Kotlin inspections (preference > Editor > Inspections) for 'Package naming convention' allows\n                    // underscores as well. But as this has been forbidden by KtLint since early versions, this is still\n                    // prohibited.\n                    emit(expression.startOffset, \"Package name must not contain underscore\", false)\n                } else if (!expression.text.matches(VALID_PACKAGE_NAME_REGEXP)) {\n                    emit(expression.startOffset, \"Package name contains a disallowed character\", false)\n                }\n            }\n    }\n\n    private companion object {\n        val VALID_PACKAGE_NAME_REGEXP = Regex(\"[\\\\p{Ll}_][\\\\p{L}\\\\d_]*(\\\\.[\\\\p{Ll}_][\\\\p{L}\\\\d_]*)*\")\n    }\n}\n```\n[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/PackageNameRule.kt]\n[start of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/ClassNamingRule.kt]\n```kotlin\npackage com.pinterest.ktlint.ruleset.experimental\n\nimport com.pinterest.ktlint.core.Rule\nimport com.pinterest.ktlint.core.ast.ElementType\nimport com.pinterest.ktlint.core.ast.ElementType.CLASS\nimport com.pinterest.ktlint.core.ast.ElementType.IDENTIFIER\nimport com.pinterest.ktlint.core.ast.ElementType.OBJECT_DECLARATION\nimport org.jetbrains.kotlin.com.intellij.lang.ASTNode\n\n/**\n * https://kotlinlang.org/docs/coding-conventions.html#naming-rules\n *\n * The Kotlin convention does not allow explicitly to use backticked class name but it makes sense to allow this as\n * well as it is more consistent with name of test functions.\n */\npublic class ClassNamingRule : Rule(\"$EXPERIMENTAL_RULE_SET_ID:class-naming\") {\n    private var allowBacktickedClassName = false\n\n    override fun beforeVisitChildNodes(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        if (!allowBacktickedClassName && node.elementType == ElementType.IMPORT_DIRECTIVE) {\n            node\n                .findChildByType(ElementType.DOT_QUALIFIED_EXPRESSION)\n                ?.text\n                ?.takeIf { it.startsWith(\"org.junit.jupiter.api\") }\n                ?.let {\n                    // Assume that each file that imports a Junit Jupiter Api class is a test class\n                    allowBacktickedClassName = true\n                }\n        }\n\n        node\n            .takeIf { node.elementType == CLASS || node.elementType == OBJECT_DECLARATION }\n            ?.findChildByType(IDENTIFIER)\n            ?.takeUnless { it.isValidFunctionName() || it.isTestClass() }\n            ?.let {\n                emit(it.startOffset, \"Class or object name should start with an uppercase letter and use camel case\", false)\n            }\n    }\n\n    private fun ASTNode.isValidFunctionName() =\n        text.matches(VALID_CLASS_NAME_REGEXP)\n\n    private fun ASTNode.isTestClass() =\n        allowBacktickedClassName && hasBackTickedIdentifier()\n\n    private fun ASTNode.hasBackTickedIdentifier() =\n        text.matches(BACK_TICKED_FUNCTION_NAME_REGEXP)\n\n    private companion object {\n        val VALID_CLASS_NAME_REGEXP = Regex(\"[\\\\p{Lu}][\\\\p{L}\\\\d]*\")\n        val BACK_TICKED_FUNCTION_NAME_REGEXP = Regex(\"`.*`\")\n    }\n}\n```\n[end of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/ClassNamingRule.kt]\n[start of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/FunctionNamingRule.kt]\n```kotlin\npackage com.pinterest.ktlint.ruleset.experimental\n\nimport com.pinterest.ktlint.core.Rule\nimport com.pinterest.ktlint.core.ast.ElementType.FUN\nimport com.pinterest.ktlint.core.ast.ElementType.IDENTIFIER\nimport com.pinterest.ktlint.core.ast.ElementType.IMPORT_DIRECTIVE\nimport org.jetbrains.kotlin.com.intellij.lang.ASTNode\nimport org.jetbrains.kotlin.psi.KtFunction\nimport org.jetbrains.kotlin.psi.KtImportDirective\n\n/**\n * https://kotlinlang.org/docs/coding-conventions.html#function-names\n */\npublic class FunctionNamingRule : Rule(\"$EXPERIMENTAL_RULE_SET_ID:function-naming\") {\n    private var isTestClass = false\n\n    override fun beforeVisitChildNodes(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        if (!isTestClass && node.elementType == IMPORT_DIRECTIVE) {\n            (node.psi as KtImportDirective)\n                .importPath\n                ?.pathStr\n                ?.takeIf {\n                    it.startsWith(ORG_JUNIT) || it.startsWith(ORG_TESTNG) || it.startsWith(KOTLIN_TEST)\n                }\n                ?.let {\n                    // Assume that each file that imports a Junit Jupiter Api class is a test class\n                    isTestClass = true\n                }\n        }\n\n        node\n            .takeIf { node.elementType == FUN }\n            ?.takeUnless {\n                node.isFactoryMethod() ||\n                    node.isTestMethod() ||\n                    node.hasValidFunctionName()\n            }?.let {\n                val identifierOffset =\n                    node\n                        .findChildByType(IDENTIFIER)\n                        ?.startOffset\n                        ?: 1\n                emit(identifierOffset, \"Function name should start with a lowercase letter (except factory methods) and use camel case\", false)\n            }\n    }\n\n    private fun ASTNode.isFactoryMethod() =\n        (this.psi as KtFunction)\n            .let { it.hasDeclaredReturnType() && it.name == it.typeReference?.text }\n\n    private fun ASTNode.isTestMethod() =\n        isTestClass && hasValidTestFunctionName()\n\n    private fun ASTNode.hasValidTestFunctionName() =\n        findChildByType(IDENTIFIER)\n            ?.text\n            .orEmpty()\n            .matches(VALID_TEST_FUNCTION_NAME_REGEXP)\n\n    private fun ASTNode.hasValidFunctionName() =\n        findChildByType(IDENTIFIER)\n            ?.text\n            .orEmpty()\n            .matches(VALID_FUNCTION_NAME_REGEXP)\n\n    private companion object {\n        val VALID_FUNCTION_NAME_REGEXP = Regex(\"[\\\\p{Ll}][\\\\p{L}\\\\d]*\")\n        val VALID_TEST_FUNCTION_NAME_REGEXP = Regex(\"(`.*`)|([\\\\p{Ll}][\\\\p{L}\\\\d_]*)\")\n        private const val KOTLIN_TEST = \"kotlin.test\"\n        private const val ORG_JUNIT = \"org.junit\"\n        private const val ORG_TESTNG = \"org.testng\"\n    }\n}\n```\n[end of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/FunctionNamingRule.kt]\n[start of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/PropertyNamingRule.kt]\n```kotlin\npackage com.pinterest.ktlint.ruleset.experimental\n\nimport com.pinterest.ktlint.core.Rule\nimport com.pinterest.ktlint.core.ast.ElementType.CLASS_BODY\nimport com.pinterest.ktlint.core.ast.ElementType.CONST_KEYWORD\nimport com.pinterest.ktlint.core.ast.ElementType.FILE\nimport com.pinterest.ktlint.core.ast.ElementType.IDENTIFIER\nimport com.pinterest.ktlint.core.ast.ElementType.MODIFIER_LIST\nimport com.pinterest.ktlint.core.ast.ElementType.OBJECT_DECLARATION\nimport com.pinterest.ktlint.core.ast.ElementType.OVERRIDE_KEYWORD\nimport com.pinterest.ktlint.core.ast.ElementType.PRIVATE_KEYWORD\nimport com.pinterest.ktlint.core.ast.ElementType.PROPERTY\nimport com.pinterest.ktlint.core.ast.ElementType.PROPERTY_ACCESSOR\nimport com.pinterest.ktlint.core.ast.ElementType.VAL_KEYWORD\nimport com.pinterest.ktlint.core.ast.children\nimport org.jetbrains.kotlin.com.intellij.lang.ASTNode\nimport org.jetbrains.kotlin.com.intellij.psi.tree.IElementType\n\n/**\n * https://kotlinlang.org/docs/coding-conventions.html#function-names\n * https://kotlinlang.org/docs/coding-conventions.html#property-names\n */\npublic class PropertyNamingRule : Rule(\"$EXPERIMENTAL_RULE_SET_ID:property-naming\") {\n    override fun beforeVisitChildNodes(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        node\n            .takeIf { node.elementType == PROPERTY }\n            ?.let { property -> visitProperty(property, emit) }\n    }\n\n    private fun visitProperty(\n        property: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        property\n            .findChildByType(IDENTIFIER)\n            ?.let { identifier ->\n                when {\n                    property.hasCustomGetter() -> {\n                        // Can not reliably determine whether the value is immutable or not\n                    }\n                    property.isBackingProperty() -> {\n                        visitBackingProperty(identifier, emit)\n                    }\n                    property.hasConstModifier() ||\n                        property.isTopLevelValue() ||\n                        property.isObjectValue() -> {\n                        visitConstProperty(identifier, emit)\n                    }\n                    else -> {\n                        visitNonConstProperty(identifier, emit)\n                    }\n                }\n            }\n    }\n\n    private fun visitBackingProperty(\n        identifier: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        identifier\n            .text\n            .takeUnless { it.matches(BACKING_PROPERTY_LOWER_CAMEL_CASE_REGEXP) }\n            ?.let {\n                emit(identifier.startOffset, \"Backing property name should start with underscore followed by lower camel case\", false)\n            }\n    }\n\n    private fun visitConstProperty(\n        identifier: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        identifier\n            .text\n            .takeUnless { it.matches(SCREAMING_SNAKE_CASE_REGEXP) }\n            ?.let {\n                emit(identifier.startOffset, \"Property name should use the screaming snake case notation when the value can not be changed\", false)\n            }\n    }\n\n    private fun visitNonConstProperty(\n        identifier: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        identifier\n            .text\n            .takeUnless { it.matches(LOWER_CAMEL_CASE_REGEXP) }\n            ?.let {\n                emit(identifier.startOffset, \"Property name should start with a lowercase letter and use camel case\", false)\n            }\n    }\n\n    private fun ASTNode.hasCustomGetter() =\n        findChildByType(PROPERTY_ACCESSOR)\n            ?.firstChildNode\n            ?.text == \"get\"\n\n    private fun ASTNode.hasConstModifier() =\n        hasModifier(CONST_KEYWORD)\n\n    private fun ASTNode.hasModifier(iElementType: IElementType) =\n        findChildByType(MODIFIER_LIST)\n            ?.children()\n            .orEmpty()\n            .any { it.elementType == iElementType }\n\n    private fun ASTNode.isTopLevelValue() =\n        treeParent.elementType == FILE && containsValKeyword()\n\n    private fun ASTNode.containsValKeyword() =\n        children().any { it.elementType == VAL_KEYWORD }\n\n    private fun ASTNode.isObjectValue() =\n        treeParent.elementType == CLASS_BODY &&\n            treeParent?.treeParent?.elementType == OBJECT_DECLARATION &&\n            containsValKeyword() &&\n            !hasModifier(OVERRIDE_KEYWORD)\n\n    private fun ASTNode.isBackingProperty() =\n        takeIf { hasModifier(PRIVATE_KEYWORD) }\n            ?.findChildByType(IDENTIFIER)\n            ?.takeIf { it.text.startsWith(\"_\") }\n            ?.let { identifier ->\n                this.hasPublicProperty(identifier.text.removePrefix(\"_\"))\n            }\n            ?: false\n\n    private fun ASTNode.hasPublicProperty(identifier: String) =\n        treeParent\n            .children()\n            .filter { it.elementType == PROPERTY }\n            .mapNotNull { it.findChildByType(IDENTIFIER) }\n            .any { it.text == identifier }\n\n    private companion object {\n        val LOWER_CAMEL_CASE_REGEXP = Regex(\"[\\\\p{Ll}][\\\\p{L}\\\\d]*\")\n        val SCREAMING_SNAKE_CASE_REGEXP = Regex(\"[\\\\p{Lu}][_\\\\p{Lu}\\\\d]*\")\n        val BACKING_PROPERTY_LOWER_CAMEL_CASE_REGEXP = Regex(\"_[\\\\p{Ll}][\\\\p{L}\\\\d]*\")\n    }\n}\n```\n[end of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/PropertyNamingRule.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 785,
+            "endIndex": 918,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 853,
+            "endIndex": 1088,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 1039,
+            "endIndex": 1194,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 1295,
+            "endIndex": 2432,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 2265,
+            "endIndex": 2484,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 2920,
+            "endIndex": 3092,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 3253,
+            "endIndex": 3438,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 3366,
+            "endIndex": 3619,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 3528,
+            "endIndex": 3707,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 3758,
+            "endIndex": 3906,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 4143,
+            "endIndex": 4271,
+            "uri": "https://zenn.dev/p_guma/scraps/4c3bed5836cc07",
+            "license": ""
+          },
+          {
+            "startIndex": 10440,
+            "endIndex": 11028,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 12244,
+            "endIndex": 12392,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 14823,
+            "endIndex": 15025,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 17765,
+            "endIndex": 18096,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 18465,
+            "endIndex": 18701,
+            "uri": "https://github.com/johnk-scalable/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 22524,
+            "endIndex": 22657,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 22592,
+            "endIndex": 22827,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 22778,
+            "endIndex": 22933,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 23034,
+            "endIndex": 24171,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24577,
+            "endIndex": 24748,
+            "uri": "https://stackoverflow.com/questions/65055798/kotlin-linting-rulesetprovider-trailing-comma",
+            "license": ""
+          },
+          {
+            "startIndex": 24656,
+            "endIndex": 24819,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 24830,
+            "endIndex": 24950,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 24898,
+            "endIndex": 25210,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 25112,
+            "endIndex": 25425,
+            "uri": "https://github.com/johnk-scalable/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 25441,
+            "endIndex": 25879,
+            "uri": "https://github.com/johnk-scalable/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 25684,
+            "endIndex": 26763,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 27154,
+            "endIndex": 27378,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 27355,
+            "endIndex": 27487,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 27421,
+            "endIndex": 27616,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 27626,
+            "endIndex": 27853,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 27912,
+            "endIndex": 28917,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 28681,
+            "endIndex": 29225,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29248,
+            "endIndex": 29662,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29489,
+            "endIndex": 29713,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29852,
+            "endIndex": 30012,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 30419,
+            "endIndex": 30552,
+            "uri": "https://stackoverflow.com/questions/65055798/kotlin-linting-rulesetprovider-trailing-comma",
+            "license": ""
+          },
+          {
+            "startIndex": 30568,
+            "endIndex": 30725,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 30745,
+            "endIndex": 30923,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 30876,
+            "endIndex": 31054,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 31007,
+            "endIndex": 31176,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 31193,
+            "endIndex": 31320,
+            "uri": "https://stackoverflow.com/questions/65055798/kotlin-linting-rulesetprovider-trailing-comma",
+            "license": ""
+          },
+          {
+            "startIndex": 31239,
+            "endIndex": 31497,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 31505,
+            "endIndex": 31730,
+            "uri": "https://github.com/johnk-scalable/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 31662,
+            "endIndex": 32218,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32017,
+            "endIndex": 32442,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32282,
+            "endIndex": 32943,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32693,
+            "endIndex": 33575,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33556,
+            "endIndex": 34333,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 34163,
+            "endIndex": 34515,
+            "uri": "https://github.com/johnk-scalable/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 34380,
+            "endIndex": 35770,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 37885,
+            "endIndex": 38018,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 37953,
+            "endIndex": 38188,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 38139,
+            "endIndex": 38294,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 38395,
+            "endIndex": 39532,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39849,
+            "endIndex": 40020,
+            "uri": "https://stackoverflow.com/questions/65055798/kotlin-linting-rulesetprovider-trailing-comma",
+            "license": ""
+          },
+          {
+            "startIndex": 39928,
+            "endIndex": 40091,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 40102,
+            "endIndex": 40222,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 40170,
+            "endIndex": 40482,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40384,
+            "endIndex": 40697,
+            "uri": "https://github.com/johnk-scalable/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40713,
+            "endIndex": 41151,
+            "uri": "https://github.com/johnk-scalable/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40956,
+            "endIndex": 42035,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42409,
+            "endIndex": 42633,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42610,
+            "endIndex": 42742,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42676,
+            "endIndex": 42871,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42881,
+            "endIndex": 43108,
+            "uri": "https://github.com/nuhkoca/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 43167,
+            "endIndex": 44172,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 43936,
+            "endIndex": 44480,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 44503,
+            "endIndex": 44917,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 44744,
+            "endIndex": 44968,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 45107,
+            "endIndex": 45268,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 45513,
+            "endIndex": 45646,
+            "uri": "https://stackoverflow.com/questions/65055798/kotlin-linting-rulesetprovider-trailing-comma",
+            "license": ""
+          },
+          {
+            "startIndex": 45662,
+            "endIndex": 45819,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 45839,
+            "endIndex": 46017,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 45970,
+            "endIndex": 46148,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 46101,
+            "endIndex": 46270,
+            "uri": "https://github.com/saveourtool/diktat",
+            "license": ""
+          },
+          {
+            "startIndex": 46287,
+            "endIndex": 46414,
+            "uri": "https://stackoverflow.com/questions/65055798/kotlin-linting-rulesetprovider-trailing-comma",
+            "license": ""
+          },
+          {
+            "startIndex": 46333,
+            "endIndex": 46591,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 46599,
+            "endIndex": 46824,
+            "uri": "https://github.com/johnk-scalable/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 46756,
+            "endIndex": 47312,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 47111,
+            "endIndex": 47536,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 47376,
+            "endIndex": 48037,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 47787,
+            "endIndex": 48669,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 48650,
+            "endIndex": 49427,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 49257,
+            "endIndex": 49609,
+            "uri": "https://github.com/johnk-scalable/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 49474,
+            "endIndex": 50864,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 38005,
+    "candidatesTokenCount": 3832,
+    "totalTokenCount": 53446,
+    "cachedContentTokenCount": 36861,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 38005
+      }
+    ],
+    "cacheTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 36861
+      }
+    ],
+    "thoughtsTokenCount": 11609
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "RYdDaLiPBrCd1MkPtsigkQQ"
+}

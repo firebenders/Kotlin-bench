@@ -1,0 +1,1295 @@
+[start of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListFragment.kt]
+package org.wordpress.android.ui.posts
+
+import android.os.Bundle
+import android.text.TextUtils
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.ProgressBar
+import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Observer
+import androidx.lifecycle.ViewModelProvider
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import org.wordpress.android.R
+import org.wordpress.android.WordPress
+import org.wordpress.android.fluxc.model.SiteModel
+import org.wordpress.android.ui.ActionableEmptyView
+import org.wordpress.android.ui.ViewPagerFragment
+import org.wordpress.android.ui.posts.PostListType.SEARCH
+import org.wordpress.android.ui.posts.adapters.PostListAdapter
+import org.wordpress.android.ui.utils.UiHelpers
+import org.wordpress.android.ui.utils.UiString
+import org.wordpress.android.util.DisplayUtils
+import org.wordpress.android.util.NetworkUtils
+import org.wordpress.android.util.ToastUtils
+import org.wordpress.android.util.WPSwipeToRefreshHelper.buildSwipeToRefreshHelper
+import org.wordpress.android.util.extensions.getSerializableCompat
+import org.wordpress.android.util.extensions.getSerializableExtraCompat
+import org.wordpress.android.util.helpers.SwipeToRefreshHelper
+import org.wordpress.android.util.image.ImageManager
+import org.wordpress.android.util.widgets.CustomSwipeRefreshLayout
+import org.wordpress.android.viewmodel.posts.PagedPostList
+import org.wordpress.android.viewmodel.posts.PostListEmptyUiState
+import org.wordpress.android.viewmodel.posts.PostListItemIdentifier.LocalPostId
+import org.wordpress.android.viewmodel.posts.PostListViewModel
+import org.wordpress.android.widgets.RecyclerItemDecoration
+import javax.inject.Inject
+
+private const val EXTRA_POST_LIST_TYPE = "post_list_type"
+private const val MAX_INDEX_FOR_VISIBLE_ITEM_TO_KEEP_SCROLL_POSITION = 2
+
+class PostListFragment : ViewPagerFragment() {
+    @Inject
+    internal lateinit var imageManager: ImageManager
+
+    @Inject
+    internal lateinit var viewModelFactory: ViewModelProvider.Factory
+
+    @Inject
+    internal lateinit var uiHelpers: UiHelpers
+    private lateinit var viewModel: PostListViewModel
+    private lateinit var mainViewModel: PostListMainViewModel
+
+    private var swipeToRefreshHelper: SwipeToRefreshHelper? = null
+
+    private var swipeRefreshLayout: CustomSwipeRefreshLayout? = null
+    private var recyclerView: RecyclerView? = null
+    private var actionableEmptyView: ActionableEmptyView? = null
+    private var progressLoadMore: ProgressBar? = null
+
+    private lateinit var itemDecorationStandardLayout: RecyclerItemDecoration
+
+    private lateinit var postListType: PostListType
+
+    private lateinit var nonNullActivity: FragmentActivity
+
+    private val postListAdapter: PostListAdapter by lazy {
+        PostListAdapter(
+            context = nonNullActivity,
+            imageManager = imageManager,
+            uiHelpers = uiHelpers
+        )
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        nonNullActivity = requireActivity()
+        (nonNullActivity.application as WordPress).component().inject(this)
+
+        val nonNullIntent = checkNotNull(nonNullActivity.intent)
+        val site = nonNullIntent.getSerializableExtraCompat<SiteModel>(WordPress.SITE)
+
+        if (site == null) {
+            ToastUtils.showToast(nonNullActivity, R.string.blog_not_found, ToastUtils.Duration.SHORT)
+            nonNullActivity.finish()
+        }
+    }
+
+    override fun getScrollableViewForUniqueIdProvision(): View? {
+        if (postListType == SEARCH) {
+            return null
+        }
+        return recyclerView
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        postListType = requireNotNull(arguments?.getSerializableCompat(EXTRA_POST_LIST_TYPE))
+
+        if (postListType == SEARCH) {
+            recyclerView?.id = R.id.posts_search_recycler_view_id
+        }
+
+        mainViewModel = ViewModelProvider(nonNullActivity, viewModelFactory)[PostListMainViewModel::class.java]
+
+        mainViewModel.authorSelectionUpdated.observe(viewLifecycleOwner) {
+            if (it != null) {
+                if (viewModel.updateAuthorFilterIfNotSearch(it)) {
+                    recyclerView?.scrollToPosition(0)
+                }
+            }
+        }
+
+        actionableEmptyView?.updateLayoutForSearch(postListType == SEARCH, 0)
+
+        val postListViewModelConnector = mainViewModel.getPostListViewModelConnector(postListType)
+
+        viewModel = ViewModelProvider(this, viewModelFactory)[PostListViewModel::class.java]
+
+        val displayWidth = DisplayUtils.getWindowPixelWidth(requireContext())
+        val contentSpacing = nonNullActivity.resources.getDimensionPixelSize(R.dimen.content_margin)
+
+        // since the MainViewModel has been already started, we need to manually update the authorFilterSelection value
+        viewModel.start(
+            postListViewModelConnector,
+            mainViewModel.authorSelectionUpdated.value!!,
+            photonWidth = displayWidth - contentSpacing * 2,
+            photonHeight = nonNullActivity.resources.getDimensionPixelSize(R.dimen.reader_featured_image_height)
+        )
+
+        initObservers()
+    }
+
+    private fun initObservers() {
+        if (postListType == SEARCH) {
+            mainViewModel.searchQuery.observe(viewLifecycleOwner, Observer {
+                if (TextUtils.isEmpty(it)) {
+                    postListAdapter.submitList(null)
+                }
+                viewModel.search(it)
+            })
+        }
+
+        viewModel.emptyViewState.observe(viewLifecycleOwner, Observer {
+            it?.let { emptyViewState -> updateEmptyViewForState(emptyViewState) }
+        })
+
+        viewModel.isFetchingFirstPage.observe(viewLifecycleOwner, Observer {
+            swipeRefreshLayout?.isRefreshing = it == true
+        })
+
+        viewModel.pagedListData.observe(viewLifecycleOwner, Observer {
+            it?.let { pagedListData -> updatePagedListData(pagedListData) }
+        })
+
+        viewModel.isLoadingMore.observe(viewLifecycleOwner, Observer {
+            progressLoadMore?.visibility = if (it == true) View.VISIBLE else View.GONE
+        })
+        viewModel.scrollToPosition.observe(viewLifecycleOwner, Observer {
+            it?.let { index ->
+                recyclerView?.scrollToPosition(index)
+            }
+        })
+    }
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+        val view = inflater.inflate(R.layout.post_list_fragment, container, false)
+
+        swipeRefreshLayout = view.findViewById(R.id.ptr_layout)
+        recyclerView = view.findViewById(R.id.recycler_view)
+        progressLoadMore = view.findViewById(R.id.progress)
+        actionableEmptyView = view.findViewById(R.id.actionable_empty_view)
+
+        val context = nonNullActivity
+        itemDecorationStandardLayout = RecyclerItemDecoration(
+            0,
+            context.resources.getDimensionPixelSize(R.dimen.margin_medium)
+        )
+        recyclerView?.layoutManager = LinearLayoutManager(context)
+        recyclerView?.adapter = postListAdapter
+        recyclerView?.addItemDecoration(itemDecorationStandardLayout)
+
+        swipeRefreshLayout?.let {
+            swipeToRefreshHelper = buildSwipeToRefreshHelper(it) {
+                if (!NetworkUtils.isNetworkAvailable(nonNullActivity)) {
+                    it.isRefreshing = false
+                } else {
+                    viewModel.swipeToRefresh()
+                }
+            }
+        }
+        return view
+    }
+
+    /**
+     * Updates the data for the adapter while retaining visible item in certain cases.
+     *
+     * PagedList tries to keep the visible item by adding new items outside of the screen while modifying the scroll
+     * position. In most cases, this works out great because it doesn't interrupt to the user. However, after a new
+     * item is inserted at the top while the list is showing the very first items, it feels very weird to not have the
+     * inserted item shown. For example, if a new draft is added there is no indication of it except for the flash
+     * of the scroll bar which is not noticeable unless user is paying attention to it.
+     *
+     * In these cases, we try to keep the scroll position the same instead of keeping the visible item the same by
+     * first saving the state and re-applying it after the data updates are completed. Since `PagedListAdapter` uses
+     * bg thread to calculate the changes, we need to post the change in the bg thread as well so that it'll be applied
+     * after changes are reflected.
+     */
+    private fun updatePagedListData(pagedListData: PagedPostList) {
+        val recyclerViewState = recyclerView?.layoutManager?.onSaveInstanceState()
+        postListAdapter.submitList(pagedListData)
+        recyclerView?.post {
+            (recyclerView?.layoutManager as? LinearLayoutManager)?.let { layoutManager ->
+                if (layoutManager.findFirstVisibleItemPosition() < MAX_INDEX_FOR_VISIBLE_ITEM_TO_KEEP_SCROLL_POSITION) {
+                    layoutManager.onRestoreInstanceState(recyclerViewState)
+                }
+            }
+        }
+    }
+
+    private fun updateEmptyViewForState(state: PostListEmptyUiState) {
+        actionableEmptyView?.let { emptyView ->
+            if (state.emptyViewVisible) {
+                emptyView.visibility = View.VISIBLE
+                uiHelpers.setTextOrHide(emptyView.title, state.title)
+                uiHelpers.setImageOrHide(emptyView.image, state.imgResId)
+                setupButtonOrHide(emptyView.button, state.buttonText, state.onButtonClick)
+            } else {
+                emptyView.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun setupButtonOrHide(
+        buttonView: Button,
+        text: UiString?,
+        onButtonClick: (() -> Unit)?
+    ) {
+        uiHelpers.setTextOrHide(buttonView, text)
+        buttonView.setOnClickListener { onButtonClick?.invoke() }
+    }
+
+    fun scrollToTargetPost(localPostId: LocalPostId) {
+        viewModel.scrollToPost(localPostId)
+    }
+
+    companion object {
+        const val TAG = "post_list_fragment_tag"
+
+        @JvmStatic
+        fun newInstance(
+            site: SiteModel,
+            postListType: PostListType
+        ): PostListFragment {
+            val fragment = PostListFragment()
+            val bundle = Bundle()
+            bundle.putSerializable(WordPress.SITE, site)
+            bundle.putSerializable(EXTRA_POST_LIST_TYPE, postListType)
+            fragment.arguments = bundle
+            return fragment
+        }
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListFragment.kt]
+[start of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt]
+package org.wordpress.android.ui.posts
+
+import android.content.Context
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
+import android.text.SpannableStringBuilder
+import android.text.style.ImageSpan
+import android.view.LayoutInflater
+import android.view.Menu
+import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.ImageView.ScaleType
+import android.widget.PopupMenu
+import android.widget.ProgressBar
+import android.widget.TextView
+import androidx.annotation.ColorRes
+import androidx.annotation.LayoutRes
+import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.DrawableCompat
+import androidx.recyclerview.widget.RecyclerView
+import org.wordpress.android.R
+import org.wordpress.android.ui.utils.UiHelpers
+import org.wordpress.android.ui.utils.UiString
+import org.wordpress.android.util.extensions.expandTouchTargetArea
+import org.wordpress.android.util.extensions.getColorFromAttribute
+import org.wordpress.android.util.extensions.getDrawableFromAttribute
+import org.wordpress.android.util.image.ImageManager
+import org.wordpress.android.util.image.ImageType
+import org.wordpress.android.viewmodel.posts.PostListItemAction
+import org.wordpress.android.viewmodel.posts.PostListItemAction.MoreItem
+import org.wordpress.android.viewmodel.posts.PostListItemAction.SingleItem
+import org.wordpress.android.viewmodel.posts.PostListItemType.PostListItemUiState
+import org.wordpress.android.viewmodel.posts.PostListItemUiStateData
+import org.wordpress.android.viewmodel.uistate.ProgressBarUiState
+import org.wordpress.android.widgets.PostListButton
+import org.wordpress.android.widgets.WPTextView
+import java.util.concurrent.atomic.AtomicBoolean
+import android.R as AndroidR
+
+const val POST_LIST_ICON_PADDING = 8
+
+sealed class PostListItemViewHolder(
+    @LayoutRes layout: Int,
+    parent: ViewGroup,
+    private val imageManager: ImageManager,
+    private val uiHelpers: UiHelpers
+) : RecyclerView.ViewHolder(LayoutInflater.from(parent.context).inflate(layout, parent, false)) {
+    private val featuredImageView: ImageView = itemView.findViewById(R.id.image_featured)
+    private val titleTextView: WPTextView = itemView.findViewById(R.id.title)
+    private val postInfoTextView: WPTextView = itemView.findViewById(R.id.post_info)
+    private val statusesTextView: WPTextView = itemView.findViewById(R.id.statuses_label)
+    private val uploadProgressBar: ProgressBar = itemView.findViewById(R.id.upload_progress)
+    private val disabledOverlay: FrameLayout = itemView.findViewById(R.id.disabled_overlay)
+    private val container: ConstraintLayout = itemView.findViewById(R.id.container)
+    private val selectableBackground: Drawable? = parent.context.getDrawableFromAttribute(
+        AndroidR.attr.selectableItemBackground
+    )
+
+    /**
+     * Url of an image loaded in the `featuredImageView`.
+     */
+    private var loadedFeaturedImgUrl: String? = null
+
+    companion object {
+        var isClickEnabled = AtomicBoolean(true)
+    }
+
+    abstract fun onBind(item: PostListItemUiState)
+
+    class Standard(
+        parent: ViewGroup,
+        imageManager: ImageManager,
+        private val uiHelpers: UiHelpers
+    ) : PostListItemViewHolder(R.layout.post_list_item, parent, imageManager, uiHelpers) {
+        private val excerptTextView: WPTextView = itemView.findViewById(R.id.excerpt)
+        private val actionButtons: List<PostListButton> = listOf(
+            itemView.findViewById(R.id.btn_primary),
+            itemView.findViewById(R.id.btn_secondary),
+            itemView.findViewById(R.id.btn_ternary)
+        )
+
+        override fun onBind(item: PostListItemUiState) {
+            setBasicValues(item.data)
+
+            uiHelpers.setTextOrHide(excerptTextView, item.data.excerpt)
+            itemView.setOnClickListener {
+                if (isSafeClick(it)) {
+                    item.onSelected.invoke()
+                }
+            }
+
+            actionButtons.forEachIndexed { index, button ->
+                updateMenuItem(button, item.actions.getOrNull(index))
+            }
+        }
+
+        private fun updateMenuItem(postListButton: PostListButton, action: PostListItemAction?) {
+            uiHelpers.updateVisibility(postListButton, action != null)
+            if (action != null) {
+                when (action) {
+                    is SingleItem -> {
+                        postListButton.updateButtonType(action.buttonType)
+                        postListButton.setOnClickListener {
+                            if (isSafeClick(it)) {
+                                action.onButtonClicked.invoke(action.buttonType)
+                            }
+                        }
+                    }
+                    is MoreItem -> {
+                        postListButton.updateButtonType(action.buttonType)
+                        postListButton.setOnClickListener { view ->
+                            action.onButtonClicked.invoke(action.buttonType)
+                            onMoreClicked(action.actions, view)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Purpose of this method is to prevent 2 Editors
+        // from being launched simultaneously and then producing a crash
+        private fun isSafeClick(view: View): Boolean {
+            if (isClickEnabled.getAndSet(false)) {
+                view.postDelayed({
+                    isClickEnabled.set(true)
+                }, 1000)
+                return true
+            }
+            return false
+        }
+    }
+
+    protected fun setBasicValues(data: PostListItemUiStateData) {
+        uiHelpers.setTextOrHide(titleTextView, data.title)
+        updatePostInfoLabel(postInfoTextView, data.postInfo)
+        uiHelpers.updateVisibility(statusesTextView, data.statuses.isNotEmpty())
+        updateStatusesLabel(statusesTextView, data.statuses, data.statusesDelimiter, data.statusesColor)
+        showFeaturedImage(data.imageUrl)
+        updateProgressBarState(data.progressBarUiState)
+        uiHelpers.updateVisibility(disabledOverlay, data.showOverlay)
+        if (data.disableRippleEffect) {
+            container.background = null
+        } else {
+            container.background = selectableBackground
+        }
+    }
+
+    private fun updatePostInfoLabel(view: TextView, uiStrings: List<UiString>?) {
+        val concatenatedText = uiStrings?.joinToString(separator = "  ·  ") {
+            uiHelpers.getTextOfUiString(view.context, it)
+        }
+        uiHelpers.setTextOrHide(view, concatenatedText)
+    }
+
+    protected fun onMoreClicked(actions: List<PostListItemAction>, v: View) {
+        val menu = PopupMenu(v.context, v)
+        actions.forEach { singleItemAction ->
+            val menuItem = menu.menu.add(
+                Menu.NONE,
+                singleItemAction.buttonType.value,
+                Menu.NONE,
+                getMenuItemTitleWithIcon(v.context, singleItemAction)
+            )
+            menuItem.setOnMenuItemClickListener {
+                singleItemAction.onButtonClicked.invoke(singleItemAction.buttonType)
+                true
+            }
+        }
+        menu.show()
+    }
+
+    private fun updateProgressBarState(progressBarUiState: ProgressBarUiState) {
+        uiHelpers.updateVisibility(uploadProgressBar, progressBarUiState.visibility)
+        when (progressBarUiState) {
+            is ProgressBarUiState.Indeterminate -> uploadProgressBar.isIndeterminate = true
+            is ProgressBarUiState.Determinate -> {
+                uploadProgressBar.isIndeterminate = false
+                uploadProgressBar.progress = progressBarUiState.progress
+            }
+            is ProgressBarUiState.Hidden -> Unit // Do nothing
+        }
+    }
+
+    private fun updateStatusesLabel(
+        view: WPTextView,
+        statuses: List<UiString>,
+        delimiter: UiString,
+        @ColorRes color: Int?
+    ) {
+        val separator = uiHelpers.getTextOfUiString(view.context, delimiter)
+        view.text = statuses.joinToString(separator) { uiHelpers.getTextOfUiString(view.context, it) }
+        color?.let { statusColor ->
+            view.setTextColor(
+                ContextCompat.getColor(
+                    itemView.context,
+                    statusColor
+                )
+            )
+        }
+    }
+
+    private fun showFeaturedImage(imageUrl: String?) {
+        if (!imageUrl.isNullOrBlank() && imageUrl == loadedFeaturedImgUrl) {
+            // Suppress blinking as the media upload progresses
+            return
+        }
+        if (imageUrl.isNullOrBlank()) {
+            featuredImageView.visibility = View.GONE
+            imageManager.cancelRequestAndClearImageView(featuredImageView)
+        } else {
+            featuredImageView.visibility = View.VISIBLE
+            imageManager.load(featuredImageView, ImageType.PHOTO, imageUrl, ScaleType.CENTER_CROP)
+        }
+        loadedFeaturedImgUrl = imageUrl
+    }
+
+    private fun setTint(context: Context, drawable: Drawable, color: Int): Drawable {
+        val wrappedDrawable: Drawable = DrawableCompat.wrap(drawable)
+        if (color != 0) {
+            val iconColor = context.getColorFromAttribute(color)
+            DrawableCompat.setTint(wrappedDrawable, iconColor)
+        }
+        return wrappedDrawable
+    }
+
+    @Suppress("ComplexMethod")
+    private fun getMenuItemTitleWithIcon(context: Context, item: PostListItemAction): SpannableStringBuilder {
+        var icon: Drawable? = setTint(
+            context,
+            context.getDrawable(item.buttonType.iconResId)!!, item.buttonType.colorAttrId
+        )
+        // If there's no icon, we insert a transparent one to keep the title aligned with the items which have icons.
+        if (icon == null) icon = ColorDrawable(Color.TRANSPARENT)
+        val iconSize: Int = context.getResources().getDimensionPixelSize(R.dimen.menu_item_icon_size)
+        icon.setBounds(0, 0, iconSize, iconSize)
+        val imageSpan = ImageSpan(icon)
+
+        // Add a space placeholder for the icon, before the title.
+        val menuTitle = context.getText(item.buttonType.textResId)
+        val ssb = SpannableStringBuilder(
+            menuTitle.padStart(menuTitle.length + POST_LIST_ICON_PADDING)
+        )
+
+        // Replace the space placeholder with the icon.
+        ssb.setSpan(imageSpan, 1, 2, 0)
+        return ssb
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt]
+[start of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewModel.kt]
+package org.wordpress.android.ui.posts
+
+import android.annotation.SuppressLint
+import android.content.Intent
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.Observer
+import androidx.lifecycle.ViewModel
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.wordpress.android.R
+import org.wordpress.android.analytics.AnalyticsTracker.Stat.POST_LIST_AUTHOR_FILTER_CHANGED
+import org.wordpress.android.analytics.AnalyticsTracker.Stat.POST_LIST_CREATE_POST_TAPPED
+import org.wordpress.android.analytics.AnalyticsTracker.Stat.POST_LIST_SEARCH_ACCESSED
+import org.wordpress.android.analytics.AnalyticsTracker.Stat.POST_LIST_TAB_CHANGED
+import org.wordpress.android.fluxc.Dispatcher
+import org.wordpress.android.fluxc.generated.ListActionBuilder
+import org.wordpress.android.fluxc.model.LocalOrRemoteId.LocalId
+import org.wordpress.android.fluxc.model.PostModel
+import org.wordpress.android.fluxc.model.SiteModel
+import org.wordpress.android.fluxc.model.list.PostListDescriptor
+import org.wordpress.android.fluxc.model.post.PostStatus
+import org.wordpress.android.fluxc.store.AccountStore
+import org.wordpress.android.fluxc.store.MediaStore
+import org.wordpress.android.fluxc.store.PostStore
+import org.wordpress.android.fluxc.store.UploadStore
+import org.wordpress.android.modules.BG_THREAD
+import org.wordpress.android.modules.UI_THREAD
+import org.wordpress.android.ui.pages.SnackbarMessageHolder
+import org.wordpress.android.ui.posts.PostListType.DRAFTS
+import org.wordpress.android.ui.posts.PostListType.PUBLISHED
+import org.wordpress.android.ui.posts.PostListType.SCHEDULED
+import org.wordpress.android.ui.posts.PostListType.TRASHED
+import org.wordpress.android.ui.prefs.AppPrefsWrapper
+import org.wordpress.android.ui.uploads.UploadActionUseCase
+import org.wordpress.android.ui.uploads.UploadStarter
+import org.wordpress.android.ui.utils.UiString.UiStringRes
+import org.wordpress.android.util.AppLog
+import org.wordpress.android.util.NetworkUtilsWrapper
+import org.wordpress.android.util.ToastUtils.Duration
+import org.wordpress.android.util.analytics.AnalyticsTrackerWrapper
+import org.wordpress.android.util.analytics.AnalyticsUtils
+import org.wordpress.android.viewmodel.Event
+import org.wordpress.android.viewmodel.SingleLiveEvent
+import org.wordpress.android.viewmodel.helpers.DialogHolder
+import org.wordpress.android.viewmodel.helpers.ToastMessageHolder
+import org.wordpress.android.viewmodel.posts.PostFetcher
+import org.wordpress.android.viewmodel.posts.PostListItemIdentifier.LocalPostId
+import org.wordpress.android.viewmodel.posts.PostListViewModelConnector
+import javax.inject.Inject
+import javax.inject.Named
+import kotlin.coroutines.CoroutineContext
+
+private const val SCROLL_TO_DELAY = 50L
+private const val SEARCH_COLLAPSE_DELAY = 500L
+private val FAB_VISIBLE_POST_LIST_PAGES = listOf(PUBLISHED, DRAFTS, SCHEDULED, TRASHED)
+val POST_LIST_PAGES = listOf(PUBLISHED, DRAFTS, SCHEDULED, TRASHED)
+private const val TRACKS_SELECTED_TAB = "selected_tab"
+private const val TRACKS_SELECTED_AUTHOR_FILTER = "author_filter_selection"
+private const val TRACKS_ACTION = "action"
+private const val TRACKS_CREATE_NEW_POST = "create_new_post"
+
+class PostListMainViewModel @Inject constructor(
+    private val dispatcher: Dispatcher,
+    private val postStore: PostStore,
+    private val accountStore: AccountStore,
+    uploadActionUseCase: UploadActionUseCase,
+    uploadStore: UploadStore,
+    mediaStore: MediaStore,
+    private val networkUtilsWrapper: NetworkUtilsWrapper,
+    private val prefs: AppPrefsWrapper,
+    private val postListEventListenerFactory: PostListEventListener.Factory,
+    private val previewStateHelper: PreviewStateHelper,
+    private val analyticsTracker: AnalyticsTrackerWrapper,
+    private val savePostToDbUseCase: SavePostToDbUseCase,
+    @Named(UI_THREAD) private val mainDispatcher: CoroutineDispatcher,
+    @Named(BG_THREAD) private val bgDispatcher: CoroutineDispatcher,
+    private val uploadStarter: UploadStarter
+) : ViewModel(), CoroutineScope {
+    private val lifecycleOwner = object : LifecycleOwner {
+        val lifecycleRegistry = LifecycleRegistry(this)
+        override val lifecycle: Lifecycle = lifecycleRegistry
+    }
+
+    private val scrollToTargetPostJob: Job = Job()
+    override val coroutineContext: CoroutineContext
+        get() = bgDispatcher + scrollToTargetPostJob
+
+    private lateinit var site: SiteModel
+    private lateinit var editPostRepository: EditPostRepository
+    var currentBottomSheetPostId: LocalId? = null
+
+    private val _viewState = MutableLiveData<PostListMainViewState>()
+    val viewState: LiveData<PostListMainViewState> = _viewState
+
+    private val _postListAction = SingleLiveEvent<PostListAction>()
+    val postListAction: LiveData<PostListAction> = _postListAction
+
+    private val _authorSelectionUpdated = MutableLiveData<AuthorFilterSelection>()
+    val authorSelectionUpdated = _authorSelectionUpdated
+
+    private val _selectTab = SingleLiveEvent<Int>()
+    val selectTab = _selectTab as LiveData<Int>
+
+    private val _scrollToLocalPostId = SingleLiveEvent<LocalPostId>()
+    val scrollToLocalPostId = _scrollToLocalPostId as LiveData<LocalPostId>
+
+    private val _openPrepublishingBottomSheet = MutableLiveData<Event<Unit>>()
+    val openPrepublishingBottomSheet: LiveData<Event<Unit>> = _openPrepublishingBottomSheet
+
+    private val _snackBarMessage = SingleLiveEvent<SnackbarMessageHolder>()
+    val snackBarMessage = _snackBarMessage as LiveData<SnackbarMessageHolder>
+
+    private val _previewState = SingleLiveEvent<PostListRemotePreviewState>()
+    val previewState = _previewState as LiveData<PostListRemotePreviewState>
+
+    private val _toastMessage = SingleLiveEvent<ToastMessageHolder>()
+    val toastMessage: LiveData<ToastMessageHolder> = _toastMessage
+
+    private val _dialogAction = SingleLiveEvent<DialogHolder>()
+    val dialogAction: LiveData<DialogHolder> = _dialogAction
+
+    private val _postUploadAction = SingleLiveEvent<PostUploadAction>()
+    val postUploadAction: LiveData<PostUploadAction> = _postUploadAction
+
+    private val _isSearchExpanded = MutableLiveData<Boolean>()
+    val isSearchExpanded: LiveData<Boolean> = _isSearchExpanded
+
+    private val _searchQuery = MutableLiveData<String?>()
+    val searchQuery: LiveData<String?> = _searchQuery
+
+    private val uploadStatusTracker = PostModelUploadStatusTracker(
+        uploadStore = uploadStore,
+        uploadActionUseCase = uploadActionUseCase
+    )
+    private val featuredImageTracker = PostListFeaturedImageTracker(dispatcher = dispatcher, mediaStore = mediaStore)
+
+    private val postFetcher by lazy {
+        PostFetcher(lifecycleOwner.lifecycle, dispatcher)
+    }
+
+    private val postListDialogHelper: PostListDialogHelper by lazy {
+        PostListDialogHelper(
+            showDialog = { _dialogAction.postValue(it) },
+            checkNetworkConnection = this::checkNetworkConnection,
+            analyticsTracker = analyticsTracker
+        )
+    }
+
+    private val postConflictResolver: PostConflictResolver by lazy {
+        PostConflictResolver(
+            dispatcher = dispatcher,
+            site = site,
+            getPostByLocalPostId = postStore::getPostByLocalPostId,
+            invalidateList = this::invalidateAllLists,
+            checkNetworkConnection = this::checkNetworkConnection,
+            showSnackbar = { _snackBarMessage.postValue(it) },
+            showToast = { _toastMessage.postValue(it) }
+        )
+    }
+
+    private val postActionHandler: PostActionHandler by lazy {
+        PostActionHandler(
+            dispatcher = dispatcher,
+            site = site,
+            postStore = postStore,
+            postListDialogHelper = postListDialogHelper,
+            doesPostHaveUnhandledConflict = postConflictResolver::doesPostHaveUnhandledConflict,
+            hasUnhandledAutoSave = postConflictResolver::hasUnhandledAutoSave,
+            triggerPostListAction = { _postListAction.postValue(it) },
+            triggerPostUploadAction = { _postUploadAction.postValue(it) },
+            triggerPublishAction = this::showPrepublishingBottomSheet,
+            invalidateList = this::invalidateAllLists,
+            checkNetworkConnection = this::checkNetworkConnection,
+            showSnackbar = { _snackBarMessage.postValue(it) },
+            showToast = { _toastMessage.postValue(it) },
+            triggerPreviewStateUpdate = this::updatePreviewAndDialogState,
+            copyPost = this::copyPost
+        )
+    }
+
+    fun copyPost(site: SiteModel, postToCopy: PostModel, performChecks: Boolean = false) {
+        if (performChecks && (postConflictResolver.doesPostHaveUnhandledConflict(postToCopy) ||
+                    postConflictResolver.hasUnhandledAutoSave(postToCopy))
+        ) {
+            postListDialogHelper.showCopyConflictDialog(postToCopy)
+            return
+        }
+        val post = postStore.instantiatePostModel(
+            site,
+            false,
+            postToCopy.title,
+            postToCopy.content,
+            PostStatus.DRAFT.toString(),
+            postToCopy.categoryIdList,
+            postToCopy.postFormat,
+            true
+        )
+        _postListAction.postValue(PostListAction.EditPost(site, post, loadAutoSaveRevision = false))
+    }
+
+    /**
+     * Filtering by author is disable on:
+     * 1) Self-hosted sites - The XMLRPC api doesn't support filtering by author.
+     * 2) Jetpack sites - we need to pass in the self-hosted user id to be able to filter for authors
+     * which we currently can't
+     * 3) Sites on which the user doesn't have permissions to edit posts of other users.
+     *
+     * This behavior is consistent with Calypso as of 11/4/2019.
+     */
+    private val isFilteringByAuthorSupported: Boolean by lazy {
+        site.isWPCom && site.hasCapabilityEditOthersPosts && !site.isSingleUserSite
+    }
+
+    init {
+        lifecycleOwner.lifecycleRegistry.currentState = Lifecycle.State.CREATED
+    }
+
+    @Suppress("LongMethod")
+    fun start(
+        site: SiteModel,
+        initPreviewState: PostListRemotePreviewState,
+        currentBottomSheetPostId: LocalId,
+        editPostRepository: EditPostRepository
+    ) {
+        this.site = site
+        this.editPostRepository = editPostRepository
+
+        val authorFilterSelection: AuthorFilterSelection = if (isFilteringByAuthorSupported) {
+            prefs.postListAuthorSelection
+        } else {
+            AuthorFilterSelection.EVERYONE
+        }
+
+        postListEventListenerFactory.createAndStartListening(
+            lifecycle = lifecycleOwner.lifecycle,
+            dispatcher = dispatcher,
+            bgDispatcher = bgDispatcher,
+            postStore = postStore,
+            site = site,
+            postActionHandler = postActionHandler,
+            handlePostUpdatedWithoutError = postConflictResolver::onPostSuccessfullyUpdated,
+            handlePostUploadedWithoutError = {
+                refreshAllLists()
+            },
+            triggerPostUploadAction = { _postUploadAction.postValue(it) },
+            invalidateUploadStatus = {
+                uploadStatusTracker.invalidateUploadStatus(it)
+                invalidateAllLists()
+            },
+            invalidateFeaturedMedia = {
+                featuredImageTracker.invalidateFeaturedMedia(it)
+                invalidateAllLists()
+            },
+            triggerPreviewStateUpdate = this::updatePreviewAndDialogState,
+            isRemotePreviewingFromPostsList = this::isRemotePreviewingFromPostsList,
+            hasRemoteAutoSavePreviewError = this::hasRemoteAutoSavePreviewError
+        )
+
+        _authorSelectionUpdated.value = authorFilterSelection
+        _viewState.value = PostListMainViewState(
+            isFabVisible = FAB_VISIBLE_POST_LIST_PAGES.contains(POST_LIST_PAGES.first()) &&
+                    isSearchExpanded.value != true,
+            isAuthorFilterVisible = isFilteringByAuthorSupported,
+            authorFilterSelection = authorFilterSelection,
+            authorFilterItems = getAuthorFilterItems(authorFilterSelection, accountStore.account?.avatarUrl)
+        )
+        _previewState.value = _previewState.value ?: initPreviewState
+
+        currentBottomSheetPostId.let { postId ->
+            if (postId.value != 0) {
+                editPostRepository.loadPostByLocalPostId(postId.value)
+            }
+        }
+
+        lifecycleOwner.lifecycleRegistry.currentState = Lifecycle.State.STARTED
+
+        uploadStarter.queueUploadFromSite(site)
+
+        editPostRepository.run {
+            postChanged.observe(lifecycleOwner, Observer {
+                savePostToDbUseCase.savePostToDb(editPostRepository, site)
+            })
+        }
+    }
+
+    override fun onCleared() {
+        lifecycleOwner.lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
+        scrollToTargetPostJob.cancel() // cancels all coroutines with the default coroutineContext
+        super.onCleared()
+    }
+
+    /*
+     * FUTURE_REFACTOR: We shouldn't need to pass the AuthorFilterSelection to fragments and get it back, we have that
+     * info already
+     */
+    fun getPostListViewModelConnector(
+        postListType: PostListType
+    ): PostListViewModelConnector {
+        return PostListViewModelConnector(
+            site = site,
+            postListType = postListType,
+            postActionHandler = postActionHandler,
+            uploadStatusTracker = uploadStatusTracker,
+            doesPostHaveUnhandledConflict = postConflictResolver::doesPostHaveUnhandledConflict,
+            hasAutoSave = postConflictResolver::hasUnhandledAutoSave,
+            postFetcher = postFetcher,
+            getFeaturedImageUrl = featuredImageTracker::getFeaturedImageUrl
+        )
+    }
+
+    fun onSearchExpanded(restorePreviousSearch: Boolean) {
+        if (isSearchExpanded.value != true) {
+            AnalyticsUtils.trackWithSiteDetails(POST_LIST_SEARCH_ACCESSED, site)
+
+            if (!restorePreviousSearch) {
+                clearSearch()
+            }
+
+            _isSearchExpanded.value = true
+            _viewState.value = _viewState.value?.copy(isFabVisible = false)
+        }
+    }
+
+    fun onSearchCollapsed(delay: Long = SEARCH_COLLAPSE_DELAY) {
+        _isSearchExpanded.value = false
+        clearSearch()
+
+        launch {
+            delay(delay)
+            withContext(mainDispatcher) {
+                _viewState.value = _viewState.value?.copy(isFabVisible = true)
+            }
+        }
+    }
+
+    fun onSearch(searchQuery: String) {
+        _searchQuery.value = searchQuery
+    }
+
+    private fun clearSearch() {
+        _searchQuery.value = null
+    }
+
+    fun fabClicked() {
+        analyticsTracker.track(POST_LIST_CREATE_POST_TAPPED,
+            mapOf(TRACKS_ACTION to TRACKS_CREATE_NEW_POST )
+        )
+
+        postActionHandler.newPost()
+    }
+
+    fun updateAuthorFilterSelection(selectionId: Long) {
+        val selection = AuthorFilterSelection.fromId(selectionId)
+
+        updateViewStateTriggerPagerChange(
+            authorFilterSelection = selection,
+            authorFilterItems = getAuthorFilterItems(selection, accountStore.account?.avatarUrl)
+        )
+        if (isFilteringByAuthorSupported) {
+            prefs.postListAuthorSelection = selection
+        }
+    }
+
+    fun onTabChanged(position: Int) {
+        val currentPage = POST_LIST_PAGES[position]
+        updateViewStateTriggerPagerChange(isFabVisible = FAB_VISIBLE_POST_LIST_PAGES.contains(currentPage))
+
+        AnalyticsUtils.trackWithSiteDetails(
+            POST_LIST_TAB_CHANGED,
+            site,
+            mutableMapOf(TRACKS_SELECTED_TAB to currentPage.toString() as Any)
+        )
+    }
+
+    fun showTargetPost(targetPostId: Int) {
+        val postModel = postStore.getPostByLocalPostId(targetPostId)
+        if (postModel == null) {
+            _snackBarMessage.value = SnackbarMessageHolder(UiStringRes(R.string.error_post_does_not_exist))
+        } else {
+            launch(mainDispatcher) {
+                val targetTab = PostListType.fromPostStatus(PostStatus.fromPost(postModel))
+                _selectTab.value = POST_LIST_PAGES.indexOf(targetTab)
+                // we need to make sure the ViewPager initializes the targetTab fragment before we can propagate
+                // the targetPostId to it
+                withContext(bgDispatcher) {
+                    delay(SCROLL_TO_DELAY)
+                }
+                _scrollToLocalPostId.value = LocalPostId(LocalId(postModel.id))
+            }
+        }
+    }
+
+    fun handleEditPostResult(data: Intent?) {
+        postActionHandler.handleEditPostResult(data)
+    }
+
+    private fun editRestoredAutoSavePost(localPostId: Int) {
+        val post = postStore.getPostByLocalPostId(localPostId)
+        if (post != null) {
+            _postListAction.postValue(PostListAction.EditPost(site, post, loadAutoSaveRevision = true))
+        } else {
+            _snackBarMessage.value = SnackbarMessageHolder(UiStringRes((R.string.error_post_does_not_exist)))
+        }
+    }
+
+    private fun editLocalPost(localPostId: Int) {
+        val post = postStore.getPostByLocalPostId(localPostId)
+        if (post != null) {
+            _postListAction.postValue(PostListAction.EditPost(site, post, loadAutoSaveRevision = false))
+        } else {
+            _snackBarMessage.value = SnackbarMessageHolder(UiStringRes(R.string.error_post_does_not_exist))
+        }
+    }
+
+    private fun copyLocalPost(localPostId: Int) {
+        val post = postStore.getPostByLocalPostId(localPostId)
+        if (post != null) {
+            copyPost(site, post)
+        } else {
+            _snackBarMessage.value = SnackbarMessageHolder(UiStringRes(R.string.error_post_does_not_exist))
+        }
+    }
+
+    // BasicFragmentDialog Events
+
+    fun onPositiveClickedForBasicDialog(instanceTag: String) {
+        postListDialogHelper.onPositiveClickedForBasicDialog(
+            instanceTag = instanceTag,
+            trashPostWithLocalChanges = postActionHandler::trashPostWithLocalChanges,
+            trashPostWithUnsavedChanges = postActionHandler::trashPostWithUnsavedChanges,
+            deletePost = postActionHandler::deletePost,
+            publishPost = postActionHandler::publishPost,
+            updateConflictedPostWithRemoteVersion = postConflictResolver::updateConflictedPostWithRemoteVersion,
+            editRestoredAutoSavePost = this::editRestoredAutoSavePost,
+            moveTrashedPostToDraft = postActionHandler::moveTrashedPostToDraft,
+            resolveConflictsAndEditPost = postActionHandler::resolveConflictsAndEditPost
+        )
+    }
+
+    fun onNegativeClickedForBasicDialog(instanceTag: String) {
+        postListDialogHelper.onNegativeClickedForBasicDialog(
+            instanceTag = instanceTag,
+            updateConflictedPostWithLocalVersion = postConflictResolver::updateConflictedPostWithLocalVersion,
+            editLocalPost = this::editLocalPost,
+            copyLocalPost = this::copyLocalPost
+        )
+    }
+
+    fun onDismissByOutsideTouchForBasicDialog(instanceTag: String) {
+        postListDialogHelper.onDismissByOutsideTouchForBasicDialog(
+            instanceTag = instanceTag,
+            updateConflictedPostWithLocalVersion = postConflictResolver::updateConflictedPostWithLocalVersion,
+            editLocalPost = this::editLocalPost,
+            copyLocalPost = this::copyLocalPost
+        )
+    }
+
+    private fun showPrepublishingBottomSheet(post: PostModel) {
+        currentBottomSheetPostId = LocalId(post.id)
+        editPostRepository.loadPostByLocalPostId(post.id)
+        _openPrepublishingBottomSheet.postValue(Event(Unit))
+    }
+
+    /**
+     * Only the non-null variables will be changed in the current state
+     */
+    @SuppressLint("NullSafeMutableLiveData")
+    private fun updateViewStateTriggerPagerChange(
+        isFabVisible: Boolean? = null,
+        isAuthorFilterVisible: Boolean? = null,
+        authorFilterSelection: AuthorFilterSelection? = null,
+        authorFilterItems: List<AuthorFilterListItemUIState>? = null
+    ) {
+        val currentState = requireNotNull(viewState.value) {
+            "updateViewStateTriggerPagerChange should not be called before the initial state is set"
+        }
+
+        _viewState.value = PostListMainViewState(
+            isFabVisible ?: currentState.isFabVisible,
+            isAuthorFilterVisible ?: currentState.isAuthorFilterVisible,
+            authorFilterSelection ?: currentState.authorFilterSelection,
+            authorFilterItems ?: currentState.authorFilterItems
+        )
+
+        if (authorFilterSelection != null && currentState.authorFilterSelection != authorFilterSelection) {
+            _authorSelectionUpdated.value = authorFilterSelection
+
+            AnalyticsUtils.trackWithSiteDetails(
+                POST_LIST_AUTHOR_FILTER_CHANGED,
+                site,
+                mutableMapOf(TRACKS_SELECTED_AUTHOR_FILTER to authorFilterSelection.toString() as Any)
+            )
+        }
+    }
+
+    private fun invalidateAllLists() {
+        val listTypeIdentifier = PostListDescriptor.calculateTypeIdentifier(site.id)
+        dispatcher.dispatch(ListActionBuilder.newListDataInvalidatedAction(listTypeIdentifier))
+    }
+
+    private fun refreshAllLists() {
+        val listTypeIdentifier = PostListDescriptor.calculateTypeIdentifier(site.id)
+        dispatcher.dispatch(ListActionBuilder.newListRequiresRefreshAction(listTypeIdentifier))
+    }
+
+    private fun isRemotePreviewingFromPostsList() = _previewState.value != null &&
+            _previewState.value != PostListRemotePreviewState.NONE
+
+    private fun hasRemoteAutoSavePreviewError() = _previewState.value != null &&
+            _previewState.value == PostListRemotePreviewState.REMOTE_AUTO_SAVE_PREVIEW_ERROR
+
+    private fun checkNetworkConnection(): Boolean =
+        if (networkUtilsWrapper.isNetworkAvailable()) {
+            true
+        } else {
+            _toastMessage.postValue(ToastMessageHolder(R.string.no_network_message, Duration.SHORT))
+            false
+        }
+
+    fun handleRemotePreviewClosing() {
+        updatePreviewAndDialogState(PostListRemotePreviewState.NONE, PostInfoType.PostNoInfo)
+    }
+
+    private fun updatePreviewAndDialogState(newState: PostListRemotePreviewState, postInfo: PostInfoType) {
+        // We need only transitions, so...
+        if (_previewState.value == newState) return
+
+        AppLog.d(
+            AppLog.T.POSTS,
+            "Posts list preview state machine: transition from ${_previewState.value} to $newState"
+        )
+
+        // update the state
+        val prevState = _previewState.value
+        _previewState.postValue(newState)
+
+        // take care of exit actions on state transition
+        previewStateHelper.managePreviewStateTransitions(
+            newState,
+            prevState,
+            postInfo,
+            postActionHandler::handleRemotePreview
+        )
+    }
+
+    fun onBottomSheetPublishButtonClicked() {
+        editPostRepository.getEditablePost()?.let {
+            postActionHandler.publishPost(it)
+        }
+    }
+
+    fun refreshUiStateForAuthorFilter() {
+        _viewState.value = _viewState.value?.copy()
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewModel.kt]
+[start of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewState.kt]
+package org.wordpress.android.ui.posts
+
+import org.wordpress.android.ui.posts.AuthorFilterSelection.EVERYONE
+import org.wordpress.android.ui.posts.AuthorFilterSelection.ME
+import org.wordpress.android.ui.utils.UiString
+import org.wordpress.android.ui.utils.UiString.UiStringRes
+import org.wordpress.android.R
+
+data class PostListMainViewState(
+    val isFabVisible: Boolean,
+    val isAuthorFilterVisible: Boolean,
+    val authorFilterSelection: AuthorFilterSelection,
+    val authorFilterItems: List<AuthorFilterListItemUIState>
+)
+
+sealed class AuthorFilterListItemUIState(
+    val id: Long,
+    val text: UiString,
+    open val isSelected: Boolean
+) {
+    data class Everyone(override val isSelected: Boolean, val imageRes: Int) :
+        AuthorFilterListItemUIState(
+            id = EVERYONE.id,
+            text = UiStringRes(R.string.everyone),
+            isSelected = isSelected
+        )
+
+    data class Me(val avatarUrl: String?, override val isSelected: Boolean) :
+        AuthorFilterListItemUIState(
+            id = ME.id,
+            text = UiStringRes(R.string.me),
+            isSelected = isSelected
+        )
+}
+
+fun getAuthorFilterItems(
+    selection: AuthorFilterSelection,
+    avatarUrl: String?
+): List<AuthorFilterListItemUIState> {
+    return AuthorFilterSelection.values().map { value ->
+        when (value) {
+            ME -> AuthorFilterListItemUIState.Me(avatarUrl, selection == value)
+            EVERYONE -> AuthorFilterListItemUIState.Everyone(
+                selection == value,
+                R.drawable.ic_people_white_24dp
+            )
+        }
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewState.kt]
+[start of WordPress/src/main/java/org/wordpress/android/ui/posts/adapters/PostListAdapter.kt]
+package org.wordpress.android.ui.posts.adapters
+
+import android.content.Context
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import androidx.paging.PagedListAdapter
+import androidx.recyclerview.widget.DiffUtil
+import androidx.recyclerview.widget.RecyclerView.ViewHolder
+import org.wordpress.android.R
+import org.wordpress.android.fluxc.model.LocalOrRemoteId.LocalId
+import org.wordpress.android.fluxc.model.LocalOrRemoteId.RemoteId
+import org.wordpress.android.ui.posts.PostListItemViewHolder
+import org.wordpress.android.ui.utils.UiHelpers
+import org.wordpress.android.util.extensions.setVisible
+import org.wordpress.android.util.image.ImageManager
+import org.wordpress.android.viewmodel.posts.PostListItemType
+import org.wordpress.android.viewmodel.posts.PostListItemType.EndListIndicatorItem
+import org.wordpress.android.viewmodel.posts.PostListItemType.LoadingItem
+import org.wordpress.android.viewmodel.posts.PostListItemType.PostListItemUiState
+import org.wordpress.android.viewmodel.uistate.ProgressBarUiState
+
+private const val VIEW_TYPE_POST = 0
+private const val VIEW_TYPE_ENDLIST_INDICATOR = 1
+private const val VIEW_TYPE_LOADING = 2
+
+class PostListAdapter(
+    context: Context,
+    private val imageManager: ImageManager,
+    private val uiHelpers: UiHelpers
+) : PagedListAdapter<PostListItemType, ViewHolder>(PostListDiffItemCallback) {
+    private val layoutInflater: LayoutInflater = LayoutInflater.from(context)
+
+    override fun getItemViewType(position: Int): Int {
+        return when (getItem(position)) {
+            is EndListIndicatorItem -> VIEW_TYPE_ENDLIST_INDICATOR
+            is PostListItemUiState -> VIEW_TYPE_POST
+            is LoadingItem, null -> VIEW_TYPE_LOADING
+        }
+    }
+
+    @Suppress("UseCheckOrError")
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
+        return when (viewType) {
+            VIEW_TYPE_ENDLIST_INDICATOR -> {
+                val view = layoutInflater.inflate(R.layout.list_with_fab_endlist_indicator, parent, false)
+                EndListViewHolder(view)
+            }
+            VIEW_TYPE_LOADING -> {
+                val view = layoutInflater.inflate(R.layout.post_list_item_skeleton, parent, false)
+                LoadingViewHolder(view)
+            }
+            VIEW_TYPE_POST -> {
+                PostListItemViewHolder.Standard(parent, imageManager, uiHelpers)
+            }
+            else -> {
+                // Fail fast if a new view type is added so the we can handle it
+                throw IllegalStateException("The view type '$viewType' needs to be handled")
+            }
+        }
+    }
+
+    override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+        // The only holders that require special setup are PostListItemViewHolder and LoadingViewHolder subclasses
+        if (holder is PostListItemViewHolder) {
+            val item = getItem(position)
+            assert(item is PostListItemUiState) {
+                "If we are presenting PostViewHolder, the item has to be of type PostListItemUiState " +
+                        "for position: $position"
+            }
+            holder.onBind((item as PostListItemUiState))
+        }
+        if (holder is LoadingViewHolder) {
+            val item = getItem(position)
+            assert(item is LoadingItem?) {
+                "If we are presenting LoadingViewHolder, the item has to be of type LoadingItem " +
+                        "for position: $position"
+            }
+            // getItem returns the item, or NULL, if a null placeholder is at the specified position.
+            item?.let { holder.onBind((item as LoadingItem)) }
+        }
+    }
+
+    private class LoadingViewHolder(view: View) : ViewHolder(view) {
+        val editButton: View? = view.findViewById(R.id.skeleton_button_edit)
+        val viewButton: View? = view.findViewById(R.id.skeleton_button_view)
+        val buttonMore: View? = view.findViewById(R.id.skeleton_button_more)
+        val buttonMoveToDraft: View? = view.findViewById(R.id.skeleton_button_move_to_draft)
+        val buttonDeletePermanently: View? = view.findViewById(R.id.skeleton_button_delete_permanently)
+
+        fun onBind(item: LoadingItem) {
+            editButton?.setVisible(item.options.showEditButton)
+            viewButton?.setVisible(item.options.showViewButton)
+            buttonMore?.setVisible(item.options.showMoreButton)
+            buttonMoveToDraft?.setVisible(item.options.showMoveToDraftButton)
+            buttonDeletePermanently?.setVisible(item.options.showDeletePermanentlyButton)
+        }
+    }
+
+    private class EndListViewHolder(view: View) : ViewHolder(view)
+}
+
+private val PostListDiffItemCallback = object : DiffUtil.ItemCallback<PostListItemType>() {
+    override fun areItemsTheSame(oldItem: PostListItemType, newItem: PostListItemType): Boolean {
+        if (oldItem is EndListIndicatorItem && newItem is EndListIndicatorItem) {
+            return true
+        }
+        if (oldItem is LoadingItem && newItem is LoadingItem) {
+            return oldItem.localOrRemoteId == newItem.localOrRemoteId
+        }
+        if (oldItem is PostListItemUiState && newItem is PostListItemUiState) {
+            return oldItem.data.localPostId == newItem.data.localPostId
+        }
+        if (oldItem is LoadingItem && newItem is PostListItemUiState) {
+            return when (oldItem.localOrRemoteId) {
+                is LocalId -> oldItem.localOrRemoteId == newItem.data.localPostId.id
+                is RemoteId -> oldItem.localOrRemoteId == newItem.data.remotePostId.id
+            }
+        }
+        return false
+    }
+
+    override fun areContentsTheSame(oldItem: PostListItemType, newItem: PostListItemType): Boolean {
+        if (oldItem is EndListIndicatorItem && newItem is EndListIndicatorItem) {
+            return true
+        }
+        if (oldItem is LoadingItem && newItem is LoadingItem) {
+            return when (oldItem.localOrRemoteId) {
+                is LocalId -> oldItem.localOrRemoteId.value == (newItem.localOrRemoteId as? LocalId)?.value
+                is RemoteId -> oldItem.localOrRemoteId.value == (newItem.localOrRemoteId as? RemoteId)?.value
+            }
+        }
+        if (oldItem is PostListItemUiState && newItem is PostListItemUiState) {
+            return oldItem.data == newItem.data
+        }
+        return false
+    }
+
+    override fun getChangePayload(oldItem: PostListItemType, newItem: PostListItemType): Any? {
+        if (oldItem is PostListItemUiState && newItem is PostListItemUiState) {
+            /**
+             * Suppresses the default animation if the progress has changed to prevent blinking as the upload progresses
+             *
+             * We don't need to use the payload in onBindViewHolder unless we want to. Passing a non-null value
+             * suppresses the default ItemAnimator, which is all we need in this case.
+             */
+            if (oldItem.data.progressBarUiState is ProgressBarUiState.Determinate &&
+                newItem.data.progressBarUiState is ProgressBarUiState.Determinate &&
+                oldItem.data.progressBarUiState.progress != newItem.data.progressBarUiState.progress
+            ) {
+                return true
+            }
+        }
+        return super.getChangePayload(oldItem, newItem)
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/posts/adapters/PostListAdapter.kt]

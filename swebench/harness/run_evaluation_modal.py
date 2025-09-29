@@ -381,7 +381,7 @@ def run_evaluation(
     # Copy logs from volume to local
     print(f"Copying logs from volume to local directory: {output_log_dir}")
     files_data = copy_logs_to_local.remote(volume_log_dir)
-     
+    
     if files_data:
         files_copied = 0
         for filename, content in files_data.items():
@@ -438,7 +438,17 @@ def main(*arglist):
     )
 
 #   modal run swebench/harness/run_evaluation_modal.py \
-#   --predictions_dir ./predictions/Kotlin-bench-full-file \
+#   --predictions_dir ./predictions/o3 \
 #   --output_log_dir ./evaluation_logs \
-#   --dataset_name ./datasets/SWE-bench__full_file_gen__fs-oracle \
+#   --dataset_name ./datasets/Kotlin-bench__full_file_gen__fs-oracle \
 #   --split test
+
+
+# modal run swebench/harness/run_evaluation_modal.py \
+#   --predictions_dir ./predictions/claude-opus-4-1-20250805 \
+#   --output_log_dir ./evaluation_logs_4_1_opus \
+#   --dataset_name ./datasets/Kotlin-bench__full_file_gen__fs-oracle \
+#   --split test
+
+
+# /Users/amangotchu/Documents/Kotlin-bench/predictions/claude-opus-4-1-20250805

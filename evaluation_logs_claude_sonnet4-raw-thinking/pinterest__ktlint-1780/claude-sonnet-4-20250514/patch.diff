@@ -1,0 +1,323 @@
+[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/PackageNameRule.kt]
+package com.pinterest.ktlint.ruleset.standard
+
+import com.pinterest.ktlint.core.Rule
+import com.pinterest.ktlint.core.ast.ElementType
+import com.pinterest.ktlint.core.ast.ElementType.PACKAGE_DIRECTIVE
+import com.pinterest.ktlint.core.ast.nextCodeSibling
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+
+/**
+ * https://kotlinlang.org/docs/coding-conventions.html#naming-rules
+ */
+public class PackageNameRule : Rule("package-name") {
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        node
+            .takeIf { node.elementType == PACKAGE_DIRECTIVE }
+            ?.firstChildNode
+            ?.nextCodeSibling()
+            ?.takeIf { it.elementType == ElementType.DOT_QUALIFIED_EXPRESSION || it.elementType == ElementType.REFERENCE_EXPRESSION }
+            ?.let { expression ->
+                if (expression.text.contains('_')) {
+                    // The Kotlin inspections (preference > Editor > Inspections) for 'Package naming convention' allows
+                    // underscores as well. But as this has been forbidden by KtLint since early versions, this is still
+                    // prohibited.
+                    emit(expression.startOffset, "Package name must not contain underscore", false)
+                } else if (!expression.text.matches(VALID_PACKAGE_NAME_REGEXP)) {
+                    emit(expression.startOffset, "Package name contains a disallowed character", false)
+                }
+            }
+    }
+
+    private companion object {
+        val VALID_PACKAGE_NAME_REGEXP = Regex("""[\p{Ll}_][\p{L}\p{Nd}_]*(\.[\p{Ll}_][\p{L}\p{Nd}_]*)*""")
+    }
+}
+[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/PackageNameRule.kt]
+[start of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/ClassNamingRule.kt]
+package com.pinterest.ktlint.ruleset.experimental
+
+import com.pinterest.ktlint.core.Rule
+import com.pinterest.ktlint.core.ast.ElementType
+import com.pinterest.ktlint.core.ast.ElementType.CLASS
+import com.pinterest.ktlint.core.ast.ElementType.IDENTIFIER
+import com.pinterest.ktlint.core.ast.ElementType.OBJECT_DECLARATION
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+
+/**
+ * https://kotlinlang.org/docs/coding-conventions.html#naming-rules
+ *
+ * The Kotlin convention does not allow explicitly to use backticked class name but it makes sense to allow this as
+ * well as it is more consistent with name of test functions.
+ */
+public class ClassNamingRule : Rule("$EXPERIMENTAL_RULE_SET_ID:class-naming") {
+    private var allowBacktickedClassName = false
+
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        if (!allowBacktickedClassName && node.elementType == ElementType.IMPORT_DIRECTIVE) {
+            node
+                .findChildByType(ElementType.DOT_QUALIFIED_EXPRESSION)
+                ?.text
+                ?.takeIf { it.startsWith("org.junit.jupiter.api") }
+                ?.let {
+                    // Assume that each file that imports a Junit Jupiter Api class is a test class
+                    allowBacktickedClassName = true
+                }
+        }
+
+        node
+            .takeIf { node.elementType == CLASS || node.elementType == OBJECT_DECLARATION }
+            ?.findChildByType(IDENTIFIER)
+            ?.takeUnless { it.isValidFunctionName() || it.isTestClass() }
+            ?.let {
+                emit(it.startOffset, "Class or object name should start with an uppercase letter and use camel case", false)
+            }
+    }
+
+    private fun ASTNode.isValidFunctionName() =
+        text.matches(VALID_CLASS_NAME_REGEXP)
+
+    private fun ASTNode.isTestClass() =
+        allowBacktickedClassName && hasBackTickedIdentifier()
+
+    private fun ASTNode.hasBackTickedIdentifier() =
+        text.matches(BACK_TICKED_FUNCTION_NAME_REGEXP)
+
+    private companion object {
+        val VALID_CLASS_NAME_REGEXP = Regex("""[\p{Lu}][\p{L}\p{Nd}]*""")
+        val BACK_TICKED_FUNCTION_NAME_REGEXP = Regex("`.*`")
+    }
+}
+[end of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/ClassNamingRule.kt]
+[start of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/FunctionNamingRule.kt]
+package com.pinterest.ktlint.ruleset.experimental
+
+import com.pinterest.ktlint.core.Rule
+import com.pinterest.ktlint.core.ast.ElementType.FUN
+import com.pinterest.ktlint.core.ast.ElementType.IDENTIFIER
+import com.pinterest.ktlint.core.ast.ElementType.IMPORT_DIRECTIVE
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+import org.jetbrains.kotlin.psi.KtFunction
+import org.jetbrains.kotlin.psi.KtImportDirective
+
+/**
+ * https://kotlinlang.org/docs/coding-conventions.html#function-names
+ */
+public class FunctionNamingRule : Rule("$EXPERIMENTAL_RULE_SET_ID:function-naming") {
+    private var isTestClass = false
+
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        if (!isTestClass && node.elementType == IMPORT_DIRECTIVE) {
+            (node.psi as KtImportDirective)
+                .importPath
+                ?.pathStr
+                ?.takeIf {
+                    it.startsWith(ORG_JUNIT) || it.startsWith(ORG_TESTNG) || it.startsWith(KOTLIN_TEST)
+                }
+                ?.let {
+                    // Assume that each file that imports a Junit Jupiter Api class is a test class
+                    isTestClass = true
+                }
+        }
+
+        node
+            .takeIf { node.elementType == FUN }
+            ?.takeUnless {
+                node.isFactoryMethod() ||
+                    node.isTestMethod() ||
+                    node.hasValidFunctionName()
+            }?.let {
+                val identifierOffset =
+                    node
+                        .findChildByType(IDENTIFIER)
+                        ?.startOffset
+                        ?: 1
+                emit(identifierOffset, "Function name should start with a lowercase letter (except factory methods) and use camel case", false)
+            }
+    }
+
+    private fun ASTNode.isFactoryMethod() =
+        (this.psi as KtFunction)
+            .let { it.hasDeclaredReturnType() && it.name == it.typeReference?.text }
+
+    private fun ASTNode.isTestMethod() =
+        isTestClass && hasValidTestFunctionName()
+
+    private fun ASTNode.hasValidTestFunctionName() =
+        findChildByType(IDENTIFIER)
+            ?.text
+            .orEmpty()
+            .matches(VALID_TEST_FUNCTION_NAME_REGEXP)
+
+    private fun ASTNode.hasValidFunctionName() =
+        findChildByType(IDENTIFIER)
+            ?.text
+            .orEmpty()
+            .matches(VALID_FUNCTION_NAME_REGEXP)
+
+    private companion object {
+        val VALID_FUNCTION_NAME_REGEXP = Regex("""[\p{Ll}][\p{L}\p{Nd}]*""")
+        val VALID_TEST_FUNCTION_NAME_REGEXP = Regex("""(`.*`)|([\p{Ll}][\p{L}\p{Nd}_]*)""")
+        private const val KOTLIN_TEST = "kotlin.test"
+        private const val ORG_JUNIT = "org.junit"
+        private const val ORG_TESTNG = "org.testng"
+    }
+}
+[end of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/FunctionNamingRule.kt]
+[start of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/PropertyNamingRule.kt]
+package com.pinterest.ktlint.ruleset.experimental
+
+import com.pinterest.ktlint.core.Rule
+import com.pinterest.ktlint.core.ast.ElementType.CLASS_BODY
+import com.pinterest.ktlint.core.ast.ElementType.CONST_KEYWORD
+import com.pinterest.ktlint.core.ast.ElementType.FILE
+import com.pinterest.ktlint.core.ast.ElementType.IDENTIFIER
+import com.pinterest.ktlint.core.ast.ElementType.MODIFIER_LIST
+import com.pinterest.ktlint.core.ast.ElementType.OBJECT_DECLARATION
+import com.pinterest.ktlint.core.ast.ElementType.OVERRIDE_KEYWORD
+import com.pinterest.ktlint.core.ast.ElementType.PRIVATE_KEYWORD
+import com.pinterest.ktlint.core.ast.ElementType.PROPERTY
+import com.pinterest.ktlint.core.ast.ElementType.PROPERTY_ACCESSOR
+import com.pinterest.ktlint.core.ast.ElementType.VAL_KEYWORD
+import com.pinterest.ktlint.core.ast.children
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+import org.jetbrains.kotlin.com.intellij.psi.tree.IElementType
+
+/**
+ * https://kotlinlang.org/docs/coding-conventions.html#function-names
+ * https://kotlinlang.org/docs/coding-conventions.html#property-names
+ */
+public class PropertyNamingRule : Rule("$EXPERIMENTAL_RULE_SET_ID:property-naming") {
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        node
+            .takeIf { node.elementType == PROPERTY }
+            ?.let { property -> visitProperty(property, emit) }
+    }
+
+    private fun visitProperty(
+        property: ASTNode,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        property
+            .findChildByType(IDENTIFIER)
+            ?.let { identifier ->
+                when {
+                    property.hasCustomGetter() -> {
+                        // Can not reliably determine whether the value is immutable or not
+                    }
+                    property.isBackingProperty() -> {
+                        visitBackingProperty(identifier, emit)
+                    }
+                    property.hasConstModifier() ||
+                        property.isTopLevelValue() ||
+                        property.isObjectValue() -> {
+                        visitConstProperty(identifier, emit)
+                    }
+                    else -> {
+                        visitNonConstProperty(identifier, emit)
+                    }
+                }
+            }
+    }
+
+    private fun visitBackingProperty(
+        identifier: ASTNode,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        identifier
+            .text
+            .takeUnless { it.matches(BACKING_PROPERTY_LOWER_CAMEL_CASE_REGEXP) }
+            ?.let {
+                emit(identifier.startOffset, "Backing property name should start with underscore followed by lower camel case", false)
+            }
+    }
+
+    private fun visitConstProperty(
+        identifier: ASTNode,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        identifier
+            .text
+            .takeUnless { it.matches(SCREAMING_SNAKE_CASE_REGEXP) }
+            ?.let {
+                emit(identifier.startOffset, "Property name should use the screaming snake case notation when the value can not be changed", false)
+            }
+    }
+
+    private fun visitNonConstProperty(
+        identifier: ASTNode,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        identifier
+            .text
+            .takeUnless { it.matches(LOWER_CAMEL_CASE_REGEXP) }
+            ?.let {
+                emit(identifier.startOffset, "Property name should start with a lowercase letter and use camel case", false)
+            }
+    }
+
+    private fun ASTNode.hasCustomGetter() =
+        findChildByType(PROPERTY_ACCESSOR)
+            ?.firstChildNode
+            ?.text == "get"
+
+    private fun ASTNode.hasConstModifier() =
+        hasModifier(CONST_KEYWORD)
+
+    private fun ASTNode.hasModifier(iElementType: IElementType) =
+        findChildByType(MODIFIER_LIST)
+            ?.children()
+            .orEmpty()
+            .any { it.elementType == iElementType }
+
+    private fun ASTNode.isTopLevelValue() =
+        treeParent.elementType == FILE && containsValKeyword()
+
+    private fun ASTNode.containsValKeyword() =
+        children().any { it.elementType == VAL_KEYWORD }
+
+    private fun ASTNode.isObjectValue() =
+        treeParent.elementType == CLASS_BODY &&
+            treeParent?.treeParent?.elementType == OBJECT_DECLARATION &&
+            containsValKeyword() &&
+            !hasModifier(OVERRIDE_KEYWORD)
+
+    private fun ASTNode.isBackingProperty() =
+        takeIf { hasModifier(PRIVATE_KEYWORD) }
+            ?.findChildByType(IDENTIFIER)
+            ?.takeIf { it.text.startsWith("_") }
+            ?.let { identifier ->
+                this.hasPublicProperty(identifier.text.removePrefix("_"))
+            }
+            ?: false
+
+    private fun ASTNode.hasPublicProperty(identifier: String) =
+        treeParent
+            .children()
+            .filter { it.elementType == PROPERTY }
+            .mapNotNull { it.findChildByType(IDENTIFIER) }
+            .any { it.text == identifier }
+
+    private companion object {
+        val LOWER_CAMEL_CASE_REGEXP = Regex("""[\p{Ll}][\p{L}\p{Nd}]*""")
+        val SCREAMING_SNAKE_CASE_REGEXP = Regex("""[\p{Lu}][_\p{Lu}\p{Nd}]*""")
+        val BACKING_PROPERTY_LOWER_CAMEL_CASE_REGEXP = Regex("""_[\p{Ll}][\p{L}\p{Nd}]*""")
+    }
+}
+[end of ktlint-ruleset-experimental/src/main/kotlin/com/pinterest/ktlint/ruleset/experimental/PropertyNamingRule.kt]

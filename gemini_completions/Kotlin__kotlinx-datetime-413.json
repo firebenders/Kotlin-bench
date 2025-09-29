@@ -1,0 +1,322 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I will make the necessary changes to fix the issue. The problem is that `Char.isDigit()` is used for parsing, which accepts a wide range of Unicode digits, but ISO 8601 format requires ASCII digits. I will replace `isDigit()` with a check for ASCII digits (`'0'..'9'`) in the relevant parsing logic.\n\nHere are the files I will modify:\n1.  `core/common/src/internal/format/FormatStructure.kt`\n2.  `core/common/src/internal/format/parser/ParserOperation.kt`\n\n[start of core/common/src/internal/format/FormatStructure.kt]\n/*\n * Copyright 2019-2023 JetBrains s.r.o. and contributors.\n * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.\n */\n\npackage kotlinx.datetime.internal.format\n\nimport kotlinx.datetime.internal.format.formatter.*\nimport kotlinx.datetime.internal.format.parser.*\n\nprivate fun Char.isAsciiDigit(): Boolean = this in '0'..'9'\n\ninternal sealed interface FormatStructure<in T> {\n    fun parser(): ParserStructure<T>\n    fun formatter(): FormatterStructure<T>\n}\n\ninternal class BasicFormatStructure<in T>(\n    val directive: FieldFormatDirective<T>\n) : NonConcatenatedFormatStructure<T> {\n    override fun toString(): String = \"BasicFormatStructure($directive)\"\n\n    override fun equals(other: Any?): Boolean = other is BasicFormatStructure<*> && directive == other.directive\n    override fun hashCode(): Int = directive.hashCode()\n\n    override fun parser(): ParserStructure<T> = directive.parser()\n    override fun formatter(): FormatterStructure<T> = directive.formatter()\n}\n\ninternal class ConstantFormatStructure<in T>(\n    val string: String\n) : NonConcatenatedFormatStructure<T> {\n    override fun toString(): String = \"ConstantFormatStructure($string)\"\n\n    override fun equals(other: Any?): Boolean = other is ConstantFormatStructure<*> && string == other.string\n    override fun hashCode(): Int = string.hashCode()\n\n    override fun parser(): ParserStructure<T> = ParserStructure(\n        operations = when {\n            string.isEmpty() -> emptyList()\n            else -> buildList {\n                val suffix = if (string[0].isAsciiDigit()) {\n                    add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(string.takeWhile { it.isAsciiDigit() }))))\n                    string.dropWhile { it.isAsciiDigit() }\n                } else {\n                    string\n                }\n                if (suffix.isNotEmpty()) {\n                    if (suffix[suffix.length - 1].isAsciiDigit()) {\n                        add(PlainStringParserOperation(suffix.dropLastWhile { it.isAsciiDigit() }))\n                        add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(suffix.takeLastWhile { it.isAsciiDigit() }))))\n                    } else {\n                        add(PlainStringParserOperation(suffix))\n                    }\n                }\n            }\n        },\n        followedBy = emptyList()\n    )\n\n    override fun formatter(): FormatterStructure<T> = ConstantStringFormatterStructure(string)\n}\n\ninternal class SignedFormatStructure<in T>(\n    val format: FormatStructure<T>,\n    val withPlusSign: Boolean,\n) : NonConcatenatedFormatStructure<T> {\n\n    private val fieldSigns = basicFormats(format).mapNotNull { it.field.sign }.toSet()\n\n    init {\n        require(fieldSigns.isNotEmpty()) { \"Signed format must contain at least one field with a sign\" }\n    }\n\n    override fun toString(): String = \"SignedFormatStructure($format)\"\n\n    override fun equals(other: Any?): Boolean =\n        other is SignedFormatStructure<*> && format == other.format && withPlusSign == other.withPlusSign\n\n    override fun hashCode(): Int = 31 * format.hashCode() + withPlusSign.hashCode()\n\n    override fun parser(): ParserStructure<T> = listOf(\n        ParserStructure(\n            operations = listOf(\n                SignParser(\n                    isNegativeSetter = { value, isNegative ->\n                        for (field in fieldSigns) {\n                            val wasNegative = field.isNegative.getter(value) == true\n                            // TODO: replacing `!=` with `xor` fails on JS\n                            field.isNegative.trySetWithoutReassigning(value, isNegative != wasNegative)\n                        }\n                    },\n                    withPlusSign = withPlusSign,\n                    whatThisExpects = \"sign for ${this.fieldSigns}\"\n                )\n            ),\n            emptyList()\n        ), format.parser()\n    ).concat()\n\n    override fun formatter(): FormatterStructure<T> {\n        val innerFormat = format.formatter()\n        fun checkIfAllNegative(value: T): Boolean {\n            var seenNonZero = false\n            for (check in fieldSigns) {\n                when {\n                    check.isNegative.getter(value) == true -> seenNonZero = true\n                    check.isZero(value) -> continue\n                    else -> return false\n                }\n            }\n            return seenNonZero\n        }\n        return SignedFormatter(\n            innerFormat,\n            ::checkIfAllNegative,\n            withPlusSign\n        )\n    }\n}\n\ninternal class AlternativesParsingFormatStructure<in T>(\n    val mainFormat: FormatStructure<T>,\n    val formats: List<FormatStructure<T>>,\n) : NonConcatenatedFormatStructure<T> {\n    override fun toString(): String = \"AlternativesParsing($formats)\"\n\n    override fun equals(other: Any?): Boolean =\n        other is AlternativesParsingFormatStructure<*> && mainFormat == other.mainFormat && formats == other.formats\n\n    override fun hashCode(): Int = 31 * mainFormat.hashCode() + formats.hashCode()\n\n    override fun parser(): ParserStructure<T> = ParserStructure(operations = emptyList(), followedBy = buildList {\n        add(mainFormat.parser())\n        for (format in formats) {\n            add(format.parser())\n        }\n    })\n\n    override fun formatter(): FormatterStructure<T> = mainFormat.formatter()\n}\n\ninternal class OptionalFormatStructure<in T>(\n    val onZero: String,\n    val format: FormatStructure<T>,\n) : NonConcatenatedFormatStructure<T> {\n    override fun toString(): String = \"Optional($onZero, $format)\"\n\n    private val fields = basicFormats(format).map { it.field }.distinct().map { field ->\n        PropertyWithDefault.fromField(field)\n    }\n\n    override fun equals(other: Any?): Boolean =\n        other is OptionalFormatStructure<*> && onZero == other.onZero && format == other.format\n\n    override fun hashCode(): Int = 31 * onZero.hashCode() + format.hashCode()\n\n    override fun parser(): ParserStructure<T> = ParserStructure(\n        operations = emptyList(),\n        followedBy = listOf(\n            format.parser(),\n            listOf(\n                ConstantFormatStructure<T>(onZero).parser(),\n                ParserStructure(\n                    if (fields.isEmpty()) {\n                        emptyList()\n                    } else {\n                        listOf(\n                            UnconditionalModification {\n                                for (field in fields) {\n                                    field.assignDefault(it)\n                                }\n                            }\n                        )\n                    },\n                    emptyList()\n                )\n            ).concat()\n        )\n    )\n\n    override fun formatter(): FormatterStructure<T> {\n        val formatter = format.formatter()\n        val predicate = conjunctionPredicate(fields.map { it.isDefaultComparisonPredicate() })\n        return if (predicate is Truth) {\n            ConstantStringFormatterStructure(onZero)\n        } else {\n            ConditionalFormatter(\n                listOf(\n                    predicate::test to ConstantStringFormatterStructure(onZero),\n                    Truth::test to formatter\n                )\n            )\n        }\n    }\n\n    private class PropertyWithDefault<in T, E> private constructor(\n        private val accessor: Accessor<T, E>,\n        private val defaultValue: E\n    ) {\n        companion object {\n            fun <T, E> fromField(field: FieldSpec<T, E>): PropertyWithDefault<T, E> {\n                val default = field.defaultValue\n                require(default != null) {\n                    \"The field '${field.name}' does not define a default value\"\n                }\n                return PropertyWithDefault(field.accessor, default)\n            }\n        }\n\n        inline fun assignDefault(target: T) {\n            accessor.trySetWithoutReassigning(target, defaultValue)\n        }\n\n        inline fun isDefaultComparisonPredicate() = ComparisonPredicate(defaultValue, accessor::getter)\n    }\n}\n\ninternal sealed interface NonConcatenatedFormatStructure<in T> : FormatStructure<T>\n\ninternal open class ConcatenatedFormatStructure<in T>(\n    val formats: List<NonConcatenatedFormatStructure<T>>\n) : FormatStructure<T> {\n    override fun toString(): String = \"ConcatenatedFormatStructure(${formats.joinToString(\", \")})\"\n\n    override fun equals(other: Any?): Boolean = other is ConcatenatedFormatStructure<*> && formats == other.formats\n\n    override fun hashCode(): Int = formats.hashCode()\n\n    override fun parser(): ParserStructure<T> = formats.map { it.parser() }.concat()\n\n    override fun formatter(): FormatterStructure<T> {\n        val formatters = formats.map { it.formatter() }\n        return if (formatters.size == 1) {\n            formatters.single()\n        } else {\n            ConcatenatedFormatter(formatters)\n        }\n    }\n}\n\ninternal class CachedFormatStructure<in T>(formats: List<NonConcatenatedFormatStructure<T>>) :\n    ConcatenatedFormatStructure<T>(formats) {\n    private val cachedFormatter: FormatterStructure<T> = super.formatter()\n    private val cachedParser: ParserStructure<T> = super.parser()\n\n    override fun formatter(): FormatterStructure<T> = cachedFormatter\n\n    override fun parser(): ParserStructure<T> = cachedParser\n}\n\nprivate fun <T> basicFormats(format: FormatStructure<T>): List<FieldFormatDirective<T>> = buildList {\n    fun rec(format: FormatStructure<T>) {\n        when (format) {\n            is BasicFormatStructure -> add(format.directive)\n            is ConcatenatedFormatStructure -> format.formats.forEach { rec(it) }\n            is ConstantFormatStructure -> {}\n            is SignedFormatStructure -> rec(format.format)\n            is AlternativesParsingFormatStructure -> {\n                rec(format.mainFormat); format.formats.forEach { rec(it) }\n            }\n\n            is OptionalFormatStructure -> rec(format.format)\n        }\n    }\n    rec(format)\n}\n[end of core/common/src/internal/format/FormatStructure.kt]\n[start of core/common/src/internal/format/parser/ParserOperation.kt]\n/*\n * Copyright 2023 JetBrains s.r.o. and contributors.\n * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.\n */\n\npackage kotlinx.datetime.internal.format.parser\n\nprivate fun Char.isAsciiDigit(): Boolean = this in '0'..'9'\n\ninternal interface ParserOperation<in Output> {\n    fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult\n}\n\n/**\n * Consumes exactly the string [string].\n */\ninternal class PlainStringParserOperation<Output>(val string: String) : ParserOperation<Output> {\n    init {\n        require(string.isNotEmpty()) { \"Empty string is not allowed\" }\n        require(!string[0].isAsciiDigit()) { \"String '$string' starts with a digit\" }\n        require(!string[string.length - 1].isAsciiDigit()) { \"String '$string' ends with a digit\" }\n    }\n\n    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {\n        if (startIndex + string.length > input.length)\n            return ParseResult.Error(startIndex) { \"Unexpected end of input: yet to parse '$string'\" }\n        for (i in string.indices) {\n            if (input[startIndex + i] != string[i]) return ParseResult.Error(startIndex) {\n                \"Expected $string but got ${input.substring(startIndex, startIndex + i + 1)}\"\n            }\n        }\n        return ParseResult.Ok(startIndex + string.length)\n    }\n\n    // TODO: properly escape\n    override fun toString(): String = \"'$string'\"\n}\n\n/**\n * Greedily consumes as many digits as possible and redistributes them among [consumers].\n *\n * At most one consumer is allowed to have a variable length.\n * If more digits are supplied than the sum of lengths of all consumers, this is the consumer that will receive the\n * extra.\n */\ninternal class NumberSpanParserOperation<Output>(\n    val consumers: List<NumberConsumer<Output>>,\n) : ParserOperation<Output> {\n\n    private val minLength = consumers.sumOf { it.length ?: 1 }\n    private val isFlexible = consumers.any { it.length == null }\n\n    init {\n        require(consumers.all { (it.length ?: Int.MAX_VALUE) > 0 })\n        require(consumers.count { it.length == null } <= 1) {\n            val fieldNames = consumers.filter { it.length == null }.map { it.whatThisExpects }\n            \"At most one variable-length numeric field in a row is allowed, but got several: $fieldNames. \" +\n                \"Parsing is undefined: for example, with variable-length month number \" +\n                \"and variable-length day of month, '111' can be parsed as Jan 11th or Nov 1st.\"\n        }\n    }\n\n    private val whatThisExpects: String\n        get() {\n            val consumerLengths = consumers.map {\n                when (val length = it.length) {\n                    null -> \"at least one digit\"\n                    else -> \"$length digits\"\n                } + \" for ${it.whatThisExpects}\"\n            }\n            return if (isFlexible) {\n                \"a number with at least $minLength digits: $consumerLengths\"\n            } else {\n                \"a number with exactly $minLength digits: $consumerLengths\"\n            }\n        }\n\n    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {\n        if (startIndex + minLength > input.length)\n            return ParseResult.Error(startIndex) { \"Unexpected end of input: yet to parse $whatThisExpects\" }\n        var digitsInRow = 0\n        while (startIndex + digitsInRow < input.length && input[startIndex + digitsInRow].isAsciiDigit()) {\n            ++digitsInRow\n        }\n        if (digitsInRow < minLength)\n            return ParseResult.Error(startIndex) {\n                \"Only found $digitsInRow digits in a row, but need to parse $whatThisExpects\"\n            }\n        var index = startIndex\n        for (i in consumers.indices) {\n            val length = consumers[i].length ?: (digitsInRow - minLength + 1)\n            val numberString = input.substring(index, index + length)\n            val error = consumers[i].consume(storage, numberString)\n            if (error != null) {\n                return ParseResult.Error(index) {\n                    \"Can not interpret the string '$numberString' as ${consumers[i].whatThisExpects}: ${error.errorMessage()}\"\n                }\n            }\n            index += length\n        }\n        return ParseResult.Ok(index)\n    }\n\n    override fun toString(): String = whatThisExpects\n}\n\ninternal class SignParser<Output>(\n    private val isNegativeSetter: (Output, Boolean) -> Unit,\n    private val withPlusSign: Boolean,\n    private val whatThisExpects: String,\n) : ParserOperation<Output> {\n    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {\n        if (startIndex >= input.length)\n            return ParseResult.Ok(startIndex)\n        val char = input[startIndex]\n        if (char == '-') {\n            isNegativeSetter(storage, true)\n            return ParseResult.Ok(startIndex + 1)\n        }\n        if (char == '+' && withPlusSign) {\n            isNegativeSetter(storage, false)\n            return ParseResult.Ok(startIndex + 1)\n        }\n        return ParseResult.Error(startIndex) { \"Expected $whatThisExpects but got $char\" }\n    }\n\n    override fun toString(): String = whatThisExpects\n}\n\n/**\n * Consumes an empty string and unconditionally modifies the accumulator.\n */\ninternal class UnconditionalModification<Output>(\n    private val operation: (Output) -> Unit\n) : ParserOperation<Output> {\n    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {\n        operation(storage)\n        return ParseResult.Ok(startIndex)\n    }\n}\n\n/**\n * Matches the longest suitable string from `strings` and calls [consume] with the matched string.\n */\ninternal class StringSetParserOperation<Output>(\n    strings: Collection<String>,\n    private val setter: AssignableField<Output, String>,\n    private val whatThisExpects: String,\n) : ParserOperation<Output> {\n\n    // TODO: tries don't have good performance characteristics for small sets, add a special case for small sets\n\n    private class TrieNode(\n        val children: MutableList<Pair<String, TrieNode>> = mutableListOf(),\n        var isTerminal: Boolean = false\n    )\n\n    private val trie = TrieNode()\n\n    init {\n        for (string in strings) {\n            require(string.isNotEmpty()) { \"Found an empty string in $whatThisExpects\" }\n            var node = trie\n            for (char in string) {\n                val searchResult = node.children.binarySearchBy(char.toString()) { it.first }\n                node = if (searchResult < 0) {\n                    TrieNode().also { node.children.add(-searchResult - 1, char.toString() to it) }\n                } else {\n                    node.children[searchResult].second\n                }\n            }\n            require(!node.isTerminal) { \"The string '$string' was passed several times\" }\n            node.isTerminal = true\n        }\n        fun reduceTrie(trie: TrieNode) {\n            for ((_, child) in trie.children) {\n                reduceTrie(child)\n            }\n            val newChildren = mutableListOf<Pair<String, TrieNode>>()\n            for ((key, child) in trie.children) {\n                if (!child.isTerminal && child.children.size == 1) {\n                    val (grandChildKey, grandChild) = child.children.single()\n                    newChildren.add(key + grandChildKey to grandChild)\n                } else {\n                    newChildren.add(key to child)\n                }\n            }\n            trie.children.clear()\n            trie.children.addAll(newChildren.sortedBy { it.first })\n        }\n        reduceTrie(trie)\n    }\n\n    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {\n        var node = trie\n        var index = startIndex\n        var lastMatch: Int? = null\n        loop@ while (index <= input.length) {\n            if (node.isTerminal) lastMatch = index\n            for ((key, child) in node.children) {\n                if (input.startsWith(key, index)) {\n                    node = child\n                    index += key.length\n                    continue@loop\n                }\n            }\n            break // nothing found\n        }\n        return if (lastMatch != null) {\n            setter.setWithoutReassigning(storage, input.substring(startIndex, lastMatch), startIndex, lastMatch)\n        } else {\n            ParseResult.Error(startIndex) { \"Expected $whatThisExpects but got ${input.substring(startIndex, index)}\" }\n        }\n    }\n}\n\ninternal fun <Output> SignedIntParser(\n    minDigits: Int?,\n    maxDigits: Int?,\n    spacePadding: Int?,\n    setter: AssignableField<Output, Int>,\n    name: String,\n    plusOnExceedsWidth: Int?,\n): ParserStructure<Output> {\n    val parsers = mutableListOf(\n        spaceAndZeroPaddedUnsignedInt(minDigits, maxDigits, spacePadding, setter, name, withMinus = true)\n    )\n    if (plusOnExceedsWidth != null) {\n        parsers.add(\n            spaceAndZeroPaddedUnsignedInt(minDigits, plusOnExceedsWidth, spacePadding, setter, name)\n        )\n        parsers.add(\n            ParserStructure(\n                listOf(\n                    PlainStringParserOperation(\"+\"),\n                    NumberSpanParserOperation(\n                        listOf(\n                            UnsignedIntConsumer(\n                                plusOnExceedsWidth + 1,\n                                maxDigits,\n                                setter,\n                                name,\n                                multiplyByMinus1 = false\n                            )\n                        )\n                    )\n                ),\n                emptyList()\n            )\n        )\n    } else {\n        parsers.add(\n            spaceAndZeroPaddedUnsignedInt(minDigits, maxDigits, spacePadding, setter, name)\n        )\n    }\n    return ParserStructure(\n        emptyList(),\n        parsers,\n    )\n}\n\n// With maxWidth = 4,\n// padWidth = 7: \"   \" + (four digits | \" \" (three digits | \" \" (two digits | \" \", one digit)))\n// padWidth = 3: three to four digits | \" \" (two digits | \" \", one digit)\ninternal fun <Target> spaceAndZeroPaddedUnsignedInt(\n    minDigits: Int?,\n    maxDigits: Int?,\n    spacePadding: Int?,\n    setter: AssignableField<Target, Int>,\n    name: String,\n    withMinus: Boolean = false,\n): ParserStructure<Target> {\n    val minNumberLength = (minDigits ?: 1) + if (withMinus) 1 else 0\n    val maxNumberLength = maxDigits?.let { if (withMinus) it + 1 else it } ?: Int.MAX_VALUE\n    val spacePadding = spacePadding ?: 0\n    fun numberOfRequiredLengths(minNumberLength: Int, maxNumberLength: Int): ParserStructure<Target> {\n        check(maxNumberLength >= 1 + if (withMinus) 1 else 0)\n        return ParserStructure(\n            buildList {\n                if (withMinus) add(PlainStringParserOperation(\"-\"))\n                add(\n                    NumberSpanParserOperation(\n                        listOf(\n                            UnsignedIntConsumer(\n                                minNumberLength - if (withMinus) 1 else 0,\n                                maxNumberLength - if (withMinus) 1 else 0,\n                                setter,\n                                name,\n                                multiplyByMinus1 = withMinus,\n                            )\n                        )\n                    )\n                )\n            },\n            emptyList()\n        )\n    }\n\n    val maxPaddedNumberLength = minOf(maxNumberLength, spacePadding)\n    if (minNumberLength >= maxPaddedNumberLength) return numberOfRequiredLengths(minNumberLength, maxNumberLength)\n    // invariant: the length of the string parsed by 'accumulated' is exactly 'accumulatedWidth'\n    var accumulated: ParserStructure<Target> = numberOfRequiredLengths(minNumberLength, minNumberLength)\n    for (accumulatedWidth in minNumberLength until maxPaddedNumberLength) {\n        accumulated = ParserStructure(\n            emptyList(),\n            listOf(\n                numberOfRequiredLengths(accumulatedWidth + 1, accumulatedWidth + 1),\n                listOf(\n                    ParserStructure(listOf(PlainStringParserOperation(\" \")), emptyList()),\n                    accumulated\n                ).concat()\n            )\n        )\n    }\n    // accumulatedWidth == maxNumberLength || accumulatedWidth == spacePadding.\n    // In the first case, we're done, in the second case, we need to add the remaining numeric lengths.\n    return if (spacePadding > maxNumberLength) {\n        val prepadding = PlainStringParserOperation<Target>(\" \".repeat(spacePadding - maxNumberLength))\n        listOf(\n            ParserStructure(\n                listOf(\n                    prepadding,\n                ),\n                emptyList()\n            ), accumulated\n        ).concat()\n    } else if (spacePadding == maxNumberLength) {\n        accumulated\n    } else {\n        val r = ParserStructure(\n            emptyList(),\n            listOf(\n                numberOfRequiredLengths(spacePadding + 1, maxNumberLength),\n                accumulated\n            )\n        )\n        r\n    }\n}\n\ninternal fun <Output> ReducedIntParser(\n    digits: Int,\n    base: Int,\n    setter: AssignableField<Output, Int>,\n    name: String,\n): ParserStructure<Output> = ParserStructure(\n    emptyList(),\n    listOf(\n        ParserStructure(\n            listOf(\n                NumberSpanParserOperation(\n                    listOf(\n                        ReducedIntConsumer(\n                            digits,\n                            setter,\n                            name,\n                            base = base\n                        )\n                    )\n                )\n            ),\n            emptyList()\n        ),\n        ParserStructure(\n            listOf(\n                PlainStringParserOperation(\"+\"),\n                NumberSpanParserOperation(\n                    listOf(\n                        UnsignedIntConsumer(\n                            null,\n                            null,\n                            setter,\n                            name,\n                            multiplyByMinus1 = false\n                        )\n                    )\n                )\n            ),\n            emptyList()\n        ),\n        ParserStructure(\n            listOf(\n                PlainStringParserOperation(\"-\"),\n                NumberSpanParserOperation(\n                    listOf(\n                        UnsignedIntConsumer(\n                            null,\n                            null,\n                            setter,\n                            name,\n                            multiplyByMinus1 = true\n                        )\n                    )\n                )\n            ),\n            emptyList()\n        ),\n    )\n)\n\ninternal interface AssignableField<in Object, Type> {\n    /**\n     * If the field is not set, sets it to the given value.\n     * If the field is set to the given value, does nothing.\n     * If the field is set to a different value, throws [IllegalArgumentException].\n     *\n     * This function is used to ensure internal consistency during parsing.\n     * There exist formats where the same data is repeated several times in the same object, for example,\n     * \"14:15 (02:15 PM)\". In such cases, we want to ensure that the values are consistent.\n     */\n    fun trySetWithoutReassigning(container: Object, newValue: Type): Type?\n\n    /**\n     * The name of the field.\n     */\n    val name: String\n}\n\nprivate fun <Object, Type> AssignableField<Object, Type>.setWithoutReassigning(\n    receiver: Object,\n    value: Type,\n    position: Int,\n    nextIndex: Int\n): ParseResult {\n    val conflictingValue = trySetWithoutReassigning(receiver, value)\n    return if (conflictingValue === null) {\n        ParseResult.Ok(nextIndex)\n    } else {\n        ParseResult.Error(position) {\n            \"Attempting to assign conflicting values '$conflictingValue' and '$value' to field '$name'\"\n        }\n    }\n}\n[end of core/common/src/internal/format/parser/ParserOperation.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 2471,
+            "endIndex": 3028,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 4504,
+            "endIndex": 4753,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 5861,
+            "endIndex": 5986,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 6134,
+            "endIndex": 6520,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 6368,
+            "endIndex": 6678,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 6839,
+            "endIndex": 7211,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 7062,
+            "endIndex": 7243,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 7557,
+            "endIndex": 7692,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 7639,
+            "endIndex": 7864,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 8132,
+            "endIndex": 9114,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 9352,
+            "endIndex": 9567,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 10485,
+            "endIndex": 10738,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 11622,
+            "endIndex": 11746,
+            "uri": "http://distinto.cuantum.org/ao3hgn/kotlin-extract-number-from-string.html",
+            "license": ""
+          },
+          {
+            "startIndex": 15603,
+            "endIndex": 15861,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 15932,
+            "endIndex": 16304,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 16155,
+            "endIndex": 16336,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 16655,
+            "endIndex": 17637,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 20753,
+            "endIndex": 21074,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 21099,
+            "endIndex": 21498,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 21347,
+            "endIndex": 21720,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 21753,
+            "endIndex": 22111,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 22255,
+            "endIndex": 22383,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 22669,
+            "endIndex": 23024,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 23038,
+            "endIndex": 23313,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 23349,
+            "endIndex": 23629,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 23645,
+            "endIndex": 23819,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 24497,
+            "endIndex": 24632,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 24579,
+            "endIndex": 24804,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 24870,
+            "endIndex": 26078,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 25893,
+            "endIndex": 26938,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 26712,
+            "endIndex": 30730,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 30545,
+            "endIndex": 31285,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 31308,
+            "endIndex": 31804,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 31574,
+            "endIndex": 33632,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 33522,
+            "endIndex": 33843,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 33701,
+            "endIndex": 34459,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 34641,
+            "endIndex": 34766,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 34914,
+            "endIndex": 35300,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 35148,
+            "endIndex": 35557,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 35426,
+            "endIndex": 36794,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 36637,
+            "endIndex": 37408,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 37217,
+            "endIndex": 38136,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 37987,
+            "endIndex": 38328,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 38166,
+            "endIndex": 40940,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 40782,
+            "endIndex": 41216,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 41053,
+            "endIndex": 41424,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 41240,
+            "endIndex": 41763,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 41559,
+            "endIndex": 50621,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 13647,
+    "candidatesTokenCount": 6337,
+    "totalTokenCount": 26291,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 13647
+      }
+    ],
+    "thoughtsTokenCount": 6307
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "C4RDaMOdOOGOjMcPmL-7mQk"
+}

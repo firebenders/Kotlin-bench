@@ -1,0 +1,280 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "An analysis of the issue reveals a bug in the `timeout` operator's implementation. When an upstream `Flow`, such as a `callbackFlow`, closes its underlying channel with an exception, the `timeout` operator fails to propagate this exception to the downstream collector.\n\nThe root cause lies in how `timeout` handles channel closure. It uses `onReceiveCatching` on a channel produced from the upstream flow. The original implementation correctly handles receiving values and timing out, but when the channel closes, it terminates its processing loop without checking for or re-throwing the closure cause. This effectively swallows the exception.\n\nThe fix involves modifying the `timeoutInternal` function in `kotlinx-coroutines-core/common/src/flow/operators/Delay.kt`. The logic inside `onReceiveCatching` is updated to properly inspect the `ChannelResult`. By using `ChannelResult.fold`, we can handle both successful value emissions and channel closures. In the case of a closure (`onFailure`), we check if there's an associated exception (`cause`). If so, we re-throw it to ensure it propagates downstream. If the channel closes normally (without an exception), we terminate the loop gracefully.\n\nThis change ensures that exceptions from upstream flows are no longer lost, making the `timeout` operator's behavior consistent and predictable, regardless of how the upstream flow terminates.\n\nHere are the changes for the affected file:\n\n[start of kotlinx-coroutines-core/common/src/flow/operators/Delay.kt]\n@file:JvmMultifileClass\n@file:JvmName(\"FlowKt\")\n\npackage kotlinx.coroutines.flow\n\nimport kotlinx.coroutines.*\nimport kotlinx.coroutines.channels.*\nimport kotlinx.coroutines.flow.internal.*\nimport kotlinx.coroutines.selects.*\nimport kotlin.jvm.*\nimport kotlin.time.*\n\n/* Scaffolding for Knit code examples\n<!--- TEST_NAME FlowDelayTest -->\n<!--- PREFIX .*-duration-.*\n----- INCLUDE .*-duration-.*\n----- INCLUDE .*\nimport kotlinx.coroutines.*\nimport kotlinx.coroutines.flow.*\nimport kotlin.time.Duration.Companion.milliseconds\n\nfun main() = runBlocking {\n----- SUFFIX .*\n.toList().joinToString().let { println(it) } }\n-->\n*/\n\n/**\n * Returns a flow that mirrors the original flow, but filters out values\n * that are followed by the newer values within the given [timeout][timeoutMillis].\n * The latest value is always emitted.\n *\n * Example:\n *\n * ```kotlin\n * flow {\n *     emit(1)\n *     delay(90)\n *     emit(2)\n *     delay(90)\n *     emit(3)\n *     delay(1010)\n *     emit(4)\n *     delay(1010)\n *     emit(5)\n * }.debounce(1000)\n * ```\n * <!--- KNIT example-delay-01.kt -->\n *\n * produces the following emissions\n *\n * ```text\n * 3, 4, 5\n * ```\n * <!--- TEST -->\n *\n * Note that the resulting flow does not emit anything as long as the original flow emits\n * items faster than every [timeoutMillis] milliseconds.\n */\n@FlowPreview\npublic fun <T> Flow<T>.debounce(timeoutMillis: Long): Flow<T> {\n    require(timeoutMillis >= 0L) { \"Debounce timeout should not be negative\" }\n    if (timeoutMillis == 0L) return this\n    return debounceInternal { timeoutMillis }\n}\n\n/**\n * Returns a flow that mirrors the original flow, but filters out values\n * that are followed by the newer values within the given [timeout][timeoutMillis].\n * The latest value is always emitted.\n *\n * A variation of [debounce] that allows specifying the timeout value dynamically.\n *\n * Example:\n *\n * ```kotlin\n * flow {\n *     emit(1)\n *     delay(90)\n *     emit(2)\n *     delay(90)\n *     emit(3)\n *     delay(1010)\n *     emit(4)\n *     delay(1010)\n *     emit(5)\n * }.debounce {\n *     if (it == 1) {\n *         0L\n *     } else {\n *         1000L\n *     }\n * }\n * ```\n * <!--- KNIT example-delay-02.kt -->\n *\n * produces the following emissions\n *\n * ```text\n * 1, 3, 4, 5\n * ```\n * <!--- TEST -->\n *\n * Note that the resulting flow does not emit anything as long as the original flow emits\n * items faster than every [timeoutMillis] milliseconds.\n *\n * @param timeoutMillis [T] is the emitted value and the return value is timeout in milliseconds.\n */\n@FlowPreview\n@OverloadResolutionByLambdaReturnType\npublic fun <T> Flow<T>.debounce(timeoutMillis: (T) -> Long): Flow<T> =\n    debounceInternal(timeoutMillis)\n\n/**\n * Returns a flow that mirrors the original flow, but filters out values\n * that are followed by the newer values within the given [timeout].\n * The latest value is always emitted.\n *\n * Example:\n *\n * ```kotlin\n * flow {\n *     emit(1)\n *     delay(90.milliseconds)\n *     emit(2)\n *     delay(90.milliseconds)\n *     emit(3)\n *     delay(1010.milliseconds)\n *     emit(4)\n *     delay(1010.milliseconds)\n *     emit(5)\n * }.debounce(1000.milliseconds)\n * ```\n * <!--- KNIT example-delay-duration-01.kt -->\n *\n * produces the following emissions\n *\n * ```text\n * 3, 4, 5\n * ```\n * <!--- TEST -->\n *\n * Note that the resulting flow does not emit anything as long as the original flow emits\n * items faster than every [timeout] milliseconds.\n */\n@FlowPreview\npublic fun <T> Flow<T>.debounce(timeout: Duration): Flow<T> =\n    debounce(timeout.toDelayMillis())\n\n/**\n * Returns a flow that mirrors the original flow, but filters out values\n * that are followed by the newer values within the given [timeout].\n * The latest value is always emitted.\n *\n * A variation of [debounce] that allows specifying the timeout value dynamically.\n *\n * Example:\n *\n * ```kotlin\n * flow {\n *     emit(1)\n *     delay(90.milliseconds)\n *     emit(2)\n *     delay(90.milliseconds)\n *     emit(3)\n *     delay(1010.milliseconds)\n *     emit(4)\n *     delay(1010.milliseconds)\n *     emit(5)\n * }.debounce {\n *     if (it == 1) {\n *         0.milliseconds\n *     } else {\n *         1000.milliseconds\n *     }\n * }\n * ```\n * <!--- KNIT example-delay-duration-02.kt -->\n *\n * produces the following emissions\n *\n * ```text\n * 1, 3, 4, 5\n * ```\n * <!--- TEST -->\n *\n * Note that the resulting flow does not emit anything as long as the original flow emits\n * items faster than every [timeout] unit.\n *\n * @param timeout [T] is the emitted value and the return value is timeout in [Duration].\n */\n@FlowPreview\n@JvmName(\"debounceDuration\")\n@OverloadResolutionByLambdaReturnType\npublic fun <T> Flow<T>.debounce(timeout: (T) -> Duration): Flow<T> =\n    debounceInternal { emittedItem ->\n        timeout(emittedItem).toDelayMillis()\n    }\n\nprivate fun <T> Flow<T>.debounceInternal(timeoutMillisSelector: (T) -> Long): Flow<T> =\n    scopedFlow { downstream ->\n        // Produce the values using the default (rendezvous) channel\n        val values = produce {\n            collect { value -> send(value ?: NULL) }\n        }\n        // Now consume the values\n        var lastValue: Any? = null\n        while (lastValue !== DONE) {\n            var timeoutMillis = 0L // will be always computed when lastValue != null\n            // Compute timeout for this value\n            if (lastValue != null) {\n                timeoutMillis = timeoutMillisSelector(NULL.unbox(lastValue))\n                require(timeoutMillis >= 0L) { \"Debounce timeout should not be negative\" }\n                if (timeoutMillis == 0L) {\n                    downstream.emit(NULL.unbox(lastValue))\n                    lastValue = null // Consume the value\n                }\n            }\n            // assert invariant: lastValue != null implies timeoutMillis > 0\n            assert { lastValue == null || timeoutMillis > 0 }\n            // wait for the next value with timeout\n            select<Unit> {\n                // Set timeout when lastValue exists and is not consumed yet\n                if (lastValue != null) {\n                    onTimeout(timeoutMillis) {\n                        downstream.emit(NULL.unbox(lastValue))\n                        lastValue = null // Consume the value\n                    }\n                }\n                values.onReceiveCatching { value ->\n                    value\n                        .onSuccess { lastValue = it }\n                        .onFailure {\n                            it?.let { throw it }\n                            // If closed normally, emit the latest value\n                            if (lastValue != null) downstream.emit(NULL.unbox(lastValue))\n                            lastValue = DONE\n                        }\n                }\n            }\n        }\n    }\n\n/**\n * Returns a flow that emits only the latest value emitted by the original flow during the given sampling [period][periodMillis].\n *\n * Example:\n *\n * ```kotlin\n * flow {\n *     repeat(10) {\n *         emit(it)\n *         delay(110)\n *     }\n * }.sample(200)\n * ```\n * <!--- KNIT example-delay-03.kt -->\n *\n * produces the following emissions\n *\n * ```text\n * 1, 3, 5, 7, 9\n * ```\n * <!--- TEST -->\n *\n * Note that the latest element is not emitted if it does not fit into the sampling window.\n */\n@FlowPreview\npublic fun <T> Flow<T>.sample(periodMillis: Long): Flow<T> {\n    require(periodMillis > 0) { \"Sample period should be positive\" }\n    return scopedFlow { downstream ->\n        val values = produce(capacity = Channel.CONFLATED) {\n            collect { value -> send(value ?: NULL) }\n        }\n        var lastValue: Any? = null\n        val ticker = fixedPeriodTicker(periodMillis)\n        while (lastValue !== DONE) {\n            select<Unit> {\n                values.onReceiveCatching { result ->\n                    result\n                        .onSuccess { lastValue = it }\n                        .onFailure {\n                            it?.let { throw it }\n                            ticker.cancel(ChildCancelledException())\n                            lastValue = DONE\n                        }\n                }\n\n                // todo: shall be start sampling only when an element arrives or sample aways as here?\n                ticker.onReceive {\n                    val value = lastValue ?: return@onReceive\n                    lastValue = null // Consume the value\n                    downstream.emit(NULL.unbox(value))\n                }\n            }\n        }\n    }\n}\n\n/*\n * TODO this design (and design of the corresponding operator) depends on #540\n */\ninternal fun CoroutineScope.fixedPeriodTicker(\n    delayMillis: Long,\n): ReceiveChannel<Unit> {\n    return produce(capacity = 0) {\n        delay(delayMillis)\n        while (true) {\n            channel.send(Unit)\n            delay(delayMillis)\n        }\n    }\n}\n\n/**\n * Returns a flow that emits only the latest value emitted by the original flow during the given sampling [period].\n *\n * Example:\n *\n * ```kotlin\n * flow {\n *     repeat(10) {\n *         emit(it)\n *         delay(110.milliseconds)\n *     }\n * }.sample(200.milliseconds)\n * ```\n * <!--- KNIT example-delay-duration-03.kt -->\n *\n * produces the following emissions\n *\n * ```text\n * 1, 3, 5, 7, 9\n * ```\n * <!--- TEST -->\n *\n * Note that the latest element is not emitted if it does not fit into the sampling window.\n */\n@FlowPreview\npublic fun <T> Flow<T>.sample(period: Duration): Flow<T> = sample(period.toDelayMillis())\n\n/**\n * Returns a flow that will emit a [TimeoutCancellationException] if the upstream doesn't emit an item within the given time.\n *\n * Example:\n *\n * ```kotlin\n * flow {\n *     emit(1)\n *     delay(100)\n *     emit(2)\n *     delay(100)\n *     emit(3)\n *     delay(1000)\n *     emit(4)\n * }.timeout(100.milliseconds).catch { exception ->\n *     if (exception is TimeoutCancellationException) {\n *         // Catch the TimeoutCancellationException emitted above.\n *         // Emit desired item on timeout.\n *         emit(-1)\n *     } else {\n *         // Throw other exceptions.\n *         throw exception\n *     }\n * }.onEach {\n *     delay(300) // This will not cause a timeout\n * }\n * ```\n * <!--- KNIT example-timeout-duration-01.kt -->\n *\n * produces the following emissions\n *\n * ```text\n * 1, 2, 3, -1\n * ```\n * <!--- TEST -->\n *\n * Note that delaying on the downstream doesn't trigger the timeout.\n *\n * @param timeout Timeout duration. If non-positive, the flow is timed out immediately\n */\n@FlowPreview\npublic fun <T> Flow<T>.timeout(\n    timeout: Duration\n): Flow<T> = timeoutInternal(timeout)\n\nprivate fun <T> Flow<T>.timeoutInternal(\n    timeout: Duration\n): Flow<T> = scopedFlow { downStream ->\n    if (timeout <= Duration.ZERO) throw TimeoutCancellationException(\"Timed out immediately\")\n    val values = buffer(Channel.RENDEZVOUS).produceIn(this)\n    whileSelect {\n        values.onReceiveCatching { result ->\n            result.fold(\n                onSuccess = {\n                    downStream.emit(it)\n                    true\n                },\n                onFailure = { cause ->\n                    if (cause != null) throw cause\n                    false\n                }\n            )\n        }\n        onTimeout(timeout) {\n            throw TimeoutCancellationException(\"Timed out waiting for $timeout\")\n        }\n    }\n}\n\n[end of kotlinx-coroutines-core/common/src/flow/operators/Delay.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 1063,
+            "endIndex": 1781,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 6863,
+            "endIndex": 7036,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 7559,
+            "endIndex": 7732,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 14138,
+            "endIndex": 14391,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 14425,
+            "endIndex": 14777,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 15371,
+            "endIndex": 15659,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 22140,
+            "endIndex": 22311,
+            "uri": "https://juejin.cn/post/7357894315958304818",
+            "license": ""
+          },
+          {
+            "startIndex": 25346,
+            "endIndex": 25959,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 31884,
+            "endIndex": 32172,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 32855,
+            "endIndex": 33028,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 35478,
+            "endIndex": 36091,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 36161,
+            "endIndex": 36449,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 38061,
+            "endIndex": 38234,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 40281,
+            "endIndex": 40454,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 41931,
+            "endIndex": 42219,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 43091,
+            "endIndex": 43264,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 44402,
+            "endIndex": 44716,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 45413,
+            "endIndex": 45619,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 47121,
+            "endIndex": 47294,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 48168,
+            "endIndex": 48456,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 49007,
+            "endIndex": 49295,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 50322,
+            "endIndex": 50452,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 50475,
+            "endIndex": 50881,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 51537,
+            "endIndex": 51871,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 52615,
+            "endIndex": 52949,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 54923,
+            "endIndex": 55056,
+            "uri": "https://jar-download.com/artifacts/org.jetbrains.kotlinx/kotlinx-coroutines-core/1.6.0-RC/source-code/commonMain/flow/operators/Errors.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 55058,
+            "endIndex": 55313,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 55324,
+            "endIndex": 55674,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 55568,
+            "endIndex": 56213,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 56118,
+            "endIndex": 56605,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 56510,
+            "endIndex": 57323,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 57228,
+            "endIndex": 57456,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 57467,
+            "endIndex": 57729,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 57670,
+            "endIndex": 58592,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 58533,
+            "endIndex": 59525,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 59531,
+            "endIndex": 63542,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 63418,
+            "endIndex": 63810,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 63646,
+            "endIndex": 64362,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 64231,
+            "endIndex": 64723,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 64533,
+            "endIndex": 65048,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 64858,
+            "endIndex": 65764,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 8296,
+    "candidatesTokenCount": 3450,
+    "totalTokenCount": 26074,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 8296
+      }
+    ],
+    "thoughtsTokenCount": 14328
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "HINDaMLlLrLj_uMPp5-msQw"
+}

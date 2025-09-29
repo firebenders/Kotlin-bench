@@ -1,0 +1,1072 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "An elegant solution to this problem involves preventing the `function-signature` rule from merging a function's expression body with its signature if the expression is annotated. This can be achieved by checking if the expression following the `=` is an `ANNOTATED_EXPRESSION`.\n\nI will modify `ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt` to implement this logic.\n\nHere are the changes:\n\n[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt]\n```kotlin\npackage com.pinterest.ktlint.ruleset.standard.rules\n\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATED_EXPRESSION\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK_COMMENT\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.EOL_COMMENT\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN_KEYWORD\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.LPAR\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.RPAR\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER_LIST\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE\nimport com.pinterest.ktlint.rule.engine.core.api.IndentConfig\nimport com.pinterest.ktlint.rule.engine.core.api.IndentConfig.Companion.DEFAULT_INDENT_CONFIG\nimport com.pinterest.ktlint.rule.engine.core.api.Rule\nimport com.pinterest.ktlint.rule.engine.core.api.RuleId\nimport com.pinterest.ktlint.rule.engine.core.api.children\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfigProperty\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY_OFF\nimport com.pinterest.ktlint.rule.engine.core.api.indent\nimport com.pinterest.ktlint.rule.engine.core.api.isWhiteSpace\nimport com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline\nimport com.pinterest.ktlint.rule.engine.core.api.nextCodeLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.nextCodeSibling\nimport com.pinterest.ktlint.rule.engine.core.api.nextLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.prevCodeLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.prevLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.prevSibling\nimport com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe\nimport com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceBeforeMe\nimport com.pinterest.ktlint.ruleset.standard.StandardRule\nimport com.pinterest.ktlint.ruleset.standard.rules.FunctionSignatureRule.FunctionBodyExpressionWrapping.always\nimport com.pinterest.ktlint.ruleset.standard.rules.FunctionSignatureRule.FunctionBodyExpressionWrapping.default\nimport com.pinterest.ktlint.ruleset.standard.rules.FunctionSignatureRule.FunctionBodyExpressionWrapping.multiline\nimport org.ec4j.core.model.PropertyType\nimport org.ec4j.core.model.PropertyType.PropertyValueParser.EnumValueParser\nimport org.jetbrains.kotlin.com.intellij.lang.ASTNode\nimport org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafElement\nimport org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement\nimport org.jetbrains.kotlin.utils.addToStdlib.ifTrue\n\npublic class FunctionSignatureRule :\n    StandardRule(\n        id = \"function-signature\",\n        visitorModifiers =\n            setOf(\n                // Run after wrapping and spacing rules\n                VisitorModifier.RunAsLateAsPossible,\n            ),\n        usesEditorConfigProperties =\n            setOf(\n                INDENT_SIZE_PROPERTY,\n                INDENT_STYLE_PROPERTY,\n                MAX_LINE_LENGTH_PROPERTY,\n                FORCE_MULTILINE_WHEN_PARAMETER_COUNT_GREATER_OR_EQUAL_THAN_PROPERTY,\n                FUNCTION_BODY_EXPRESSION_WRAPPING_PROPERTY,\n            ),\n    ),\n    Rule.Experimental {\n    private var codeStyle = CODE_STYLE_PROPERTY.defaultValue\n    private var indentConfig = DEFAULT_INDENT_CONFIG\n    private var maxLineLength = MAX_LINE_LENGTH_PROPERTY.defaultValue\n    private var functionSignatureWrappingMinimumParameters =\n        FORCE_MULTILINE_WHEN_PARAMETER_COUNT_GREATER_OR_EQUAL_THAN_PROPERTY.defaultValue\n    private var functionBodyExpressionWrapping = FUNCTION_BODY_EXPRESSION_WRAPPING_PROPERTY.defaultValue\n\n    override fun beforeFirstNode(editorConfig: EditorConfig) {\n        codeStyle = editorConfig[CODE_STYLE_PROPERTY]\n        functionSignatureWrappingMinimumParameters = editorConfig[FORCE_MULTILINE_WHEN_PARAMETER_COUNT_GREATER_OR_EQUAL_THAN_PROPERTY]\n        functionBodyExpressionWrapping = editorConfig[FUNCTION_BODY_EXPRESSION_WRAPPING_PROPERTY]\n        indentConfig =\n            IndentConfig(\n                indentStyle = editorConfig[INDENT_STYLE_PROPERTY],\n                tabWidth = editorConfig[INDENT_SIZE_PROPERTY],\n            )\n        maxLineLength = editorConfig[MAX_LINE_LENGTH_PROPERTY]\n    }\n\n    override fun beforeVisitChildNodes(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        if (node.elementType == FUN) {\n            node\n                .functionSignatureNodes()\n                .any { it.elementType == EOL_COMMENT || it.elementType == BLOCK_COMMENT }\n                .ifTrue {\n                    // Rewriting function signatures in a consistent manner is hard or sometimes even impossible. For\n                    // example a multiline signature which could fit on one line can not be rewritten in case it\n                    // contains an EOL comment. Rewriting a single line signature which exceeds the max line length to a\n                    // multiline signature is hard when it contains block comments. For now, it does not seem worth the\n                    // effort to attempt it.\n                    return\n                }\n\n            visitFunctionSignature(node, emit, autoCorrect)\n        }\n    }\n\n    private fun ASTNode.functionSignatureNodes(): List<ASTNode> {\n        // Find the signature including the element that has to be placed on the same line as the function signature\n        //     fun foo(bar: String) {\n        // or\n        //     fun foo(bar: String) =\n        val firstCodeChild = getFirstCodeChild()\n        val startOfBodyBlock =\n            this\n                .findChildByType(BLOCK)\n                ?.firstChildNode\n        val startOfBodyExpression = this.findChildByType(EQ)\n        return collectLeavesRecursively()\n            .childrenBetween(\n                startASTNodePredicate = { it == firstCodeChild },\n                endASTNodePredicate = { it == startOfBodyBlock || it == startOfBodyExpression },\n            )\n    }\n\n    private fun ASTNode.getFirstCodeChild(): ASTNode? {\n        val funNode =\n            if (elementType == FUN_KEYWORD) {\n                this.treeParent\n            } else {\n                this\n            }\n        funNode\n            ?.findChildByType(MODIFIER_LIST)\n            ?.let { modifierList ->\n                val iterator = modifierList.children().iterator()\n                var currentNode: ASTNode\n                while (iterator.hasNext()) {\n                    currentNode = iterator.next()\n                    if (currentNode.elementType != ANNOTATION &&\n                        currentNode.elementType != ANNOTATION_ENTRY &&\n                        currentNode.elementType != WHITE_SPACE\n                    ) {\n                        return currentNode\n                    }\n                }\n                return modifierList.nextCodeSibling()\n            }\n        return funNode.nextCodeLeaf()\n    }\n\n    private fun visitFunctionSignature(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        require(node.elementType == FUN)\n\n        val forceMultilineSignature =\n            node.hasMinimumNumberOfParameters() ||\n                node.containsMultilineParameter() ||\n                (codeStyle == ktlint_official && node.containsAnnotatedParameter())\n        if (isMaxLineLengthSet()) {\n            val singleLineFunctionSignatureLength = calculateFunctionSignatureLengthAsSingleLineSignature(node, emit, autoCorrect)\n            // Function signatures not having parameters, should not be reformatted automatically. It would result in function signatures\n            // like below, which are not acceptable:\n            //     fun aVeryLongFunctionName(\n            //     ) = \"some-value\"\n            //\n            //     fun aVeryLongFunctionName(\n            //     ): SomeVeryLongTypeName =\n            //         SomeVeryLongTypeName(...)\n            // Leave it up to the max-line-length rule to detect those violations so that the developer can handle it manually.\n            val rewriteFunctionSignatureWithParameters = node.countParameters() > 0 && singleLineFunctionSignatureLength > maxLineLength\n            if (forceMultilineSignature || rewriteFunctionSignatureWithParameters) {\n                fixWhiteSpacesInValueParameterList(node, emit, autoCorrect, multiline = true, dryRun = false)\n                // Due to rewriting the function signature, the remaining length on the last line of the multiline\n                // signature needs to be recalculated\n                val lengthOfLastLine = recalculateRemainLengthForFirstLineOfBodyExpression(node)\n                fixFunctionBody(node, emit, autoCorrect, maxLineLength - lengthOfLastLine)\n            } else {\n                fixWhiteSpacesInValueParameterList(node, emit, autoCorrect, multiline = false, dryRun = false)\n                fixFunctionBody(node, emit, autoCorrect, maxLineLength - singleLineFunctionSignatureLength)\n            }\n        } else {\n            // When max line length is not set then keep it as single line function signature only when the original\n            // signature already was a single line signature. Otherwise, rewrite the entire signature as a multiline\n            // signature.\n            val rewriteToSingleLineFunctionSignature =\n                node\n                    .functionSignatureNodes()\n                    .none { it.textContains('\\n') }\n            if (!forceMultilineSignature && rewriteToSingleLineFunctionSignature) {\n                fixWhiteSpacesInValueParameterList(node, emit, autoCorrect, multiline = false, dryRun = false)\n            } else {\n                fixWhiteSpacesInValueParameterList(node, emit, autoCorrect, multiline = true, dryRun = false)\n            }\n        }\n    }\n\n    private fun recalculateRemainLengthForFirstLineOfBodyExpression(node: ASTNode): Int {\n        val closingParenthesis =\n            node\n                .findChildByType(VALUE_PARAMETER_LIST)\n                ?.findChildByType(RPAR)\n        val tailNodesOfFunctionSignature =\n            node\n                .functionSignatureNodes()\n                .childrenBetween(\n                    startASTNodePredicate = { it == closingParenthesis },\n                    endASTNodePredicate = { false },\n                )\n\n        return node.indent(false).length +\n            tailNodesOfFunctionSignature.sumOf { it.text.length }\n    }\n\n    private fun ASTNode.containsMultilineParameter(): Boolean =\n        findChildByType(VALUE_PARAMETER_LIST)\n            ?.children()\n            .orEmpty()\n            .filter { it.elementType == VALUE_PARAMETER }\n            .any { it.textContains('\\n') }\n\n    private fun ASTNode.containsAnnotatedParameter(): Boolean =\n        findChildByType(VALUE_PARAMETER_LIST)\n            ?.children()\n            .orEmpty()\n            .filter { it.elementType == VALUE_PARAMETER }\n            .any { it.isAnnotated() }\n\n    private fun ASTNode.isAnnotated() =\n        findChildByType(MODIFIER_LIST)\n            ?.children()\n            .orEmpty()\n            .any { it.elementType == ANNOTATION_ENTRY }\n\n    private fun calculateFunctionSignatureLengthAsSingleLineSignature(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ): Int {\n        val actualFunctionSignatureLength = node.getFunctionSignatureLength()\n\n        // Calculate the length of the function signature in case it would be rewritten as single line (and without a\n        // maximum line length). The white space correction will be calculated via a dry run of the actual fix.\n        return actualFunctionSignatureLength +\n            // Calculate the white space correction in case the signature would be rewritten to a single line\n            fixWhiteSpacesInValueParameterList(node, emit, autoCorrect, multiline = false, dryRun = true)\n    }\n\n    private fun ASTNode.getFunctionSignatureLength() = indent(false).length + getFunctionSignatureNodesLength()\n\n    private fun ASTNode.getFunctionSignatureNodesLength() =\n        functionSignatureNodes()\n            .joinTextToString()\n            .length\n\n    private fun fixWhiteSpacesInValueParameterList(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n        multiline: Boolean,\n        dryRun: Boolean,\n    ): Int {\n        var whiteSpaceCorrection = 0\n\n        val valueParameterList = requireNotNull(node.findChildByType(VALUE_PARAMETER_LIST))\n        val firstParameterInList =\n            valueParameterList\n                .children()\n                .firstOrNull { it.elementType == VALUE_PARAMETER }\n\n        whiteSpaceCorrection +=\n            if (firstParameterInList == null) {\n                // handle empty parameter list\n                fixWhiteSpacesInEmptyValueParameterList(node, emit, autoCorrect, dryRun)\n            } else {\n                fixWhiteSpacesBeforeFirstParameterInValueParameterList(node, emit, autoCorrect, multiline, dryRun) +\n                    fixWhiteSpacesBetweenParametersInValueParameterList(node, emit, autoCorrect, multiline, dryRun) +\n                    fixWhiteSpaceBeforeClosingParenthesis(node, emit, autoCorrect, multiline, dryRun)\n            }\n\n        return whiteSpaceCorrection\n    }\n\n    private fun fixWhiteSpacesInEmptyValueParameterList(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n        dryRun: Boolean,\n    ): Int {\n        var whiteSpaceCorrection = 0\n\n        val valueParameterList = requireNotNull(node.findChildByType(VALUE_PARAMETER_LIST))\n\n        valueParameterList\n            .children()\n            .filter { it.elementType != LPAR && it.elementType != RPAR }\n            .also { elementsInValueParameterList ->\n                // Functions with comments in the value parameter list are excluded from processing before. So an \"empty\" value\n                // parameter list should only contain a single whitespace element\n                require(elementsInValueParameterList.count() <= 1)\n            }\n            .firstOrNull()\n            ?.let { whiteSpace ->\n                if (!dryRun) {\n                    emit(\n                        whiteSpace.startOffset,\n                        \"No whitespace expected in empty parameter list\",\n                        true,\n                    )\n                }\n                if (autoCorrect && !dryRun) {\n                    whiteSpace.treeParent.removeChild(whiteSpace)\n                } else {\n                    whiteSpaceCorrection -= whiteSpace.textLength\n                }\n            }\n\n        return whiteSpaceCorrection\n    }\n\n    private fun fixWhiteSpacesBeforeFirstParameterInValueParameterList(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n        multiline: Boolean,\n        dryRun: Boolean,\n    ): Int {\n        var whiteSpaceCorrection = 0\n\n        val valueParameterList = requireNotNull(node.findChildByType(VALUE_PARAMETER_LIST))\n        val firstParameterInList =\n            valueParameterList\n                .children()\n                .first { it.elementType == VALUE_PARAMETER }\n\n        val firstParameter = firstParameterInList.firstChildNode\n        firstParameter\n            ?.prevLeaf()\n            ?.takeIf { it.elementType == WHITE_SPACE }\n            .let { whiteSpaceBeforeIdentifier ->\n                if (multiline) {\n                    val expectedParameterIndent = node.indent().plus(indentConfig.indent)\n                    if (whiteSpaceBeforeIdentifier == null ||\n                        whiteSpaceBeforeIdentifier.text != expectedParameterIndent\n                    ) {\n                        if (!dryRun) {\n                            emit(\n                                firstParameterInList.startOffset,\n                                \"Newline expected after opening parenthesis\",\n                                true,\n                            )\n                        }\n                        if (autoCorrect && !dryRun) {\n                            valueParameterList.firstChildNode.upsertWhitespaceAfterMe(expectedParameterIndent)\n                        } else {\n                            whiteSpaceCorrection += expectedParameterIndent.length - (whiteSpaceBeforeIdentifier?.textLength ?: 0)\n                        }\n                    }\n                } else {\n                    if (whiteSpaceBeforeIdentifier != null) {\n                        if (!dryRun) {\n                            emit(\n                                firstParameter!!.startOffset,\n                                \"No whitespace expected between opening parenthesis and first parameter name\",\n                                true,\n                            )\n                        }\n                        if (autoCorrect && !dryRun) {\n                            whiteSpaceBeforeIdentifier.treeParent.removeChild(whiteSpaceBeforeIdentifier)\n                        } else {\n                            whiteSpaceCorrection -= whiteSpaceBeforeIdentifier.textLength\n                        }\n                    }\n                }\n            }\n\n        return whiteSpaceCorrection\n    }\n\n    private fun fixWhiteSpacesBetweenParametersInValueParameterList(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n        multiline: Boolean,\n        dryRun: Boolean,\n    ): Int {\n        var whiteSpaceCorrection = 0\n\n        val valueParameterList = requireNotNull(node.findChildByType(VALUE_PARAMETER_LIST))\n        val firstParameterInList =\n            valueParameterList\n                .children()\n                .first { it.elementType == VALUE_PARAMETER }\n\n        valueParameterList\n            .children()\n            .filter { it.elementType == VALUE_PARAMETER }\n            .filter { it != firstParameterInList }\n            .forEach { valueParameter ->\n                val firstChildNodeInValueParameter = valueParameter.firstChildNode\n                firstChildNodeInValueParameter\n                    ?.prevLeaf()\n                    ?.takeIf { it.elementType == WHITE_SPACE }\n                    .let { whiteSpaceBeforeIdentifier ->\n                        if (multiline) {\n                            val expectedParameterIndent = node.indent().plus(indentConfig.indent)\n                            if (whiteSpaceBeforeIdentifier == null ||\n                                whiteSpaceBeforeIdentifier.text != expectedParameterIndent\n                            ) {\n                                if (!dryRun) {\n                                    emit(\n                                        valueParameter.startOffset,\n                                        \"Parameter should start on a newline\",\n                                        true,\n                                    )\n                                }\n                                if (autoCorrect && !dryRun) {\n                                    firstChildNodeInValueParameter.upsertWhitespaceBeforeMe(expectedParameterIndent)\n                                } else {\n                                    whiteSpaceCorrection += expectedParameterIndent.length - (whiteSpaceBeforeIdentifier?.textLength ?: 0)\n                                }\n                            }\n                        } else {\n                            if (whiteSpaceBeforeIdentifier == null || whiteSpaceBeforeIdentifier.text != \" \") {\n                                if (!dryRun) {\n                                    emit(\n                                        firstChildNodeInValueParameter!!.startOffset,\n                                        \"Single whitespace expected before parameter\",\n                                        true,\n                                    )\n                                }\n                                if (autoCorrect && !dryRun) {\n                                    firstChildNodeInValueParameter.upsertWhitespaceBeforeMe(\" \")\n                                } else {\n                                    whiteSpaceCorrection += 1 - (whiteSpaceBeforeIdentifier?.textLength ?: 0)\n                                }\n                            }\n                        }\n                    }\n            }\n\n        return whiteSpaceCorrection\n    }\n\n    private fun fixWhiteSpaceBeforeClosingParenthesis(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n        multiline: Boolean,\n        dryRun: Boolean,\n    ): Int {\n        var whiteSpaceCorrection = 0\n\n        val newlineAndIndent = node.indent()\n        val valueParameterList = requireNotNull(node.findChildByType(VALUE_PARAMETER_LIST))\n\n        val closingParenthesis = valueParameterList.findChildByType(RPAR)\n        closingParenthesis\n            ?.prevSibling()\n            ?.takeIf { it.elementType == WHITE_SPACE }\n            .let { whiteSpaceBeforeClosingParenthesis ->\n                if (multiline) {\n                    if (whiteSpaceBeforeClosingParenthesis == null ||\n                        whiteSpaceBeforeClosingParenthesis.text != newlineAndIndent\n                    ) {\n                        if (!dryRun) {\n                            emit(\n                                closingParenthesis!!.startOffset,\n                                \"Newline expected before closing parenthesis\",\n                                true,\n                            )\n                        }\n                        if (autoCorrect && !dryRun) {\n                            closingParenthesis!!.upsertWhitespaceBeforeMe(newlineAndIndent)\n                        } else {\n                            whiteSpaceCorrection += newlineAndIndent.length - (whiteSpaceBeforeClosingParenthesis?.textLength ?: 0)\n                        }\n                    }\n                } else {\n                    if (whiteSpaceBeforeClosingParenthesis != null &&\n                        whiteSpaceBeforeClosingParenthesis.nextLeaf()?.elementType == RPAR\n                    ) {\n                        if (!dryRun) {\n                            emit(\n                                whiteSpaceBeforeClosingParenthesis.startOffset,\n                                \"No whitespace expected between last parameter and closing parenthesis\",\n                                true,\n                            )\n                        }\n                        if (autoCorrect && !dryRun) {\n                            whiteSpaceBeforeClosingParenthesis.treeParent.removeChild(whiteSpaceBeforeClosingParenthesis)\n                        } else {\n                            whiteSpaceCorrection -= whiteSpaceBeforeClosingParenthesis.textLength\n                        }\n                    }\n                }\n            }\n        return whiteSpaceCorrection\n    }\n\n    private fun fixFunctionBody(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n        maxLengthRemainingForFirstLineOfBodyExpression: Int,\n    ) {\n        if (node.findChildByType(EQ) == null) {\n            fixFunctionBodyBlock(node, emit, autoCorrect)\n        } else {\n            fixFunctionBodyExpression(node, emit, autoCorrect, maxLengthRemainingForFirstLineOfBodyExpression)\n        }\n    }\n\n    private fun fixFunctionBodyExpression(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n        maxLengthRemainingForFirstLineOfBodyExpression: Int,\n    ) {\n        val lastNodeOfFunctionSignatureWithBodyExpression =\n            node\n                .findChildByType(EQ)\n                ?.nextLeaf(includeEmpty = true)\n                ?: return\n        val bodyNodes = node.getFunctionBody(lastNodeOfFunctionSignatureWithBodyExpression)\n        val whiteSpaceBeforeFunctionBodyExpression = bodyNodes.getStartingWhitespaceOrNull()\n        val functionBodyExpressionNodes = bodyNodes.dropWhile { it.isWhiteSpace() }\n\n        val functionBodyExpressionLines =\n            functionBodyExpressionNodes\n                .joinTextToString()\n                .split(\"\\n\")\n        functionBodyExpressionLines\n            .firstOrNull()\n            ?.also { firstLineOfBodyExpression ->\n                if (whiteSpaceBeforeFunctionBodyExpression.isWhiteSpaceWithNewline()) {\n                    val mergeWithFunctionSignature =\n                        when {\n                            firstLineOfBodyExpression.length >= maxLengthRemainingForFirstLineOfBodyExpression -> false\n                            node.bodyExpressionIsAnnotated() -> false\n                            else ->\n                                functionBodyExpressionWrapping == default ||\n                                    (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||\n                                    node.isMultilineFunctionSignatureWithoutExplicitReturnType(\n                                        lastNodeOfFunctionSignatureWithBodyExpression,\n                                    )\n                        }\n                    if (mergeWithFunctionSignature) {\n                        emit(\n                            whiteSpaceBeforeFunctionBodyExpression!!.startOffset,\n                            \"First line of body expression fits on same line as function signature\",\n                            true,\n                        )\n                        if (autoCorrect) {\n                            (whiteSpaceBeforeFunctionBodyExpression as LeafPsiElement).rawReplaceWithText(\" \")\n                        }\n                    }\n                } else if (whiteSpaceBeforeFunctionBodyExpression == null ||\n                    !whiteSpaceBeforeFunctionBodyExpression.textContains('\\n')\n                ) {\n                    if (node.isMultilineFunctionSignatureWithoutExplicitReturnType(lastNodeOfFunctionSignatureWithBodyExpression) &&\n                        firstLineOfBodyExpression.length + 1 <= maxLengthRemainingForFirstLineOfBodyExpression\n                    ) {\n                        if (whiteSpaceBeforeFunctionBodyExpression == null ||\n                            whiteSpaceBeforeFunctionBodyExpression.text != \" \"\n                        ) {\n                            emit(\n                                functionBodyExpressionNodes.first().startOffset,\n                                \"Single whitespace expected before expression body\",\n                                true,\n                            )\n                            if (autoCorrect) {\n                                functionBodyExpressionNodes\n                                    .first()\n                                    .upsertWhitespaceBeforeMe(\" \")\n                            }\n                        }\n                    } else if (firstLineOfBodyExpression.length + 1 > maxLengthRemainingForFirstLineOfBodyExpression ||\n                        (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size > 1) ||\n                        functionBodyExpressionWrapping == always\n                    ) {\n                        emit(\n                            functionBodyExpressionNodes.first().startOffset,\n                            \"Newline expected before expression body\",\n                            true,\n                        )\n                        if (autoCorrect) {\n                            functionBodyExpressionNodes\n                                .first()\n                                .upsertWhitespaceBeforeMe(node.indent().plus(indentConfig.indent))\n                        }\n                    }\n                }\n            }\n    }\n\n    private fun ASTNode.bodyExpressionIsAnnotated(): Boolean =\n        findChildByType(EQ)\n            ?.nextCodeSibling()\n            ?.let { it.elementType == ANNOTATED_EXPRESSION }\n            ?: false\n\n    private fun ASTNode.isMultilineFunctionSignatureWithoutExplicitReturnType(lastNodeOfFunctionSignatureWithBodyExpression: ASTNode?) =\n        functionSignatureNodes()\n            .childrenBetween(\n                startASTNodePredicate = { true },\n                endASTNodePredicate = { it == lastNodeOfFunctionSignatureWithBodyExpression },\n            ).joinToString(separator = \"\") { it.text }\n            .split(\"\\n\")\n            .lastOrNull()\n            ?.matches(INDENT_WITH_CLOSING_PARENTHESIS)\n            ?: false\n\n    private fun fixFunctionBodyBlock(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        val lastNodeOfFunctionSignatureWithBlockBody =\n            node\n                .getLastNodeOfFunctionSignatureWithBlockBody()\n                ?.nextLeaf(includeEmpty = true)\n                ?: return\n\n        val bodyNodes = node.getFunctionBody(lastNodeOfFunctionSignatureWithBlockBody)\n        val whiteSpaceBeforeFunctionBodyExpression = bodyNodes.getStartingWhitespaceOrNull()\n        val functionBodyBlock = bodyNodes.dropWhile { it.isWhiteSpace() }\n\n        functionBodyBlock\n            .joinTextToString()\n            .split(\"\\n\")\n            .firstOrNull()\n            ?.also {\n                if (whiteSpaceBeforeFunctionBodyExpression?.text != \" \") {\n                    emit(functionBodyBlock.first().startOffset, \"Expected a single space before body block\", true)\n                    if (autoCorrect) {\n                        functionBodyBlock\n                            .first()\n                            .prevLeaf(true)\n                            ?.upsertWhitespaceAfterMe(\" \")\n                    }\n                }\n            }\n    }\n\n    private fun ASTNode.getFunctionBody(splitNode: ASTNode?): List<ASTNode> =\n        this\n            .collectLeavesRecursively()\n            .childrenBetween(\n                startASTNodePredicate = { it == splitNode },\n                endASTNodePredicate = {\n                    // collect all remaining nodes\n                    false\n                },\n            )\n\n    private fun List<ASTNode>.getStartingWhitespaceOrNull() =\n        this\n            .firstOrNull()\n            ?.takeIf { first -> first.isWhiteSpace() }\n\n    private fun isMaxLineLengthSet() = maxLineLength != MAX_LINE_LENGTH_PROPERTY_OFF\n\n    private fun List<ASTNode>.collectLeavesRecursively(): List<ASTNode> = flatMap { it.collectLeavesRecursively() }\n\n    private fun ASTNode.collectLeavesRecursively(): List<ASTNode> =\n        if (psi is LeafElement) {\n            listOf(this)\n        } else {\n            children()\n                .flatMap { it.collectLeavesRecursively() }\n                .toList()\n        }\n\n    private fun List<ASTNode>.childrenBetween(\n        startASTNodePredicate: (ASTNode) -> Boolean = { _ -> true },\n        endASTNodePredicate: (ASTNode) -> Boolean = { _ -> false },\n    ): List<ASTNode> {\n        val iterator = iterator()\n        var currentNode: ASTNode\n        val childrenBetween: MutableList<ASTNode> = mutableListOf()\n\n        while (iterator.hasNext()) {\n            currentNode = iterator.next()\n            if (startASTNodePredicate(currentNode)) {\n                childrenBetween.add(currentNode)\n                break\n            }\n        }\n\n        while (iterator.hasNext()) {\n            currentNode = iterator.next()\n            childrenBetween.add(currentNode)\n            if (endASTNodePredicate(currentNode)) {\n                break\n            }\n        }\n\n        return childrenBetween\n    }\n\n    private fun List<ASTNode>.joinTextToString(block: (ASTNode) -> String = { it.text }): String =\n        collectLeavesRecursively().joinToString(separator = \"\") { block(it) }\n\n    private fun ASTNode.hasMinimumNumberOfParameters(): Boolean = countParameters() >= functionSignatureWrappingMinimumParameters\n\n    private fun ASTNode.countParameters(): Int {\n        val valueParameterList = requireNotNull(findChildByType(VALUE_PARAMETER_LIST))\n        return valueParameterList\n            .children()\n            .count { it.elementType == VALUE_PARAMETER }\n    }\n\n    private fun ASTNode.getLastNodeOfFunctionSignatureWithBlockBody(): ASTNode? =\n        this\n            .findChildByType(BLOCK)\n            ?.firstChildNode\n            ?.prevCodeLeaf()\n\n    public companion object {\n        private const val FORCE_MULTILINE_WHEN_PARAMETER_COUNT_GREATER_OR_EQUAL_THAN_PROPERTY_UNSET = Int.MAX_VALUE\n        public val FORCE_MULTILINE_WHEN_PARAMETER_COUNT_GREATER_OR_EQUAL_THAN_PROPERTY: EditorConfigProperty<Int> =\n            EditorConfigProperty(\n                type =\n                    PropertyType.LowerCasingPropertyType(\n                        \"ktlint_function_signature_rule_force_multiline_when_parameter_count_greater_or_equal_than\",\n                        \"Force wrapping the parameters of the function signature in case it contains at least the specified \" +\n                            \"number of parameters even in case the entire function signature would fit on a single line. \" +\n                            \"By default this parameter is not enabled.\",\n                        PropertyType.PropertyValueParser.POSITIVE_INT_VALUE_PARSER,\n                        setOf(\"1\", \"2\", \"3\", \"4\", \"5\", \"6\", \"7\", \"8\", \"9\", \"unset\"),\n                    ),\n                defaultValue = FORCE_MULTILINE_WHEN_PARAMETER_COUNT_GREATER_OR_EQUAL_THAN_PROPERTY_UNSET,\n                ktlintOfficialCodeStyleDefaultValue = 2,\n                propertyMapper = { property, _ ->\n                    if (property?.isUnset == true) {\n                        FORCE_MULTILINE_WHEN_PARAMETER_COUNT_GREATER_OR_EQUAL_THAN_PROPERTY_UNSET\n                    } else {\n                        property?.getValueAs<Int>()\n                    }\n                },\n                propertyWriter = { property ->\n                    if (property == FORCE_MULTILINE_WHEN_PARAMETER_COUNT_GREATER_OR_EQUAL_THAN_PROPERTY_UNSET) {\n                        \"unset\"\n                    } else {\n                        property.toString()\n                    }\n                },\n            )\n\n        public val FUNCTION_BODY_EXPRESSION_WRAPPING_PROPERTY: EditorConfigProperty<FunctionBodyExpressionWrapping> =\n            EditorConfigProperty(\n                type =\n                    PropertyType.LowerCasingPropertyType(\n                        \"ktlint_function_signature_body_expression_wrapping\",\n                        \"Determines how to wrap the body of function in case it is an expression. Use 'default' \" +\n                            \"to wrap the body expression only when the first line of the expression does not fit on the same \" +\n                            \"line as the function signature. Use 'multiline' to force wrapping of body expressions that \" +\n                            \"consists of multiple line. Use 'always' to force wrapping of body expression always.\",\n                        EnumValueParser(FunctionBodyExpressionWrapping::class.java),\n                        FunctionBodyExpressionWrapping.values().map { it.name }.toSet(),\n                    ),\n                defaultValue = default,\n                ktlintOfficialCodeStyleDefaultValue = multiline,\n            )\n\n        private val INDENT_WITH_CLOSING_PARENTHESIS = Regex(\"\\\\s*\\\\) =\")\n    }\n\n    /**\n     * Code style to be used while linting and formatting. Note that the [EnumValueParser] requires values to be lowercase.\n     */\n    @Suppress(\"EnumEntryName\")\n    public enum class FunctionBodyExpressionWrapping {\n        /**\n         * Keep the first line of the body expression on the same line as the function signature if max line length is\n         * not exceeded.\n         */\n        default,\n\n        /**\n         * Force the body expression to start on a separate line in case it is a multiline expression. A single line\n         * body expression is wrapped only when it does not fit on the same line as the function signature.\n         */\n        multiline,\n\n        /**\n         * Always force the body expression to start on a separate line.\n         */\n        always,\n    }\n}\n\npublic val FUNCTION_SIGNATURE_RULE_ID: RuleId = FunctionSignatureRule().ruleId\n```\n[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 1114,
+            "endIndex": 2217,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 2189,
+            "endIndex": 3064,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 2910,
+            "endIndex": 3508,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 4226,
+            "endIndex": 4376,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 5068,
+            "endIndex": 5682,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 6863,
+            "endIndex": 7196,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 10907,
+            "endIndex": 11582,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 15180,
+            "endIndex": 16213,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 16704,
+            "endIndex": 17405,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 17251,
+            "endIndex": 17849,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 19032,
+            "endIndex": 19199,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19085,
+            "endIndex": 19288,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19302,
+            "endIndex": 19489,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19457,
+            "endIndex": 19631,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19514,
+            "endIndex": 19710,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19663,
+            "endIndex": 19833,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19739,
+            "endIndex": 19908,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 19859,
+            "endIndex": 20046,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 20934,
+            "endIndex": 21967,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 22458,
+            "endIndex": 23159,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 23005,
+            "endIndex": 23603,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 23933,
+            "endIndex": 24143,
+            "uri": "https://android.googlesource.com/platform/external/ktlint/+/refs/heads/upstream-master%5E%21/",
+            "license": ""
+          },
+          {
+            "startIndex": 24176,
+            "endIndex": 24346,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24304,
+            "endIndex": 24458,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24477,
+            "endIndex": 24608,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24646,
+            "endIndex": 24820,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 24792,
+            "endIndex": 25414,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 25711,
+            "endIndex": 26047,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 26473,
+            "endIndex": 26627,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 26875,
+            "endIndex": 27978,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 28214,
+            "endIndex": 28915,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 28761,
+            "endIndex": 29359,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 29889,
+            "endIndex": 30453,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 30777,
+            "endIndex": 31113,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32234,
+            "endIndex": 32382,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32449,
+            "endIndex": 32616,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32574,
+            "endIndex": 32727,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32745,
+            "endIndex": 32915,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32801,
+            "endIndex": 32988,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32956,
+            "endIndex": 33130,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33013,
+            "endIndex": 33209,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33162,
+            "endIndex": 33332,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33238,
+            "endIndex": 33407,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33358,
+            "endIndex": 33545,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33524,
+            "endIndex": 33710,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33680,
+            "endIndex": 33859,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33786,
+            "endIndex": 33969,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33914,
+            "endIndex": 34055,
+            "uri": "https://github.com/detekt/detekt/blob/main/detekt-formatting/src/main/kotlin/io/gitlab/arturbosch/detekt/formatting/FormattingRule.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 33996,
+            "endIndex": 34200,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 34089,
+            "endIndex": 34271,
+            "uri": "https://github.com/detekt/detekt/blob/main/detekt-formatting/src/main/kotlin/io/gitlab/arturbosch/detekt/formatting/FormattingRule.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 34247,
+            "endIndex": 34461,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 34447,
+            "endIndex": 34642,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 34592,
+            "endIndex": 34761,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 34783,
+            "endIndex": 35014,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 35030,
+            "endIndex": 35257,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 35243,
+            "endIndex": 35742,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 35691,
+            "endIndex": 35858,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 35923,
+            "endIndex": 36107,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 36135,
+            "endIndex": 36358,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 36221,
+            "endIndex": 36672,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 36636,
+            "endIndex": 37239,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 37118,
+            "endIndex": 37645,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 37490,
+            "endIndex": 37882,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 37816,
+            "endIndex": 40148,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 40148,
+            "endIndex": 40654,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 40650,
+            "endIndex": 41056,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40983,
+            "endIndex": 41985,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 41896,
+            "endIndex": 43945,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 43763,
+            "endIndex": 44883,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 44745,
+            "endIndex": 45584,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 45549,
+            "endIndex": 45764,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 45614,
+            "endIndex": 49263,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 49307,
+            "endIndex": 49819,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 49508,
+            "endIndex": 50094,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 49935,
+            "endIndex": 52123,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 52183,
+            "endIndex": 52784,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 52416,
+            "endIndex": 53066,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 52892,
+            "endIndex": 53739,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 53389,
+            "endIndex": 54158,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 53879,
+            "endIndex": 54478,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 54314,
+            "endIndex": 54647,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54580,
+            "endIndex": 54921,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54747,
+            "endIndex": 55468,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 55471,
+            "endIndex": 58320,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 58614,
+            "endIndex": 58947,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 59052,
+            "endIndex": 59264,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 59110,
+            "endIndex": 60501,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 60256,
+            "endIndex": 60849,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 60647,
+            "endIndex": 61222,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 61024,
+            "endIndex": 61480,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 61829,
+            "endIndex": 63187,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 63231,
+            "endIndex": 63440,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 63612,
+            "endIndex": 64155,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 63985,
+            "endIndex": 64363,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 64229,
+            "endIndex": 65679,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 65682,
+            "endIndex": 66212,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 66199,
+            "endIndex": 66541,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 66469,
+            "endIndex": 67229,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 66997,
+            "endIndex": 68298,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 68144,
+            "endIndex": 69029,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 68959,
+            "endIndex": 69281,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 69222,
+            "endIndex": 69374,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 69382,
+            "endIndex": 69803,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 69815,
+            "endIndex": 70093,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 70758,
+            "endIndex": 70925,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 70883,
+            "endIndex": 71036,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71054,
+            "endIndex": 71224,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71110,
+            "endIndex": 71297,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71265,
+            "endIndex": 71439,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71322,
+            "endIndex": 71518,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71471,
+            "endIndex": 71641,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71547,
+            "endIndex": 71716,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71667,
+            "endIndex": 71854,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71833,
+            "endIndex": 72019,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71989,
+            "endIndex": 72168,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 72095,
+            "endIndex": 72278,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 72223,
+            "endIndex": 72364,
+            "uri": "https://github.com/detekt/detekt/blob/main/detekt-formatting/src/main/kotlin/io/gitlab/arturbosch/detekt/formatting/FormattingRule.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 72305,
+            "endIndex": 72509,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 72398,
+            "endIndex": 72580,
+            "uri": "https://github.com/detekt/detekt/blob/main/detekt-formatting/src/main/kotlin/io/gitlab/arturbosch/detekt/formatting/FormattingRule.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 72556,
+            "endIndex": 72770,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 72756,
+            "endIndex": 72951,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 72901,
+            "endIndex": 73070,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 73092,
+            "endIndex": 73323,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 73339,
+            "endIndex": 73566,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 73552,
+            "endIndex": 74051,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 74000,
+            "endIndex": 74167,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 74232,
+            "endIndex": 74416,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 74444,
+            "endIndex": 74667,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 74530,
+            "endIndex": 74981,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 74945,
+            "endIndex": 75548,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 75427,
+            "endIndex": 75954,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 75799,
+            "endIndex": 76191,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 76125,
+            "endIndex": 78457,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 78457,
+            "endIndex": 78963,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 78959,
+            "endIndex": 79365,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 79292,
+            "endIndex": 80294,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 80205,
+            "endIndex": 82254,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 82072,
+            "endIndex": 83192,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 83054,
+            "endIndex": 83893,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 83858,
+            "endIndex": 84073,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 83923,
+            "endIndex": 87572,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 87616,
+            "endIndex": 88128,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 87817,
+            "endIndex": 88403,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 88244,
+            "endIndex": 90432,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 90492,
+            "endIndex": 91093,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 90725,
+            "endIndex": 91375,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 91201,
+            "endIndex": 92048,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 91698,
+            "endIndex": 92467,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 92188,
+            "endIndex": 92787,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 92623,
+            "endIndex": 92956,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 92889,
+            "endIndex": 93230,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 93056,
+            "endIndex": 93777,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 93780,
+            "endIndex": 96629,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 96923,
+            "endIndex": 97256,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 97361,
+            "endIndex": 97573,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 97419,
+            "endIndex": 98810,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 98565,
+            "endIndex": 99158,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 98956,
+            "endIndex": 99531,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 99333,
+            "endIndex": 99789,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 100138,
+            "endIndex": 101496,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 101540,
+            "endIndex": 101749,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 101921,
+            "endIndex": 102464,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 102294,
+            "endIndex": 102672,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 102538,
+            "endIndex": 103988,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 103991,
+            "endIndex": 104521,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 104508,
+            "endIndex": 104850,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 104778,
+            "endIndex": 105538,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 105306,
+            "endIndex": 106607,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 106453,
+            "endIndex": 107338,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 107268,
+            "endIndex": 107590,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 107531,
+            "endIndex": 107683,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 107691,
+            "endIndex": 108112,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 108124,
+            "endIndex": 108403,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 53538,
+    "candidatesTokenCount": 8249,
+    "totalTokenCount": 77298,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 53538
+      }
+    ],
+    "thoughtsTokenCount": 15511
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "qotDaLTFNrDN1MkP-YusmAM"
+}

@@ -1,0 +1,1716 @@
+[start of core/common/src/format/DateTimeFormat.kt]
+/*
+ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime.format
+
+import kotlinx.datetime.*
+import kotlinx.datetime.internal.format.*
+import kotlinx.datetime.internal.format.parser.*
+
+/**
+ * A format for parsing and formatting date-time-related values.
+ */
+public sealed interface DateTimeFormat<T> {
+    /**
+     * Formats the given [value] into a string, using this format.
+     */
+    public fun format(value: T): String
+
+    /**
+     * Formats the given [value] into the given [appendable] using this format.
+     */
+    public fun <A : Appendable> formatTo(appendable: A, value: T): A
+
+    /**
+     * Parses the given [input] string as [T] using this format.
+     *
+     * @throws IllegalArgumentException if the input string is not in the expected format or the value is invalid.
+     */
+    public fun parse(input: CharSequence): T
+
+    /**
+     * Parses the given [input] string as [T] using this format.
+     *
+     * @return the parsed value, or `null` if the input string is not in the expected format or the value is invalid.
+     */
+    public fun parseOrNull(input: CharSequence): T?
+
+    public companion object {
+        /**
+         * Produces Kotlin code that, when pasted into a Kotlin source file, creates a [DateTimeFormat] instance that
+         * behaves identically to [format].
+         *
+         * The typical use case for this is to create a [DateTimeFormat] instance using a non-idiomatic approach and
+         * then convert it to a builder DSL.
+         */
+        public fun formatAsKotlinBuilderDsl(format: DateTimeFormat<*>): String = when (format) {
+            is AbstractDateTimeFormat<*, *> -> format.actualFormat.builderString(allFormatConstants)
+        }
+    }
+}
+
+/**
+ * The style of padding to use when formatting a value.
+ */
+public enum class Padding {
+    /**
+     * No padding.
+     */
+    NONE,
+
+    /**
+     * Pad with zeros.
+     */
+    ZERO,
+
+    /**
+     * Pad with spaces.
+     */
+    SPACE
+}
+
+internal fun Padding.toKotlinCode(): String = when (this) {
+    Padding.NONE -> "Padding.NONE"
+    Padding.ZERO -> "Padding.ZERO"
+    Padding.SPACE -> "Padding.SPACE"
+}
+
+internal inline fun Padding.minDigits(width: Int) = if (this == Padding.ZERO) width else 1
+internal inline fun Padding.spaces(width: Int) = if (this == Padding.SPACE) width else null
+
+/** [T] is the user-visible type, whereas [U] is its mutable representation for parsing and formatting. */
+internal sealed class AbstractDateTimeFormat<T, U : Copyable<U>> : DateTimeFormat<T> {
+
+    abstract val actualFormat: CachedFormatStructure<U>
+
+    abstract fun intermediateFromValue(value: T): U
+
+    abstract fun valueFromIntermediate(intermediate: U): T
+
+    abstract val emptyIntermediate: U // should be part of the `Copyable` interface once the language allows this
+
+    open fun valueFromIntermediateOrNull(intermediate: U): T? = try {
+        valueFromIntermediate(intermediate)
+    } catch (e: IllegalArgumentException) {
+        null
+    }
+
+    override fun format(value: T): String = StringBuilder().also {
+        actualFormat.formatter().format(intermediateFromValue(value), it)
+    }.toString()
+
+    override fun <A : Appendable> formatTo(appendable: A, value: T): A = appendable.apply {
+        actualFormat.formatter().format(intermediateFromValue(value), this)
+    }
+
+    override fun parse(input: CharSequence): T {
+        val matched = try {
+            // without the fully qualified name, the compilation fails for some reason
+            Parser(actualFormat.parser()).match(input, emptyIntermediate)
+        } catch (e: ParseException) {
+            throw DateTimeFormatException("Failed to parse '$input': ${e.message}", e)
+        }
+        try {
+            return valueFromIntermediate(matched)
+        } catch (e: IllegalArgumentException) {
+            throw DateTimeFormatException("Failed to parse '$input': ${e.message}")
+        }
+    }
+
+    override fun parseOrNull(input: CharSequence): T? =
+        // without the fully qualified name, the compilation fails for some reason
+        Parser(actualFormat.parser()).matchOrNull(input, emptyIntermediate)?.let { valueFromIntermediateOrNull(it) }
+
+}
+
+private val allFormatConstants: List<Pair<String, CachedFormatStructure<*>>> by lazy {
+    fun unwrap(format: DateTimeFormat<*>): CachedFormatStructure<*> = (format as AbstractDateTimeFormat<*, *>).actualFormat
+    // the formats are ordered vaguely by decreasing length, as the topmost among suitable ones is chosen.
+    listOf(
+        "${DateTimeFormatBuilder.WithDateTimeComponents::dateTimeComponents.name}(DateTimeComponents.Formats.RFC_1123)" to
+            unwrap(DateTimeComponents.Formats.RFC_1123),
+        "${DateTimeFormatBuilder.WithDateTimeComponents::dateTimeComponents.name}(DateTimeComponents.Formats.ISO_DATE_TIME_OFFSET)" to
+            unwrap(DateTimeComponents.Formats.ISO_DATE_TIME_OFFSET),
+        "${DateTimeFormatBuilder.WithDateTime::date.name}(LocalDateTime.Formats.ISO)" to unwrap(LocalDateTime.Formats.ISO),
+        "${DateTimeFormatBuilder.WithDate::date.name}(LocalDate.Formats.ISO)" to unwrap(LocalDate.Formats.ISO),
+        "${DateTimeFormatBuilder.WithDate::date.name}(LocalDate.Formats.ISO_BASIC)" to unwrap(LocalDate.Formats.ISO_BASIC),
+        "${DateTimeFormatBuilder.WithTime::time.name}(LocalTime.Formats.ISO)" to unwrap(LocalTime.Formats.ISO),
+        "${DateTimeFormatBuilder.WithUtcOffset::offset.name}(UtcOffset.Formats.ISO)" to unwrap(UtcOffset.Formats.ISO),
+        "${DateTimeFormatBuilder.WithUtcOffset::offset.name}(UtcOffset.Formats.ISO_BASIC)" to unwrap(UtcOffset.Formats.ISO_BASIC),
+        "${DateTimeFormatBuilder.WithUtcOffset::offset.name}(UtcOffset.Formats.FOUR_DIGITS)" to unwrap(UtcOffset.Formats.FOUR_DIGITS),
+    )
+}
+[end of core/common/src/format/DateTimeFormat.kt]
+[start of core/common/src/internal/format/parser/ParserOperation.kt]
+/*
+ * Copyright 2023 JetBrains s.r.o. and contributors.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime.internal.format.parser
+
+internal interface ParserOperation<in Output> {
+    fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult
+}
+
+/**
+ * Consumes exactly the string [string].
+ */
+internal class PlainStringParserOperation<Output>(val string: String) : ParserOperation<Output> {
+    init {
+        require(string.isNotEmpty()) { "Empty string is not allowed" }
+        require(!string[0].isDigit()) { "String '$string' starts with a digit" }
+        require(!string[string.length - 1].isDigit()) { "String '$string' ends with a digit" }
+    }
+
+    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {
+        if (startIndex + string.length > input.length)
+            return ParseResult.Error(startIndex) { "Unexpected end of input: yet to parse '$string'" }
+        for (i in string.indices) {
+            if (input[startIndex + i] != string[i]) return ParseResult.Error(startIndex) {
+                "Expected $string but got ${input.substring(startIndex, startIndex + i + 1)}"
+            }
+        }
+        return ParseResult.Ok(startIndex + string.length)
+    }
+
+    // TODO: properly escape
+    override fun toString(): String = "'$string'"
+}
+
+/**
+ * Greedily consumes as many digits as possible and redistributes them among [consumers].
+ *
+ * At most one consumer is allowed to have a variable length.
+ * If more digits are supplied than the sum of lengths of all consumers, this is the consumer that will receive the
+ * extra.
+ */
+internal class NumberSpanParserOperation<Output>(
+    val consumers: List<NumberConsumer<Output>>,
+) : ParserOperation<Output> {
+
+    private val minLength = consumers.sumOf { it.length ?: 1 }
+    private val isFlexible = consumers.any { it.length == null }
+
+    init {
+        require(consumers.all { (it.length ?: Int.MAX_VALUE) > 0 })
+        require(consumers.count { it.length == null } <= 1)
+    }
+
+    private val whatThisExpects: String
+        get() {
+            val consumerLengths = consumers.map {
+                when (val length = it.length) {
+                    null -> "at least one digit"
+                    else -> "$length digits"
+                } + " for ${it.whatThisExpects}"
+            }
+            return if (isFlexible) {
+                "a number with at least $minLength digits: $consumerLengths"
+            } else {
+                "a number with exactly $minLength digits: $consumerLengths"
+            }
+        }
+
+    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {
+        if (startIndex + minLength > input.length)
+            return ParseResult.Error(startIndex) { "Unexpected end of input: yet to parse $whatThisExpects" }
+        var digitsInRow = 0
+        while (startIndex + digitsInRow < input.length && input[startIndex + digitsInRow].isDigit()) {
+            ++digitsInRow
+        }
+        if (digitsInRow < minLength)
+            return ParseResult.Error(startIndex) {
+                "Only found $digitsInRow digits in a row, but need to parse $whatThisExpects"
+            }
+        var index = startIndex
+        for (i in consumers.indices) {
+            val length = consumers[i].length ?: (digitsInRow - minLength + 1)
+            val numberString = input.substring(index, index + length)
+            val error = consumers[i].consume(storage, numberString)
+            if (error != null) {
+                return ParseResult.Error(index) {
+                    "Can not interpret the string '$numberString' as ${consumers[i].whatThisExpects}: ${error.errorMessage()}"
+                }
+            }
+            index += length
+        }
+        return ParseResult.Ok(index)
+    }
+
+    override fun toString(): String = whatThisExpects
+}
+
+internal class SignParser<Output>(
+    private val isNegativeSetter: (Output, Boolean) -> Unit,
+    private val withPlusSign: Boolean,
+    private val whatThisExpects: String,
+) : ParserOperation<Output> {
+    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {
+        if (startIndex >= input.length)
+            return ParseResult.Ok(startIndex)
+        val char = input[startIndex]
+        if (char == '-') {
+            isNegativeSetter(storage, true)
+            return ParseResult.Ok(startIndex + 1)
+        }
+        if (char == '+' && withPlusSign) {
+            isNegativeSetter(storage, false)
+            return ParseResult.Ok(startIndex + 1)
+        }
+        return ParseResult.Error(startIndex) { "Expected $whatThisExpects but got $char" }
+    }
+
+    override fun toString(): String = whatThisExpects
+}
+
+/**
+ * Consumes an empty string and unconditionally modifies the accumulator.
+ */
+internal class UnconditionalModification<Output>(
+    private val operation: (Output) -> Unit
+) : ParserOperation<Output> {
+    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {
+        operation(storage)
+        return ParseResult.Ok(startIndex)
+    }
+}
+
+/**
+ * Matches the longest suitable string from `strings` and calls [consume] with the matched string.
+ */
+internal class StringSetParserOperation<Output>(
+    strings: Collection<String>,
+    private val setter: AssignableField<Output, String>,
+    private val whatThisExpects: String,
+) : ParserOperation<Output> {
+
+    // TODO: tries don't have good performance characteristics for small sets, add a special case for small sets
+
+    private class TrieNode(
+        val children: MutableList<Pair<String, TrieNode>> = mutableListOf(),
+        var isTerminal: Boolean = false
+    )
+
+    private val trie = TrieNode()
+
+    init {
+        for (string in strings) {
+            var node = trie
+            for (char in string) {
+                val searchResult = node.children.binarySearchBy(char.toString()) { it.first }
+                node = if (searchResult < 0) {
+                    TrieNode().also { node.children.add(-searchResult - 1, char.toString() to it) }
+                } else {
+                    node.children[searchResult].second
+                }
+            }
+            node.isTerminal = true
+        }
+        fun reduceTrie(trie: TrieNode) {
+            for ((_, child) in trie.children) {
+                reduceTrie(child)
+            }
+            val newChildren = mutableListOf<Pair<String, TrieNode>>()
+            for ((key, child) in trie.children) {
+                if (!child.isTerminal && child.children.size == 1) {
+                    val (grandChildKey, grandChild) = child.children.single()
+                    newChildren.add(key + grandChildKey to grandChild)
+                } else {
+                    newChildren.add(key to child)
+                }
+            }
+            trie.children.clear()
+            trie.children.addAll(newChildren.sortedBy { it.first })
+        }
+        reduceTrie(trie)
+    }
+
+    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {
+        var node = trie
+        var index = startIndex
+        var lastMatch: Int? = null
+        loop@ while (index <= input.length) {
+            if (node.isTerminal) lastMatch = index
+            for ((key, child) in node.children) {
+                if (input.startsWith(key, index)) {
+                    node = child
+                    index += key.length
+                    continue@loop
+                }
+            }
+            break // nothing found
+        }
+        return if (lastMatch != null) {
+            setter.setWithoutReassigning(storage, input.substring(startIndex, lastMatch), startIndex, lastMatch)
+        } else {
+            ParseResult.Error(startIndex) { "Expected one of $whatThisExpects but got ${input.substring(startIndex, index)}" }
+        }
+    }
+}
+
+internal fun <Output> SignedIntParser(
+    minDigits: Int?,
+    maxDigits: Int?,
+    spacePadding: Int?,
+    setter: AssignableField<Output, Int>,
+    name: String,
+    plusOnExceedsWidth: Int?,
+): ParserStructure<Output> {
+    val parsers = mutableListOf(
+        spaceAndZeroPaddedUnsignedInt(minDigits, maxDigits, spacePadding, setter, name, withMinus = true)
+    )
+    if (plusOnExceedsWidth != null) {
+        parsers.add(
+            spaceAndZeroPaddedUnsignedInt(minDigits, plusOnExceedsWidth, spacePadding, setter, name)
+        )
+        parsers.add(
+            ParserStructure(
+                listOf(
+                    PlainStringParserOperation("+"),
+                    NumberSpanParserOperation(
+                        listOf(
+                            UnsignedIntConsumer(
+                                plusOnExceedsWidth + 1,
+                                maxDigits,
+                                setter,
+                                name,
+                                multiplyByMinus1 = false
+                            )
+                        )
+                    )
+                ),
+                emptyList()
+            )
+        )
+    } else {
+        parsers.add(
+            spaceAndZeroPaddedUnsignedInt(minDigits, maxDigits, spacePadding, setter, name)
+        )
+    }
+    return ParserStructure(
+        emptyList(),
+        parsers,
+    )
+}
+
+// With maxWidth = 4,
+// padWidth = 7: "   " + (four digits | " " (three digits | " " (two digits | " ", one digit)))
+// padWidth = 3: three to four digits | " " (two digits | " ", one digit)
+internal fun <Target> spaceAndZeroPaddedUnsignedInt(
+    minDigits: Int?,
+    maxDigits: Int?,
+    spacePadding: Int?,
+    setter: AssignableField<Target, Int>,
+    name: String,
+    withMinus: Boolean = false,
+): ParserStructure<Target> {
+    val minNumberLength = (minDigits ?: 1) + if (withMinus) 1 else 0
+    val maxNumberLength = maxDigits?.let { if (withMinus) it + 1 else it } ?: Int.MAX_VALUE
+    val spacePadding = spacePadding ?: 0
+    fun numberOfRequiredLengths(minNumberLength: Int, maxNumberLength: Int): ParserStructure<Target> {
+        check(maxNumberLength >= 1 + if (withMinus) 1 else 0)
+        return ParserStructure(
+            buildList {
+                if (withMinus) add(PlainStringParserOperation("-"))
+                add(
+                    NumberSpanParserOperation(
+                        listOf(
+                            UnsignedIntConsumer(
+                                minNumberLength - if (withMinus) 1 else 0,
+                                maxNumberLength - if (withMinus) 1 else 0,
+                                setter,
+                                name,
+                                multiplyByMinus1 = withMinus,
+                            )
+                        )
+                    )
+                )
+            },
+            emptyList()
+        )
+    }
+
+    val maxPaddedNumberLength = minOf(maxNumberLength, spacePadding)
+    if (minNumberLength >= maxPaddedNumberLength) return numberOfRequiredLengths(minNumberLength, maxNumberLength)
+    // invariant: the length of the string parsed by 'accumulated' is exactly 'accumulatedWidth'
+    var accumulated: ParserStructure<Target> = numberOfRequiredLengths(minNumberLength, minNumberLength)
+    for (accumulatedWidth in minNumberLength until maxPaddedNumberLength) {
+        accumulated = ParserStructure(
+            emptyList(),
+            listOf(
+                numberOfRequiredLengths(accumulatedWidth + 1, accumulatedWidth + 1),
+                listOf(
+                    ParserStructure(listOf(PlainStringParserOperation(" ")), emptyList()),
+                    accumulated
+                ).concat()
+            )
+        )
+    }
+    // accumulatedWidth == maxNumberLength || accumulatedWidth == spacePadding.
+    // In the first case, we're done, in the second case, we need to add the remaining numeric lengths.
+    return if (spacePadding > maxNumberLength) {
+        val prepadding = PlainStringParserOperation<Target>(" ".repeat(spacePadding - maxNumberLength))
+        listOf(
+            ParserStructure(
+                listOf(
+                    prepadding,
+                ),
+                emptyList()
+            ), accumulated
+        ).concat()
+    } else if (spacePadding == maxNumberLength) {
+        accumulated
+    } else {
+        val r = ParserStructure(
+            emptyList(),
+            listOf(
+                numberOfRequiredLengths(spacePadding + 1, maxNumberLength),
+                accumulated
+            )
+        )
+        r
+    }
+}
+
+internal fun <Output> ReducedIntParser(
+    digits: Int,
+    base: Int,
+    setter: AssignableField<Output, Int>,
+    name: String,
+): ParserStructure<Output> = ParserStructure(
+    emptyList(),
+    listOf(
+        ParserStructure(
+            listOf(
+                NumberSpanParserOperation(
+                    listOf(
+                        ReducedIntConsumer(
+                            digits,
+                            setter,
+                            name,
+                            base = base
+                        )
+                    )
+                )
+            ),
+            emptyList()
+        ),
+        ParserStructure(
+            listOf(
+                PlainStringParserOperation("+"),
+                NumberSpanParserOperation(
+                    listOf(
+                        UnsignedIntConsumer(
+                            null,
+                            null,
+                            setter,
+                            name,
+                            multiplyByMinus1 = false
+                        )
+                    )
+                )
+            ),
+            emptyList()
+        ),
+        ParserStructure(
+            listOf(
+                PlainStringParserOperation("-"),
+                NumberSpanParserOperation(
+                    listOf(
+                        UnsignedIntConsumer(
+                            null,
+                            null,
+                            setter,
+                            name,
+                            multiplyByMinus1 = true
+                        )
+                    )
+                )
+            ),
+            emptyList()
+        ),
+    )
+)
+
+internal interface AssignableField<in Object, Type> {
+    /**
+     * If the field is not set, sets it to the given value.
+     * If the field is set to the given value, does nothing.
+     * If the field is set to a different value, throws [IllegalArgumentException].
+     *
+     * This function is used to ensure internal consistency during parsing.
+     * There exist formats where the same data is repeated several times in the same object, for example,
+     * "14:15 (02:15 PM)". In such cases, we want to ensure that the values are consistent.
+     */
+    fun trySetWithoutReassigning(container: Object, newValue: Type): Type?
+
+    /**
+     * The name of the field.
+     */
+    val name: String
+}
+
+private fun <Object, Type> AssignableField<Object, Type>.setWithoutReassigning(
+    receiver: Object,
+    value: Type,
+    position: Int,
+    nextIndex: Int
+): ParseResult {
+    val conflictingValue = trySetWithoutReassigning(receiver, value)
+    return if (conflictingValue === null) {
+        ParseResult.Ok(nextIndex)
+    } else {
+        ParseResult.Error(position) {
+            "Attempting to assign conflicting values '$conflictingValue' and '$value' to field '$name'"
+        }
+    }
+}
+[end of core/common/src/internal/format/parser/ParserOperation.kt]
+[start of core/common/src/LocalDate.kt]
+/*
+ * Copyright 2019-2022 JetBrains s.r.o. and contributors.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime
+
+import kotlinx.datetime.format.*
+import kotlinx.datetime.serializers.LocalDateIso8601Serializer
+import kotlinx.serialization.Serializable
+
+/**
+ * The date part of [LocalDateTime].
+ *
+ * This class represents dates without a reference to a particular time zone.
+ * As such, these objects may denote different spans of time in different time zones: for someone in Berlin,
+ * `2020-08-30` started and ended at different moments from those for someone in Tokyo.
+ *
+ * The arithmetic on [LocalDate] values is defined independently of the time zone (so `2020-08-30` plus one day
+ * is `2020-08-31` everywhere): see various [LocalDate.plus] and [LocalDate.minus] functions, as well
+ * as [LocalDate.periodUntil] and various other [*until][LocalDate.daysUntil] functions.
+ */
+@Serializable(with = LocalDateIso8601Serializer::class)
+public expect class LocalDate : Comparable<LocalDate> {
+    public companion object {
+        /**
+         * A shortcut for calling [DateTimeFormat.parse].
+         *
+         * Parses a string that represents a date and returns the parsed [LocalDate] value.
+         *
+         * If [format] is not specified, [Formats.ISO] is used.
+         *
+         * @throws IllegalArgumentException if the text cannot be parsed or the boundaries of [LocalDate] are exceeded.
+         *
+         * @see LocalDate.toString for formatting using the default format.
+         * @see LocalDate.format for formatting using a custom format.
+         */
+        public fun parse(input: CharSequence, format: DateTimeFormat<LocalDate> = getIsoDateFormat()): LocalDate
+
+        /**
+         * Returns a [LocalDate] that is [epochDays] number of days from the epoch day `1970-01-01`.
+         *
+         * @throws IllegalArgumentException if the result exceeds the platform-specific boundaries of [LocalDate].
+         *
+         * @see LocalDate.toEpochDays
+         */
+        public fun fromEpochDays(epochDays: Int): LocalDate
+
+        /**
+         * Creates a new format for parsing and formatting [LocalDate] values.
+         *
+         * Example:
+         * ```
+         * // 2020 Jan 05
+         * LocalDate.Format {
+         *   year()
+         *   char(' ')
+         *   monthName(MonthNames.ENGLISH_ABBREVIATED)
+         *   char(' ')
+         *   dayOfMonth()
+         * }
+         * ```
+         *
+         * Only parsing and formatting of well-formed values is supported. If the input does not fit the boundaries
+         * (for example, [dayOfMonth] is 31 for February), consider using [DateTimeComponents.Format] instead.
+         *
+         * There is a collection of predefined formats in [LocalDate.Formats].
+         */
+        @Suppress("FunctionName")
+        public fun Format(block: DateTimeFormatBuilder.WithDate.() -> Unit): DateTimeFormat<LocalDate>
+
+        internal val MIN: LocalDate
+        internal val MAX: LocalDate
+    }
+
+    /**
+     * A collection of predefined formats for parsing and formatting [LocalDate] values.
+     *
+     * See [LocalDate.Formats.ISO] and [LocalDate.Formats.ISO_BASIC] for popular predefined formats.
+     * [LocalDate.parse] and [LocalDate.toString] can be used as convenient shortcuts for the
+     * [LocalDate.Formats.ISO] format.
+     *
+     * If predefined formats are not sufficient, use [LocalDate.Format] to create a custom
+     * [kotlinx.datetime.format.DateTimeFormat] for [LocalDate] values.
+     */
+    public object Formats {
+        /**
+         * ISO 8601 extended format, which is the format used by [LocalDate.toString] and [LocalDate.parse].
+         *
+         * Examples of dates in ISO 8601 format:
+         * - `2020-08-30`
+         * - `+12020-08-30`
+         * - `0000-08-30`
+         * - `-0001-08-30`
+         */
+        public val ISO: DateTimeFormat<LocalDate>
+
+        /**
+         * ISO 8601 basic format.
+         *
+         * Examples of dates in ISO 8601 basic format:
+         * - `20200830`
+         * - `+120200830`
+         * - `00000830`
+         * - `-00010830`
+         */
+        public val ISO_BASIC: DateTimeFormat<LocalDate>
+    }
+
+    /**
+     * Constructs a [LocalDate] instance from the given date components.
+     *
+     * The components [monthNumber] and [dayOfMonth] are 1-based.
+     *
+     * The supported ranges of components:
+     * - [year] the range is platform dependent, but at least is enough to represent dates of all instants between
+     *          [Instant.DISTANT_PAST] and [Instant.DISTANT_FUTURE]
+     * - [monthNumber] `1..12`
+     * - [dayOfMonth] `1..31`, the upper bound can be less, depending on the month
+     *
+     * @throws IllegalArgumentException if any parameter is out of range, or if [dayOfMonth] is invalid for the
+     * given [monthNumber] and [year].
+     */
+    public constructor(year: Int, monthNumber: Int, dayOfMonth: Int)
+
+    /**
+     * Constructs a [LocalDate] instance from the given date components.
+     *
+     * The supported ranges of components:
+     * - [year] the range is platform dependent, but at least is enough to represent dates of all instants between
+     *          [Instant.DISTANT_PAST] and [Instant.DISTANT_FUTURE]
+     * - [month] all values of the [Month] enum
+     * - [dayOfMonth] `1..31`, the upper bound can be less, depending on the month
+     *
+     * @throws IllegalArgumentException if any parameter is out of range, or if [dayOfMonth] is invalid for the
+     * given [month] and [year].
+     */
+    public constructor(year: Int, month: Month, dayOfMonth: Int)
+
+    /** Returns the year component of the date. */
+    public val year: Int
+
+    /** Returns the number-of-month (1..12) component of the date. */
+    public val monthNumber: Int
+
+    /** Returns the month ([Month]) component of the date. */
+    public val month: Month
+
+    /** Returns the day-of-month component of the date. */
+    public val dayOfMonth: Int
+
+    /** Returns the day-of-week component of the date. */
+    public val dayOfWeek: DayOfWeek
+
+    /** Returns the day-of-year component of the date. */
+    public val dayOfYear: Int
+
+    /**
+     * Returns the number of days since the epoch day `1970-01-01`.
+     *
+     * If the result does not fit in [Int], returns [Int.MAX_VALUE] for a positive result or [Int.MIN_VALUE] for a negative result.
+     *
+     * @see LocalDate.fromEpochDays
+     */
+    public fun toEpochDays(): Int
+
+    /**
+     * Compares `this` date with the [other] date.
+     * Returns zero if this date represent the same day as the other (i.e. equal to other),
+     * a negative number if this date is earlier than the other,
+     * and a positive number if this date is later than the other.
+     */
+    public override fun compareTo(other: LocalDate): Int
+
+    /**
+     * Converts this date to the extended ISO-8601 string representation.
+     *
+     * @see Formats.ISO for the format details.
+     * @see parse for the dual operation: obtaining [LocalDate] from a string.
+     * @see LocalDate.format for formatting using a custom format.
+     */
+    public override fun toString(): String
+}
+
+/**
+ * Formats this value using the given [format].
+ * Equivalent to calling [DateTimeFormat.format] on [format] with `this`.
+ */
+public fun LocalDate.format(format: DateTimeFormat<LocalDate>): String = format.format(this)
+
+/**
+ * @suppress
+ */
+@Deprecated("Removed to support more idiomatic code. See https://github.com/Kotlin/kotlinx-datetime/issues/339", ReplaceWith("LocalDate.parse(this)"), DeprecationLevel.WARNING)
+public fun String.toLocalDate(): LocalDate = LocalDate.parse(this)
+
+/**
+ * Combines this date's components with the specified time components into a [LocalDateTime] value.
+ *
+ * For finding an instant that corresponds to the start of a date in a particular time zone consider using
+ * [LocalDate.atStartOfDayIn] function because a day does not always start at the fixed time 0:00:00.
+ */
+public fun LocalDate.atTime(hour: Int, minute: Int, second: Int = 0, nanosecond: Int = 0): LocalDateTime =
+    LocalDateTime(year, monthNumber, dayOfMonth, hour, minute, second, nanosecond)
+
+/**
+ * Combines this date's components with the specified [LocalTime] components into a [LocalDateTime] value.
+ *
+ * For finding an instant that corresponds to the start of a date in a particular time zone consider using
+ * [LocalDate.atStartOfDayIn] function because a day does not always start at the fixed time 0:00:00.
+ */
+public fun LocalDate.atTime(time: LocalTime): LocalDateTime = LocalDateTime(this, time)
+
+
+/**
+ * Returns a date that is the result of adding components of [DatePeriod] to this date. The components are
+ * added in the order from the largest units to the smallest, i.e. from years to days.
+ *
+ * @see LocalDate.periodUntil
+ * @throws DateTimeArithmeticException if this value or the results of intermediate computations are too large to fit in
+ * [LocalDate].
+ */
+public expect operator fun LocalDate.plus(period: DatePeriod): LocalDate
+
+/**
+ * Returns a date that is the result of subtracting components of [DatePeriod] from this date. The components are
+ * subtracted in the order from the largest units to the smallest, i.e. from years to days.
+ *
+ * @see LocalDate.periodUntil
+ * @throws DateTimeArithmeticException if this value or the results of intermediate computations are too large to fit in
+ * [LocalDate].
+ */
+public operator fun LocalDate.minus(period: DatePeriod): LocalDate =
+    if (period.days != Int.MIN_VALUE && period.months != Int.MIN_VALUE) {
+        plus(with(period) { DatePeriod(-years, -months, -days) })
+    } else {
+        minus(period.years, DateTimeUnit.YEAR).minus(period.months, DateTimeUnit.MONTH)
+            .minus(period.days, DateTimeUnit.DAY)
+    }
+
+/**
+ * Returns a [DatePeriod] representing the difference between `this` and [other] dates.
+ *
+ * The components of [DatePeriod] are calculated so that adding it to `this` date results in the [other] date.
+ *
+ * All components of the [DatePeriod] returned are:
+ * - positive or zero if this date is earlier than the other,
+ * - negative or zero if this date is later than the other,
+ * - exactly zero if this date is equal to the other.
+ *
+ * @throws DateTimeArithmeticException if the number of months between the two dates exceeds an Int (JVM only).
+ *
+ * @see LocalDate.minus
+ */
+public expect fun LocalDate.periodUntil(other: LocalDate): DatePeriod
+
+/**
+ * Returns a [DatePeriod] representing the difference between [other] and `this` dates.
+ *
+ * The components of [DatePeriod] are calculated so that adding it back to the `other` date results in this date.
+ *
+ * All components of the [DatePeriod] returned are:
+ * - negative or zero if this date is earlier than the other,
+ * - positive or zero if this date is later than the other,
+ * - exactly zero if this date is equal to the other.
+ *
+ * @throws DateTimeArithmeticException if the number of months between the two dates exceeds an Int (JVM only).
+ *
+ * @see LocalDate.periodUntil
+ */
+public operator fun LocalDate.minus(other: LocalDate): DatePeriod = other.periodUntil(this)
+
+/**
+ * Returns the whole number of the specified date [units][unit] between `this` and [other] dates.
+ *
+ * The value returned is:
+ * - positive or zero if this date is earlier than the other,
+ * - negative or zero if this date is later than the other,
+ * - zero if this date is equal to the other.
+
+ * If the result does not fit in [Int], returns [Int.MAX_VALUE] for a positive result or [Int.MIN_VALUE] for a negative result.
+ *
+ * @see LocalDate.daysUntil
+ * @see LocalDate.monthsUntil
+ * @see LocalDate.yearsUntil
+ *
+ */
+public expect fun LocalDate.until(other: LocalDate, unit: DateTimeUnit.DateBased): Int
+
+/**
+ * Returns the number of whole days between two dates.
+ *
+ * If the result does not fit in [Int], returns [Int.MAX_VALUE] for a positive result or [Int.MIN_VALUE] for a negative result.
+ *
+ * @see LocalDate.until
+ */
+public expect fun LocalDate.daysUntil(other: LocalDate): Int
+
+/**
+ * Returns the number of whole months between two dates.
+ *
+ * If the result does not fit in [Int], returns [Int.MAX_VALUE] for a positive result or [Int.MIN_VALUE] for a negative result.
+ *
+ * @see LocalDate.until
+ */
+public expect fun LocalDate.monthsUntil(other: LocalDate): Int
+
+/**
+ * Returns the number of whole years between two dates.
+ *
+ * If the result does not fit in [Int], returns [Int.MAX_VALUE] for a positive result or [Int.MIN_VALUE] for a negative result.
+ *
+ * @see LocalDate.until
+ */
+public expect fun LocalDate.yearsUntil(other: LocalDate): Int
+
+/**
+ * Returns a [LocalDate] that is the result of adding one [unit] to this date.
+ *
+ * The returned date is later than this date.
+ *
+ * @throws DateTimeArithmeticException if the result exceeds the boundaries of [LocalDate].
+ */
+@Deprecated("Use the plus overload with an explicit number of units", ReplaceWith("this.plus(1, unit)"))
+public expect fun LocalDate.plus(unit: DateTimeUnit.DateBased): LocalDate
+
+/**
+ * Returns a [LocalDate] that is the result of subtracting one [unit] from this date.
+ *
+ * The returned date is earlier than this date.
+ *
+ * @throws DateTimeArithmeticException if the result exceeds the boundaries of [LocalDate].
+ */
+@Deprecated("Use the minus overload with an explicit number of units", ReplaceWith("this.minus(1, unit)"))
+public fun LocalDate.minus(unit: DateTimeUnit.DateBased): LocalDate = plus(-1, unit)
+
+/**
+ * Returns a [LocalDate] that is the result of adding the [value] number of the specified [unit] to this date.
+ *
+ * If the [value] is positive, the returned date is later than this date.
+ * If the [value] is negative, the returned date is earlier than this date.
+ *
+ * @throws DateTimeArithmeticException if the result exceeds the boundaries of [LocalDate].
+ */
+public expect fun LocalDate.plus(value: Int, unit: DateTimeUnit.DateBased): LocalDate
+
+/**
+ * Returns a [LocalDate] that is the result of subtracting the [value] number of the specified [unit] from this date.
+ *
+ * If the [value] is positive, the returned date is earlier than this date.
+ * If the [value] is negative, the returned date is later than this date.
+ *
+ * @throws DateTimeArithmeticException if the result exceeds the boundaries of [LocalDate].
+ */
+public expect fun LocalDate.minus(value: Int, unit: DateTimeUnit.DateBased): LocalDate
+
+/**
+ * Returns a [LocalDate] that is the result of adding the [value] number of the specified [unit] to this date.
+ *
+ * If the [value] is positive, the returned date is later than this date.
+ * If the [value] is negative, the returned date is earlier than this date.
+ *
+ * @throws DateTimeArithmeticException if the result exceeds the boundaries of [LocalDate].
+ */
+public expect fun LocalDate.plus(value: Long, unit: DateTimeUnit.DateBased): LocalDate
+
+/**
+ * Returns a [LocalDate] that is the result of subtracting the [value] number of the specified [unit] from this date.
+ *
+ * If the [value] is positive, the returned date is earlier than this date.
+ * If the [value] is negative, the returned date is later than this date.
+ *
+ * @throws DateTimeArithmeticException if the result exceeds the boundaries of [LocalDate].
+ */
+public fun LocalDate.minus(value: Long, unit: DateTimeUnit.DateBased): LocalDate = plus(-value, unit)
+
+// workaround for https://youtrack.jetbrains.com/issue/KT-65484
+internal fun getIsoDateFormat() = LocalDate.Formats.ISO
+
+// Internal function to wrap constructor exceptions with input information
+internal fun createLocalDateWithInputInfo(year: Int, monthNumber: Int, dayOfMonth: Int, input: String? = null): LocalDate {
+    return try {
+        LocalDate(year, monthNumber, dayOfMonth)
+    } catch (e: IllegalArgumentException) {
+        val message = if (input != null) {
+            "Failed to parse '$input': ${e.message}"
+        } else {
+            e.message!!
+        }
+        throw IllegalArgumentException(message, e)
+    }
+}
+[end of core/common/src/LocalDate.kt]
+[start of core/common/src/LocalDateTime.kt]
+/*
+ * Copyright 2019-2022 JetBrains s.r.o. and contributors.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime
+
+import kotlinx.datetime.LocalDate.Companion.parse
+import kotlinx.datetime.format.*
+import kotlinx.datetime.serializers.LocalDateTimeIso8601Serializer
+import kotlinx.serialization.Serializable
+
+/**
+ * The representation of a specific civil date and time without a reference to a particular time zone.
+ *
+ * This class does not describe specific *moments in time*, which are represented as [Instant] values.
+ * Instead, its instances can be thought of as clock readings, something that an observer in a particular time zone
+ * could witness.
+ * For example, `2020-08-30T18:43` is not a *moment in time*, since someone in Berlin and someone in Tokyo would witness
+ * this on their clocks at different times.
+ *
+ * The main purpose of this class is to provide human-readable representations of [Instant] values, or to transfer them
+ * as data.
+ *
+ * The arithmetic on [LocalDateTime] values is not provided, since without accounting for the time zone transitions it may give misleading results.
+ */
+@Serializable(with = LocalDateTimeIso8601Serializer::class)
+public expect class LocalDateTime : Comparable<LocalDateTime> {
+    public companion object {
+
+        /**
+         * A shortcut for calling [DateTimeFormat.parse].
+         *
+         * Parses a string that represents a date/time value including date and time components
+         * but without any time zone component and returns the parsed [LocalDateTime] value.
+         *
+         * If [format] is not specified, [Formats.ISO] is used.
+         *
+         * @throws IllegalArgumentException if the text cannot be parsed or the boundaries of [LocalDateTime] are
+         * exceeded.
+         */
+        public fun parse(input: CharSequence, format: DateTimeFormat<LocalDateTime> = getIsoDateTimeFormat()): LocalDateTime
+
+        /**
+         * Creates a new format for parsing and formatting [LocalDateTime] values.
+         *
+         * Examples:
+         * ```
+         * // `2020-08-30 18:43:13`, using predefined date and time formats
+         * LocalDateTime.Format { date(LocalDate.Formats.ISO); char(' '); time(LocalTime.Formats.ISO) }
+         *
+         * // `08/30 18:43:13`, using a custom format:
+         * LocalDateTime.Format {
+         *   monthNumber(); char('/'); dayOfMonth()
+         *   char(' ')
+         *   hour(); char(':'); minute()
+         *   optional { char(':'); second() }
+         * }
+         * ```
+         *
+         * Only parsing and formatting of well-formed values is supported. If the input does not fit the boundaries
+         * (for example, [dayOfMonth] is 31 for February), consider using [DateTimeComponents.Format] instead.
+         *
+         * There is a collection of predefined formats in [LocalDateTime.Formats].
+         */
+        @Suppress("FunctionName")
+        public fun Format(builder: DateTimeFormatBuilder.WithDateTime.() -> Unit): DateTimeFormat<LocalDateTime>
+
+        internal val MIN: LocalDateTime
+        internal val MAX: LocalDateTime
+    }
+
+    /**
+     * A collection of predefined formats for parsing and formatting [LocalDateTime] values.
+     *
+     * [LocalDateTime.Formats.ISO] is a popular predefined format.
+     *
+     * If predefined formats are not sufficient, use [LocalDateTime.Format] to create a custom
+     * [kotlinx.datetime.format.DateTimeFormat] for [LocalDateTime] values.
+     */
+    public object Formats {
+        /**
+         * ISO 8601 extended format.
+         *
+         * Examples of date/time in ISO 8601 format:
+         * - `2020-08-30T18:43`
+         * - `+12020-08-30T18:43:00`
+         * - `0000-08-30T18:43:00.5`
+         * - `-0001-08-30T18:43:00.123456789`
+         *
+         * When formatting, seconds are always included, even if they are zero.
+         * Fractional parts of the second are included if non-zero.
+         *
+         * Guaranteed to parse all strings that [LocalDateTime.toString] produces.
+         */
+        public val ISO: DateTimeFormat<LocalDateTime>
+    }
+
+    /**
+     * Constructs a [LocalDateTime] instance from the given date and time components.
+     *
+     * The components [monthNumber] and [dayOfMonth] are 1-based.
+     *
+     * The supported ranges of components:
+     * - [year] the range is platform dependent, but at least is enough to represent dates of all instants between
+     *          [Instant.DISTANT_PAST] and [Instant.DISTANT_FUTURE]
+     * - [monthNumber] `1..12`
+     * - [dayOfMonth] `1..31`, the upper bound can be less, depending on the month
+     * - [hour] `0..23`
+     * - [minute] `0..59`
+     * - [second] `0..59`
+     * - [nanosecond] `0..999_999_999`
+     *
+     * @throws IllegalArgumentException if any parameter is out of range, or if [dayOfMonth] is invalid for the given [monthNumber] and
+     * [year].
+     */
+    public constructor(
+        year: Int,
+        monthNumber: Int,
+        dayOfMonth: Int,
+        hour: Int,
+        minute: Int,
+        second: Int = 0,
+        nanosecond: Int = 0
+    )
+
+    /**
+     * Constructs a [LocalDateTime] instance from the given date and time components.
+     *
+     * The supported ranges of components:
+     * - [year] the range is platform dependent, but at least is enough to represent dates of all instants between
+     *          [Instant.DISTANT_PAST] and [Instant.DISTANT_FUTURE]
+     * - [month] all values of the [Month] enum
+     * - [dayOfMonth] `1..31`, the upper bound can be less, depending on the month
+     * - [hour] `0..23`
+     * - [minute] `0..59`
+     * - [second] `0..59`
+     * - [nanosecond] `0..999_999_999`
+     *
+     * @throws IllegalArgumentException if any parameter is out of range, or if [dayOfMonth] is invalid for the given [month] and
+     * [year].
+     */
+    public constructor(
+        year: Int,
+        month: Month,
+        dayOfMonth: Int,
+        hour: Int,
+        minute: Int,
+        second: Int = 0,
+        nanosecond: Int = 0
+    )
+
+    /**
+     * Constructs a [LocalDateTime] instance by combining the given [date] and [time] parts.
+     */
+    public constructor(date: LocalDate, time: LocalTime)
+
+    /** Returns the year component of the date. */
+    public val year: Int
+
+    /** Returns the number-of-month (1..12) component of the date. */
+    public val monthNumber: Int
+
+    /** Returns the month ([Month]) component of the date. */
+    public val month: Month
+
+    /** Returns the day-of-month component of the date. */
+    public val dayOfMonth: Int
+
+    /** Returns the day-of-week component of the date. */
+    public val dayOfWeek: DayOfWeek
+
+    /** Returns the day-of-year component of the date. */
+    public val dayOfYear: Int
+
+    /** Returns the hour-of-day time component of this date/time value. */
+    public val hour: Int
+
+    /** Returns the minute-of-hour time component of this date/time value. */
+    public val minute: Int
+
+    /** Returns the second-of-minute time component of this date/time value. */
+    public val second: Int
+
+    /** Returns the nanosecond-of-second time component of this date/time value. */
+    public val nanosecond: Int
+
+    /** Returns the date part of this date/time value. */
+    public val date: LocalDate
+
+    /** Returns the time part of this date/time value. */
+    public val time: LocalTime
+
+    /**
+     * Compares `this` date/time value with the [other] date/time value.
+     * Returns zero if this value is equal to the other,
+     * a negative number if this value represents earlier civil time than the other,
+     * and a positive number if this value represents later civil time than the other.
+     */
+    // TODO: add a note about pitfalls of comparing localdatetimes falling in the Autumn transition
+    public override operator fun compareTo(other: LocalDateTime): Int
+
+    /**
+     * Converts this date/time value to the ISO 8601 string representation.
+     *
+     * For readability, if the time represents a round minute (without seconds or fractional seconds),
+     * the string representation will not include seconds. Also, fractions of seconds will add trailing zeros to
+     * the fractional part until its length is a multiple of three.
+     *
+     * Examples of output:
+     * - `2020-08-30T18:43`
+     * - `2020-08-30T18:43:00`
+     * - `2020-08-30T18:43:00.500`
+     * - `2020-08-30T18:43:00.123456789`
+     *
+     * @see LocalTime.toString for details of how the time part is formatted.
+     * @see Formats.ISO for a very similar format. The difference is that [Formats.ISO] will always include seconds,
+     * even if they are zero, and will not add trailing zeros to the fractional part of the second for readability.
+     * @see parse for the dual operation: obtaining [LocalDateTime] from a string.
+     * @see LocalDateTime.format for formatting using a custom format.
+     */
+    public override fun toString(): String
+}
+
+/**
+ * Formats this value using the given [format].
+ * Equivalent to calling [DateTimeFormat.format] on [format] with `this`.
+ */
+public fun LocalDateTime.format(format: DateTimeFormat<LocalDateTime>): String = format.format(this)
+
+/**
+ * @suppress
+ */
+@Deprecated("Removed to support more idiomatic code. See https://github.com/Kotlin/kotlinx-datetime/issues/339", ReplaceWith("LocalDateTime.parse(this)"), DeprecationLevel.WARNING)
+public fun String.toLocalDateTime(): LocalDateTime = LocalDateTime.parse(this)
+
+// workaround for https://youtrack.jetbrains.com/issue/KT-65484
+internal fun getIsoDateTimeFormat() = LocalDateTime.Formats.ISO
+
+// Internal function to wrap constructor exceptions with input information
+internal fun createLocalDateTimeWithInputInfo(
+    year: Int,
+    monthNumber: Int,
+    dayOfMonth: Int,
+    hour: Int,
+    minute: Int,
+    second: Int = 0,
+    nanosecond: Int = 0,
+    input: String? = null
+): LocalDateTime {
+    return try {
+        LocalDateTime(year, monthNumber, dayOfMonth, hour, minute, second, nanosecond)
+    } catch (e: IllegalArgumentException) {
+        val message = if (input != null) {
+            "Failed to parse '$input': ${e.message}"
+        } else {
+            e.message!!
+        }
+        throw IllegalArgumentException(message, e)
+    }
+}
+
+// Internal function to wrap constructor exceptions with input information for Month variant
+internal fun createLocalDateTimeWithInputInfo(
+    year: Int,
+    month: Month,
+    dayOfMonth: Int,
+    hour: Int,
+    minute: Int,
+    second: Int = 0,
+    nanosecond: Int = 0,
+    input: String? = null
+): LocalDateTime {
+    return try {
+        LocalDateTime(year, month, dayOfMonth, hour, minute, second, nanosecond)
+    } catch (e: IllegalArgumentException) {
+        val message = if (input != null) {
+            "Failed to parse '$input': ${e.message}"
+        } else {
+            e.message!!
+        }
+        throw IllegalArgumentException(message, e)
+    }
+}
+
+// Internal function to wrap constructor exceptions with input information for LocalDate + LocalTime variant
+internal fun createLocalDateTimeWithInputInfo(
+    date: LocalDate,
+    time: LocalTime,
+    input: String? = null
+): LocalDateTime {
+    return try {
+        LocalDateTime(date, time)
+    } catch (e: IllegalArgumentException) {
+        val message = if (input != null) {
+            "Failed to parse '$input': ${e.message}"
+        } else {
+            e.message!!
+        }
+        throw IllegalArgumentException(message, e)
+    }
+}
+[end of core/common/src/LocalDateTime.kt]
+[start of core/common/src/LocalTime.kt]
+/*
+ * Copyright 2019-2022 JetBrains s.r.o. and contributors.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime
+
+import kotlinx.datetime.LocalDate.Companion.parse
+import kotlinx.datetime.format.*
+import kotlinx.datetime.serializers.LocalTimeIso8601Serializer
+import kotlinx.serialization.Serializable
+
+
+/**
+ * The time part of [LocalDateTime].
+ *
+ * This class represents time-of-day without a referencing a specific date.
+ * To reconstruct a full [LocalDateTime], representing civil date and time, [LocalTime] needs to be
+ * combined with [LocalDate] via [LocalDate.atTime] or [LocalTime.atDate].
+ *
+ * Also, [LocalTime] does not reference a particular time zone.
+ * Therefore, even on the same date, [LocalTime] denotes different moments of time.
+ * For example, `18:43` happens at different moments in Berlin and in Tokyo.
+ *
+ * The arithmetic on [LocalTime] values is not provided, since without accounting for the time zone
+ * transitions it may give misleading results.
+ */
+@Serializable(LocalTimeIso8601Serializer::class)
+public expect class LocalTime : Comparable<LocalTime> {
+    public companion object {
+
+        /**
+         * A shortcut for calling [DateTimeFormat.parse].
+         *
+         * Parses a string that represents time-of-day and returns the parsed [LocalTime] value.
+         *
+         * @throws IllegalArgumentException if the text cannot be parsed or the boundaries of [LocalTime] are
+         * exceeded.
+         *
+         * @see LocalTime.toString for formatting using the default format.
+         * @see LocalTime.format for formatting using a custom format.
+         */
+        public fun parse(input: CharSequence, format: DateTimeFormat<LocalTime> = getIsoTimeFormat()): LocalTime
+
+        /**
+         * Constructs a [LocalTime] that represents the specified number of seconds since the start of a calendar day.
+         * The fractional parts of the second will be zero.
+         *
+         * @throws IllegalArgumentException if [secondOfDay] is outside the `0 until 86400` range,
+         * with 86400 being the number of seconds in a calendar day.
+         *
+         * @see LocalTime.toSecondOfDay
+         * @see LocalTime.fromMillisecondOfDay
+         * @see LocalTime.fromNanosecondOfDay
+         */
+        public fun fromSecondOfDay(secondOfDay: Int): LocalTime
+
+        /**
+         * Constructs a [LocalTime] that represents the specified number of milliseconds since the start of
+         * a calendar day.
+         * The sub-millisecond parts of the `LocalTime` will be zero.
+         *
+         * @throws IllegalArgumentException if [millisecondOfDay] is outside the `0 until 86400 * 1_000` range,
+         * with 86400 being the number of seconds in a calendar day.
+         *
+         * @see LocalTime.fromSecondOfDay
+         * @see LocalTime.toMillisecondOfDay
+         * @see LocalTime.fromNanosecondOfDay
+         */
+        public fun fromMillisecondOfDay(millisecondOfDay: Int): LocalTime
+
+        /**
+         * Constructs a [LocalTime] that represents the specified number of nanoseconds since the start of
+         * a calendar day.
+         *
+         * @throws IllegalArgumentException if [nanosecondOfDay] is outside the `0 until 86400 * 1_000_000_000` range,
+         * with 86400 being the number of seconds in a calendar day.
+         *
+         * @see LocalTime.fromSecondOfDay
+         * @see LocalTime.fromMillisecondOfDay
+         * @see LocalTime.toNanosecondOfDay
+         */
+        public fun fromNanosecondOfDay(nanosecondOfDay: Long): LocalTime
+
+        /**
+         * Creates a new format for parsing and formatting [LocalTime] values.
+         *
+         * Example:
+         * ```
+         * LocalTime.Format {
+         *   hour(); char(':'); minute(); char(':'); second()
+         *   optional { char('.'); secondFraction() }
+         * }
+         * ```
+         *
+         * Only parsing and formatting of well-formed values is supported. If the input does not fit the boundaries
+         * (for example, [second] is 60), consider using [DateTimeComponents.Format] instead.
+         *
+         * There is a collection of predefined formats in [LocalTime.Formats].
+         */
+        @Suppress("FunctionName")
+        public fun Format(builder: DateTimeFormatBuilder.WithTime.() -> Unit): DateTimeFormat<LocalTime>
+
+        internal val MIN: LocalTime
+        internal val MAX: LocalTime
+    }
+
+    /**
+     * A collection of predefined formats for parsing and formatting [LocalDateTime] values.
+     *
+     * [LocalTime.Formats.ISO] is a popular predefined format.
+     *
+     * If predefined formats are not sufficient, use [LocalTime.Format] to create a custom
+     * [kotlinx.datetime.format.DateTimeFormat] for [LocalTime] values.
+     */
+    public object Formats {
+        /**
+         * ISO 8601 extended format.
+         *
+         * Examples: `12:34`, `12:34:56`, `12:34:56.789`, `12:34:56.1234`.
+         *
+         * When formatting, seconds are always included, even if they are zero.
+         * Fractional parts of the second are included if non-zero.
+         *
+         * Guaranteed to parse all strings that [LocalTime.toString] produces.
+         */
+        public val ISO: DateTimeFormat<LocalTime>
+    }
+
+    /**
+     * Constructs a [LocalTime] instance from the given time components.
+     *
+     * The supported ranges of components:
+     * - [hour] `0..23`
+     * - [minute] `0..59`
+     * - [second] `0..59`
+     * - [nanosecond] `0..999_999_999`
+     *
+     * @throws IllegalArgumentException if any parameter is out of range.
+     */
+    public constructor(hour: Int, minute: Int, second: Int = 0, nanosecond: Int = 0)
+
+    /** Returns the hour-of-day time component of this time value. */
+    public val hour: Int
+
+    /** Returns the minute-of-hour time component of this time value. */
+    public val minute: Int
+
+    /** Returns the second-of-minute time component of this time value. */
+    public val second: Int
+
+    /** Returns the nanosecond-of-second time component of this time value. */
+    public val nanosecond: Int
+
+    /** Returns the time as a second of a day, in `0 until 24 * 60 * 60`. */
+    public fun toSecondOfDay(): Int
+
+    /** Returns the time as a millisecond of a day, in `0 until 24 * 60 * 60 * 1_000`. */
+    public fun toMillisecondOfDay(): Int
+
+    /** Returns the time as a nanosecond of a day, in `0 until 24 * 60 * 60 * 1_000_000_000`. */
+    public fun toNanosecondOfDay(): Long
+
+    /**
+     * Compares `this` time value with the [other] time value.
+     * Returns zero if this value is equal to the other, a negative number if this value occurs earlier
+     * in the course of a typical day than the other, and a positive number if this value occurs
+     * later in the course of a typical day than the other.
+     *
+     * Note that, on days when there is a time overlap (for example, due to the daylight saving time
+     * transitions in autumn), a "lesser" wall-clock reading can, in fact, happen later than the
+     * "greater" one.
+     */
+    public override operator fun compareTo(other: LocalTime): Int
+
+    /**
+     * Converts this time value to the extended ISO-8601 string representation.
+     *
+     * For readability, if the time represents a round minute (without seconds or fractional seconds),
+     * the string representation will not include seconds. Also, fractions of seconds will add trailing zeros to
+     * the fractional part until the number of digits after the dot is a multiple of three.
+     *
+     * Examples of output:
+     * - `18:43`
+     * - `18:43:00`
+     * - `18:43:00.500`
+     * - `18:43:00.123456789`
+     *
+     * @see Formats.ISO for a very similar format. The difference is that [Formats.ISO] will always include seconds,
+     * even if they are zero, and will not add trailing zeros to the fractional part of the second for readability.
+     * @see parse for the dual operation: obtaining [LocalTime] from a string.
+     * @see LocalTime.format for formatting using a custom format.
+     */
+    public override fun toString(): String
+}
+
+/**
+ * Formats this value using the given [format].
+ * Equivalent to calling [DateTimeFormat.format] on [format] with `this`.
+ */
+public fun LocalTime.format(format: DateTimeFormat<LocalTime>): String = format.format(this)
+
+/**
+ * @suppress
+ */
+@Deprecated("Removed to support more idiomatic code. See https://github.com/Kotlin/kotlinx-datetime/issues/339", ReplaceWith("LocalTime.parse(this)"), DeprecationLevel.WARNING)
+public fun String.toLocalTime(): LocalTime = LocalTime.parse(this)
+
+/**
+ * Combines this time's components with the specified date components into a [LocalDateTime] value.
+ */
+public fun LocalTime.atDate(year: Int, monthNumber: Int, dayOfMonth: Int = 0): LocalDateTime =
+    LocalDateTime(year, monthNumber, dayOfMonth, hour, minute, second, nanosecond)
+
+/**
+ * Combines this time's components with the specified date components into a [LocalDateTime] value.
+ */
+public fun LocalTime.atDate(year: Int, month: Month, dayOfMonth: Int = 0): LocalDateTime =
+    LocalDateTime(year, month, dayOfMonth, hour, minute, second, nanosecond)
+
+/**
+ * Combines this time's components with the specified [LocalDate] components into a [LocalDateTime] value.
+ */
+public fun LocalTime.atDate(date: LocalDate): LocalDateTime = LocalDateTime(date, this)
+
+// workaround for https://youtrack.jetbrains.com/issue/KT-65484
+internal fun getIsoTimeFormat() = LocalTime.Formats.ISO
+
+// Internal function to wrap constructor exceptions with input information
+internal fun createLocalTimeWithInputInfo(
+    hour: Int,
+    minute: Int,
+    second: Int = 0,
+    nanosecond: Int = 0,
+    input: String? = null
+): LocalTime {
+    return try {
+        LocalTime(hour, minute, second, nanosecond)
+    } catch (e: IllegalArgumentException) {
+        val message = if (input != null) {
+            "Failed to parse '$input': ${e.message}"
+        } else {
+            e.message!!
+        }
+        throw IllegalArgumentException(message, e)
+    }
+}
+[end of core/common/src/LocalTime.kt]
+[start of core/common/src/UtcOffset.kt]
+/*
+ * Copyright 2019-2021 JetBrains s.r.o.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime
+
+import kotlinx.datetime.format.*
+import kotlinx.datetime.serializers.UtcOffsetSerializer
+import kotlinx.serialization.Serializable
+
+/**
+ * An offset from UTC.
+ *
+ * Examples of these values:
+ * - `Z`, an offset of zero;
+ * - `+05`, plus five hours;
+ * - `-02`, minus two hours;
+ * - `+03:30`, plus three hours and thirty minutes;
+ * - `+01:23:45`, plus one hour, 23 minutes, and 45 seconds.
+ */
+@Serializable(with = UtcOffsetSerializer::class)
+public expect class UtcOffset {
+    /**
+     * The number of seconds from UTC.
+     *
+     * The larger the value, the earlier some specific civil date/time happens with the offset.
+     */
+    public val totalSeconds: Int
+
+    // TODO: Declare and document toString/equals/hashCode
+
+    public companion object {
+        /**
+         * The zero offset from UTC, `Z`.
+         */
+        public val ZERO: UtcOffset
+
+        /**
+         * A shortcut for calling [DateTimeFormat.parse].
+         *
+         * Parses a string that represents a UTC offset and returns the parsed [UtcOffset] value.
+         *
+         * If [format] is not specified, [Formats.ISO] is used.
+         *
+         * @throws IllegalArgumentException if the text cannot be parsed or the boundaries of [UtcOffset] are
+         * exceeded.
+         */
+        public fun parse(input: CharSequence, format: DateTimeFormat<UtcOffset> = getIsoUtcOffestFormat()): UtcOffset
+
+        /**
+         * Creates a new format for parsing and formatting [UtcOffset] values.
+         *
+         * Example:
+         * ```
+         * // `GMT` on zero, `+4:30:15`, using a custom format:
+         * UtcOffset.Format {
+         *   optional("GMT") {
+         *     offsetHours(Padding.NONE); char(':'); offsetMinutesOfHour()
+         *     optional { char(':'); offsetSecondsOfMinute() }
+         *   }
+         * }
+         * ```
+         *
+         * Since [UtcOffset] values are rarely formatted and parsed on their own,
+         * instances of [DateTimeFormat] obtained here will likely need to be passed to
+         * [DateTimeFormatBuilder.WithUtcOffset.offset] in a format builder for a larger data structure.
+         *
+         * There is a collection of predefined formats in [UtcOffset.Formats].
+         */
+        @Suppress("FunctionName")
+        public fun Format(block: DateTimeFormatBuilder.WithUtcOffset.() -> Unit): DateTimeFormat<UtcOffset>
+    }
+
+    /**
+     * A collection of predefined formats for parsing and formatting [UtcOffset] values.
+     *
+     * See [UtcOffset.Formats.ISO], [UtcOffset.Formats.ISO_BASIC], and [UtcOffset.Formats.FOUR_DIGITS]
+     * for popular predefined formats.
+     *
+     * If predefined formats are not sufficient, use [UtcOffset.Format] to create a custom
+     * [kotlinx.datetime.format.DateTimeFormat] for [UtcOffset] values.
+     */
+    public object Formats {
+        /**
+         * ISO 8601 extended format, which is the format used by [UtcOffset.parse] and [UtcOffset.toString].
+         *
+         * An extension of the ISO 8601 is that this format allows parsing and formatting seconds.
+         *
+         * When formatting, seconds are omitted if they are zero. If the whole offset is zero, the letter `Z` is output.
+         *
+         * Examples of UTC offsets in ISO 8601 format:
+         * - `Z` or `+00:00`, an offset of zero;
+         * - `+05:00`, five hours;
+         * - `-02:00`, minus two hours;
+         * - `-17:16`
+         * - `+10:36:30`
+         */
+        public val ISO: DateTimeFormat<UtcOffset>
+
+        /**
+         * ISO 8601 basic format.
+         *
+         * An extension of the ISO 8601 is that this format allows parsing and formatting seconds.
+         *
+         * When formatting, seconds are omitted if they are zero. If the whole offset is zero, the letter `Z` is output.
+         *
+         * Examples of UTC offsets in ISO 8601 basic format:
+         * - `Z`
+         * - `+05`
+         * - `-1716`
+         * - `+103630`
+         *
+         * @see UtcOffset.Formats.FOUR_DIGITS
+         */
+        public val ISO_BASIC: DateTimeFormat<UtcOffset>
+
+        /**
+         * A subset of the ISO 8601 basic format that always outputs and parses exactly a numeric sign and four digits:
+         * two digits for the hour and two digits for the minute. If the offset has a non-zero number of seconds,
+         * they are truncated.
+         *
+         * Examples of UTC offsets in this format:
+         * - `+0000`
+         * - `+0500`
+         * - `-1716`
+         * - `+1036`
+         *
+         * @see UtcOffset.Formats.ISO_BASIC
+         */
+        public val FOUR_DIGITS: DateTimeFormat<UtcOffset>
+    }
+
+    /**
+     * Converts this UTC offset to the extended ISO-8601 string representation.
+     *
+     * @see Formats.ISO for the format details.
+     * @see parse for the dual operation: obtaining [UtcOffset] from a string.
+     * @see UtcOffset.format for formatting using a custom format.
+     */
+    public override fun toString(): String
+}
+
+/**
+ * Formats this value using the given [format].
+ * Equivalent to calling [DateTimeFormat.format] on [format] with `this`.
+ */
+public fun UtcOffset.format(format: DateTimeFormat<UtcOffset>): String = format.format(this)
+
+/**
+ * Constructs a [UtcOffset] from hours, minutes, and seconds components.
+ *
+ * All components must have the same sign.
+ *
+ * The bounds are checked: it is invalid to pass something other than `±[0; 59]` as the number of seconds or minutes.
+ * For example, `UtcOffset(hours = 3, minutes = 61)` is invalid.
+ *
+ * However, the non-null component of the highest order can exceed these bounds,
+ * for example, `UtcOffset(minutes = 241)` is valid.
+ *
+ * @throws IllegalArgumentException if a component exceeds its bounds when a higher order component is specified.
+ * @throws IllegalArgumentException if components have different signs.
+ * @throws IllegalArgumentException if the resulting `UtcOffset` value is outside of range `±18:00`.
+ */
+public expect fun UtcOffset(hours: Int? = null, minutes: Int? = null, seconds: Int? = null): UtcOffset
+
+@Deprecated("Use UtcOffset.ZERO instead", ReplaceWith("UtcOffset.ZERO"), DeprecationLevel.ERROR)
+public fun UtcOffset(): UtcOffset = UtcOffset.ZERO
+
+/**
+ * Returns the fixed-offset time zone with the given UTC offset.
+ */
+public fun UtcOffset.asTimeZone(): FixedOffsetTimeZone = FixedOffsetTimeZone(this)
+
+// workaround for https://youtrack.jetbrains.com/issue/KT-65484
+internal fun getIsoUtcOffestFormat() = UtcOffset.Formats.ISO
+
+// Internal function to wrap constructor exceptions with input information
+internal fun createUtcOffsetWithInputInfo(
+    hours: Int? = null,
+    minutes: Int? = null,
+    seconds: Int? = null,
+    input: String? = null
+): UtcOffset {
+    return try {
+        UtcOffset(hours, minutes, seconds)
+    } catch (e: IllegalArgumentException) {
+        val message = if (input != null) {
+            "Failed to parse '$input': ${e.message}"
+        } else {
+            e.message!!
+        }
+        throw IllegalArgumentException(message, e)
+    }
+}
+[end of core/common/src/UtcOffset.kt]

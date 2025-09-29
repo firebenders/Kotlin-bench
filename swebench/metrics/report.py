@@ -680,9 +680,9 @@ def save_model_report_kt(
 
         # Check if the patch was resolved
         if instance_id in eval_refs:
-            print("Getting eval report")
+            # print("Getting eval report")
             report = get_eval_report(eval_sm, eval_refs[instance_id])
-            print("Report: ", report)
+            # print("Report: ", report)
             if get_resolution_status(report) == ResolvedStatus.FULL.value:
                 report_map["resolved"].append(instance_id)
 

@@ -1,0 +1,14 @@
+```kotlin
+        "customButtonBury",
+        "customButtonSuspend",
+        "customButtonDelete",
+        "customButtonRescheduleCard",
+        "customButtonEnableWhiteboard",
+        "customButtonToggleStylus",
+        "customButtonSaveWhiteboard",
+        "customButtonWhiteboardPenColor",
+        "customButtonShowHideWhiteboard",
+        "customButtonClearWhiteboard"
+    )
+}
+```

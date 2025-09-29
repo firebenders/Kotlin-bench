@@ -1,0 +1,128 @@
+[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt]
+package com.pinterest.ktlint.ruleset.standard.rules
+
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.COLON
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
+import com.pinterest.ktlint.rule.engine.core.api.Rule
+import com.pinterest.ktlint.rule.engine.core.api.RuleId
+import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
+import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe
+import com.pinterest.ktlint.ruleset.standard.StandardRule
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+
+public class FunctionReturnTypeSpacingRule :
+    StandardRule(
+        id = "function-return-type-spacing",
+        usesEditorConfigProperties = setOf(MAX_LINE_LENGTH_PROPERTY),
+    ),
+    Rule.Experimental {
+    
+    private var maxLineLength = MAX_LINE_LENGTH_PROPERTY.defaultValue
+
+    override fun beforeFirstNode(editorConfig: EditorConfig) {
+        maxLineLength = editorConfig[MAX_LINE_LENGTH_PROPERTY]
+    }
+
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        node.firstChildNode
+        node
+            .takeIf { node.elementType == FUN }
+            ?.let { node.findChildByType(COLON) }
+            ?.let { colonNode ->
+                removeWhiteSpaceBetweenClosingParenthesisAndColon(colonNode, emit, autoCorrect)
+                fixWhiteSpaceBetweenColonAndReturnType(colonNode, emit, autoCorrect)
+            }
+    }
+
+    private fun removeWhiteSpaceBetweenClosingParenthesisAndColon(
+        node: ASTNode,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+        autoCorrect: Boolean,
+    ) {
+        require(node.elementType == COLON)
+        node
+            .prevLeaf()
+            ?.takeIf { it.elementType == WHITE_SPACE }
+            ?.let { whitespaceBeforeColonNode ->
+                emit(whitespaceBeforeColonNode.startOffset, "Unexpected whitespace", true)
+                if (autoCorrect) {
+                    whitespaceBeforeColonNode.treeParent?.removeChild(whitespaceBeforeColonNode)
+                }
+            }
+    }
+
+    private fun fixWhiteSpaceBetweenColonAndReturnType(
+        node: ASTNode,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+        autoCorrect: Boolean,
+    ) {
+        require(node.elementType == COLON)
+        node
+            .nextLeaf()
+            ?.takeIf { it.elementType == WHITE_SPACE }
+            .let { whiteSpaceAfterColon ->
+                if (whiteSpaceAfterColon?.text != " ") {
+                    // Check if there's a newline and if changing it would exceed max line length
+                    if (whiteSpaceAfterColon?.text?.contains('\n') == true && 
+                        wouldExceedMaxLineLength(node)) {
+                        // Don't emit error or change - would violate max line length
+                        return
+                    }
+                    
+                    emit(node.startOffset, "Single space expected between colon and return type", true)
+                    if (autoCorrect) {
+                        node.upsertWhitespaceAfterMe(" ")
+                    }
+                }
+            }
+    }
+    
+    private fun wouldExceedMaxLineLength(colonNode: ASTNode): Boolean {
+        // If max line length is unlimited (Int.MAX_VALUE), don't worry about it
+        if (maxLineLength == Int.MAX_VALUE) return false
+        
+        // Find the start of the current line
+        var lineStartOffset = colonNode.startOffset
+        var current = colonNode.prevLeaf()
+        
+        // Go backwards to find the start of the line
+        while (current != null) {
+            val text = current.text
+            val newlineIndex = text.lastIndexOf('\n')
+            if (newlineIndex >= 0) {
+                lineStartOffset = current.startOffset + newlineIndex + 1
+                break
+            }
+            lineStartOffset = current.startOffset
+            current = current.prevLeaf()
+        }
+        
+        // Find the return type node
+        val returnTypeNode = colonNode.nextLeaf()?.let { whitespace ->
+            if (whitespace.elementType == WHITE_SPACE) {
+                whitespace.nextLeaf()
+            } else {
+                whitespace
+            }
+        } ?: return false
+        
+        // Calculate what the line length would be if we put colon + space + return type on same line
+        val currentLineLength = colonNode.startOffset - lineStartOffset + 1 // +1 for the colon
+        val spaceLength = 1 // single space we want to insert
+        val returnTypeLength = returnTypeNode.text.length
+        val totalLength = currentLineLength + spaceLength + returnTypeLength
+        
+        return totalLength > maxLineLength
+    }
+}
+
+public val FUNCTION_RETURN_TYPE_SPACING_RULE_ID: RuleId = FunctionReturnTypeSpacingRule().ruleId
+[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt]

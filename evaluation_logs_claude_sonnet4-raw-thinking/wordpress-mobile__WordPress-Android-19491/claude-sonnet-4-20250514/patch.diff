@@ -1,0 +1,1052 @@
+[start of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListAction.kt]
+package org.wordpress.android.ui.posts
+
+import android.content.ClipData
+import androidx.fragment.app.FragmentActivity
+import org.wordpress.android.fluxc.model.PostModel
+import org.wordpress.android.fluxc.model.SiteModel
+import org.wordpress.android.push.NativeNotificationsUtils
+import org.wordpress.android.ui.ActivityLauncher
+import org.wordpress.android.ui.PagePostCreationSourcesDetail.POST_FROM_POSTS_LIST
+import org.wordpress.android.ui.blaze.BlazeFeatureUtils
+import org.wordpress.android.ui.blaze.BlazeFlowSource
+import org.wordpress.android.ui.pages.SnackbarMessageHolder
+import org.wordpress.android.ui.photopicker.MediaPickerLauncher
+import org.wordpress.android.ui.posts.RemotePreviewLogicHelper.RemotePreviewType
+import org.wordpress.android.ui.prefs.AppPrefs
+import org.wordpress.android.ui.stories.intro.StoriesIntroDialogFragment
+import org.wordpress.android.ui.uploads.UploadService
+import org.wordpress.android.util.AppLog
+import org.wordpress.android.util.extensions.clipboardManager
+import org.wordpress.android.viewmodel.helpers.ToastMessageHolder
+
+sealed class PostListAction {
+    class EditPost(val site: SiteModel, val post: PostModel, val loadAutoSaveRevision: Boolean) : PostListAction()
+    class NewPost(val site: SiteModel, val isPromo: Boolean = false) : PostListAction()
+    class NewStoryPost(val site: SiteModel) : PostListAction()
+    class PreviewPost(
+        val site: SiteModel,
+        val post: PostModel,
+        val triggerPreviewStateUpdate: (PostListRemotePreviewState, PostInfoType) -> Unit,
+        val showToast: (ToastMessageHolder) -> Unit,
+        val messageMediaUploading: ToastMessageHolder
+    ) : PostListAction()
+
+    class RemotePreviewPost(
+        val site: SiteModel,
+        val post: PostModel,
+        val remotePreviewType: RemotePreviewType
+    ) : PostListAction()
+
+    class RetryUpload(
+        val post: PostModel,
+        val trackAnalytics: Boolean = PostUtils.isFirstTimePublish(post)
+    ) : PostListAction()
+
+    class CopyUrl(
+        val site: SiteModel,
+        val post: PostModel,
+        val showSnackbar: (SnackbarMessageHolder) -> Unit,
+        val messageSuccess: SnackbarMessageHolder,
+        val messageError: SnackbarMessageHolder
+    ) : PostListAction()
+
+    class ViewStats(val site: SiteModel, val post: PostModel) : PostListAction()
+    class ViewPost(val site: SiteModel, val post: PostModel) : PostListAction()
+    class ViewComments(val site: SiteModel, val post: PostModel) : PostListAction()
+    class DismissPendingNotification(val pushId: Int) : PostListAction()
+
+    class ShowPromoteWithBlaze(val post: PostModel) : PostListAction()
+}
+
+@Suppress("TooGenericExceptionCaught", "LongMethod", "ComplexMethod", "LongParameterList")
+fun handlePostListAction(
+    activity: FragmentActivity,
+    action: PostListAction,
+    remotePreviewLogicHelper: RemotePreviewLogicHelper,
+    previewStateHelper: PreviewStateHelper,
+    mediaPickerLauncher: MediaPickerLauncher,
+    blazeFeatureUtils: BlazeFeatureUtils
+) {
+    when (action) {
+        is PostListAction.EditPost -> {
+            ActivityLauncher.editPostOrPageForResult(activity, action.site, action.post, action.loadAutoSaveRevision)
+        }
+        is PostListAction.NewPost -> {
+            ActivityLauncher.addNewPostForResult(activity, action.site, action.isPromo, POST_FROM_POSTS_LIST, -1, null)
+        }
+        is PostListAction.NewStoryPost -> {
+            if (AppPrefs.shouldShowStoriesIntro()) {
+                StoriesIntroDialogFragment.newInstance(action.site)
+                    .show(activity.supportFragmentManager, StoriesIntroDialogFragment.TAG)
+            } else {
+                mediaPickerLauncher.showStoriesPhotoPickerForResultAndTrack(activity, action.site)
+            }
+        }
+        is PostListAction.PreviewPost -> {
+            val helperFunctions = previewStateHelper.getUploadStrategyFunctions(activity, action)
+            remotePreviewLogicHelper.runPostPreviewLogic(
+                activity = activity,
+                site = action.site,
+                post = action.post,
+                helperFunctions = helperFunctions
+            )
+        }
+        is PostListAction.RemotePreviewPost -> {
+            ActivityLauncher.previewPostOrPageForResult(activity, action.site, action.post, action.remotePreviewType)
+        }
+        is PostListAction.RetryUpload -> {
+            // restart the UploadService with retry parameters
+            val intent = UploadService.getRetryUploadServiceIntent(
+                activity,
+                action.post,
+                action.trackAnalytics
+            )
+            activity.startService(intent)
+        }
+        is PostListAction.ViewStats -> {
+            ActivityLauncher.viewStatsSinglePostDetails(activity, action.site, action.post)
+        }
+        is PostListAction.ViewPost -> {
+            ActivityLauncher.browsePostOrPage(activity, action.site, action.post)
+        }
+        is PostListAction.ViewComments -> {
+            ActivityLauncher.viewCommentsForPost(activity, action.site, action.post)
+        }
+        is PostListAction.DismissPendingNotification -> {
+            NativeNotificationsUtils.dismissNotification(action.pushId, activity)
+        }
+        is PostListAction.ShowPromoteWithBlaze -> {
+            blazeFeatureUtils.trackEntryPointTapped(BlazeFlowSource.POSTS_LIST)
+            ActivityLauncher.openPromoteWithBlaze(activity, action.post, BlazeFlowSource.POSTS_LIST)
+        }
+        is PostListAction.CopyUrl -> {
+            try {
+                activity.clipboardManager?.setPrimaryClip(
+                    ClipData.newPlainText("${action.post.id}", action.post.link)
+                ) ?: throw NullPointerException("ClipboardManager is not supported on this device")
+
+                action.showSnackbar.invoke(action.messageSuccess)
+            } catch (e: Exception) {
+                /**
+                 * Ignore any exceptions here as certain devices have bugs and will fail.
+                 * See https://crrev.com/542cb9cfcc927295615809b0c99917b09a219d9f for more info.
+                 */
+                AppLog.e(AppLog.T.POSTS, e)
+                action.showSnackbar.invoke(action.messageError)
+            }
+        }
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListAction.kt]
+[start of WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt]
+package org.wordpress.android.ui.posts
+
+import android.content.Intent
+import com.google.android.material.snackbar.Snackbar
+import org.wordpress.android.R
+import org.wordpress.android.fluxc.Dispatcher
+import org.wordpress.android.fluxc.generated.PostActionBuilder
+import org.wordpress.android.fluxc.model.LocalOrRemoteId.LocalId
+import org.wordpress.android.fluxc.model.PostModel
+import org.wordpress.android.fluxc.model.SiteModel
+import org.wordpress.android.fluxc.model.post.PostStatus.DRAFT
+import org.wordpress.android.fluxc.store.PostStore
+import org.wordpress.android.fluxc.store.PostStore.RemotePostPayload
+import org.wordpress.android.ui.notifications.utils.PendingDraftsNotificationsUtils
+import org.wordpress.android.ui.pages.SnackbarMessageHolder
+import org.wordpress.android.ui.posts.CriticalPostActionTracker.CriticalPostAction.DELETING_POST
+import org.wordpress.android.ui.posts.CriticalPostActionTracker.CriticalPostAction.MOVING_POST_TO_DRAFT
+import org.wordpress.android.ui.posts.CriticalPostActionTracker.CriticalPostAction.RESTORING_POST
+import org.wordpress.android.ui.posts.CriticalPostActionTracker.CriticalPostAction.TRASHING_POST
+import org.wordpress.android.ui.posts.CriticalPostActionTracker.CriticalPostAction.TRASHING_POST_WITH_LOCAL_CHANGES
+import org.wordpress.android.ui.posts.PostListAction.DismissPendingNotification
+import org.wordpress.android.ui.posts.PostListAction.PreviewPost
+import org.wordpress.android.ui.posts.PostListAction.RetryUpload
+import org.wordpress.android.ui.posts.PostListAction.ViewComments
+import org.wordpress.android.ui.posts.PostListAction.ViewPost
+import org.wordpress.android.ui.posts.PostListAction.ViewStats
+import org.wordpress.android.ui.posts.PostUploadAction.CancelPostAndMediaUpload
+import org.wordpress.android.ui.posts.PostUploadAction.EditPostResult
+import org.wordpress.android.ui.posts.PostUploadAction.PublishPost
+import org.wordpress.android.ui.posts.RemotePreviewLogicHelper.RemotePreviewType
+import org.wordpress.android.ui.uploads.UploadService
+import org.wordpress.android.ui.uploads.UploadUtils
+import org.wordpress.android.ui.utils.UiString.UiStringRes
+import org.wordpress.android.util.ToastUtils.Duration
+import org.wordpress.android.viewmodel.helpers.ToastMessageHolder
+import org.wordpress.android.widgets.PostListButtonType
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_COMMENTS
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_COPY
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_COPY_URL
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_DELETE
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_DELETE_PERMANENTLY
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_EDIT
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_MORE
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_MOVE_TO_DRAFT
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_PREVIEW
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_PUBLISH
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_RETRY
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_SHOW_MOVE_TRASHED_POST_TO_DRAFT_DIALOG
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_STATS
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_SUBMIT
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_SYNC
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_TRASH
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_VIEW
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_PROMOTE_WITH_BLAZE
+
+/**
+ * This is a temporary class to make the PostListViewModel more manageable. Please feel free to refactor it any way
+ * you see fit.
+ */
+@Suppress("LongParameterList")
+class PostActionHandler(
+    private val dispatcher: Dispatcher,
+    private val site: SiteModel,
+    private val postStore: PostStore,
+    private val postListDialogHelper: PostListDialogHelper,
+    private val doesPostHaveUnhandledConflict: (PostModel) -> Boolean,
+    private val hasUnhandledAutoSave: (PostModel) -> Boolean,
+    private val triggerPostListAction: (PostListAction) -> Unit,
+    private val triggerPostUploadAction: (PostUploadAction) -> Unit,
+    private val triggerPublishAction: (PostModel) -> Unit,
+    private val invalidateList: () -> Unit,
+    private val checkNetworkConnection: () -> Boolean,
+    private val showSnackbar: (SnackbarMessageHolder) -> Unit,
+    private val showToast: (ToastMessageHolder) -> Unit,
+    private val triggerPreviewStateUpdate: (PostListRemotePreviewState, PostInfoType) -> Unit,
+    private val copyPost: (SiteModel, PostModel, Boolean) -> Unit
+) {
+    private val criticalPostActionTracker = CriticalPostActionTracker(onStateChanged = {
+        invalidateList.invoke()
+    })
+
+    fun handlePostButton(buttonType: PostListButtonType, post: PostModel, hasAutoSave: Boolean) {
+        when (buttonType) {
+            BUTTON_EDIT -> editPostButtonAction(site, post)
+            BUTTON_RETRY -> triggerPostListAction.invoke(RetryUpload(post))
+            BUTTON_MOVE_TO_DRAFT -> {
+                moveTrashedPostToDraft(post)
+            }
+            BUTTON_PUBLISH -> {
+                triggerPublishAction.invoke(post)
+            }
+            BUTTON_SYNC -> {
+                postListDialogHelper.showSyncScheduledPostConfirmationDialog(post)
+            }
+            BUTTON_SUBMIT -> publishPost(post.id)
+            BUTTON_VIEW -> triggerPostListAction.invoke(ViewPost(site, post))
+            BUTTON_PREVIEW -> triggerPostListAction.invoke(
+                PreviewPost(
+                    site = site,
+                    post = post,
+                    triggerPreviewStateUpdate = triggerPreviewStateUpdate,
+                    showToast = showToast,
+                    messageMediaUploading = ToastMessageHolder(
+                        R.string.editor_toast_uploading_please_wait,
+                        Duration.SHORT
+                    )
+                )
+            )
+            BUTTON_STATS -> triggerPostListAction.invoke(ViewStats(site, post))
+            BUTTON_COMMENTS -> triggerPostListAction.invoke(ViewComments(site, post))
+            BUTTON_TRASH -> {
+                when {
+                    post.isLocallyChanged -> {
+                        postListDialogHelper.showTrashPostWithLocalChangesConfirmationDialog(post)
+                    }
+                    hasAutoSave -> {
+                        postListDialogHelper.showTrashPostWithUnsavedChangesConfirmationDialog(post)
+                    }
+                    else -> trashPost(post)
+                }
+            }
+            BUTTON_COPY -> copyPost(site, post, true)
+            BUTTON_COPY_URL -> triggerPostListAction.invoke(copyUrlAction(post))
+            BUTTON_DELETE, BUTTON_DELETE_PERMANENTLY -> {
+                postListDialogHelper.showDeletePostConfirmationDialog(post)
+            }
+            BUTTON_CANCEL_PENDING_AUTO_UPLOAD -> {
+                cancelPendingAutoUpload(post)
+            }
+            BUTTON_SHOW_MOVE_TRASHED_POST_TO_DRAFT_DIALOG -> {
+                postListDialogHelper.showMoveTrashedPostToDraftDialog(post)
+            }
+            BUTTON_MORE -> {
+            } // do nothing - ui will show a popup window
+            BUTTON_PROMOTE_WITH_BLAZE -> {
+                triggerPostListAction.invoke(PostListAction.ShowPromoteWithBlaze(post))
+            }
+        }
+    }
+
+    private fun copyUrlAction(post: PostModel) = PostListAction.CopyUrl(
+        site = site,
+        post = post,
+        showSnackbar = showSnackbar,
+        messageSuccess = SnackbarMessageHolder(
+            UiStringRes(R.string.post_link_copied_to_clipboard),
+            duration = Snackbar.LENGTH_SHORT,
+            isImportant = false
+        ),
+        messageError = SnackbarMessageHolder(
+            UiStringRes(R.string.error_copy_to_clipboard),
+            duration = Snackbar.LENGTH_SHORT,
+            isImportant = false
+        )
+    )
+
+    private fun cancelPendingAutoUpload(post: PostModel) {
+        val msgRes = UploadUtils.cancelPendingAutoUpload(post, dispatcher)
+        showSnackbar.invoke(SnackbarMessageHolder(UiStringRes(msgRes)))
+    }
+
+    fun newPost() {
+        triggerPostListAction(PostListAction.NewPost(site))
+    }
+
+    fun newStoryPost() {
+        triggerPostListAction(PostListAction.NewStoryPost(site))
+    }
+
+    fun handleEditPostResult(data: Intent?) {
+        val localPostId = data?.getIntExtra(EditPostActivity.EXTRA_POST_LOCAL_ID, 0)
+        if (localPostId == null || localPostId == 0) {
+            return
+        }
+        val post = postStore.getPostByLocalPostId(localPostId)
+        if (post != null) {
+            triggerPostUploadAction(EditPostResult(site, post, data) { publishPost(localPostId) })
+        }
+    }
+
+    fun handleRemotePreview(localPostId: Int, remotePreviewType: RemotePreviewType) {
+        val post = postStore.getPostByLocalPostId(localPostId)
+        if (post != null) {
+            triggerPostListAction.invoke(PostListAction.RemotePreviewPost(site, post, remotePreviewType))
+        }
+    }
+
+    fun publishPost(localPostId: Int) {
+        val post = postStore.getPostByLocalPostId(localPostId)
+        if (post != null) {
+            triggerPostUploadAction.invoke(PublishPost(dispatcher, site, post))
+        }
+    }
+
+    fun publishPost(post: PostModel) {
+        triggerPostUploadAction.invoke(PublishPost(dispatcher, site, post))
+    }
+
+    fun resolveConflictsAndEditPost(localPostId: Int) {
+        val post = postStore.getPostByLocalPostId(localPostId)
+        if (post != null) {
+            performChecksAndEdit(site, post)
+        }
+    }
+
+    fun moveTrashedPostToDraft(localPostId: Int) {
+        val post = postStore.getPostByLocalPostId(localPostId)
+        if (post != null) {
+            moveTrashedPostToDraft(post)
+        }
+    }
+
+    private fun moveTrashedPostToDraft(post: PostModel) {
+        /*
+         * We need network connection to move a post to remote draft. We can technically move it to the local drafts
+         * but that'll leave the trashed post in the remote which can be confusing.
+         */
+        if (!checkNetworkConnection.invoke()) {
+            return
+        }
+        post.setStatus(DRAFT.toString())
+        dispatcher.dispatch(PostActionBuilder.newPushPostAction(RemotePostPayload(post, site)))
+
+        val localPostId = LocalId(post.id)
+        criticalPostActionTracker.add(localPostId, MOVING_POST_TO_DRAFT)
+
+        val snackBarHolder = SnackbarMessageHolder(
+            message = UiStringRes(R.string.post_moving_to_draft),
+            onDismissAction = {
+                criticalPostActionTracker.remove(localPostId, MOVING_POST_TO_DRAFT)
+            }
+        )
+        showSnackbar.invoke(snackBarHolder)
+    }
+
+    private fun editPostButtonAction(site: SiteModel, post: PostModel) = performChecksAndEdit(site, post)
+
+    private fun performChecksAndEdit(site: SiteModel, post: PostModel) {
+        // first of all, check whether this post is in Conflicted state with a more recent remote version
+        if (doesPostHaveUnhandledConflict.invoke(post)) {
+            postListDialogHelper.showConflictedPostResolutionDialog(post)
+            return
+        }
+
+        // Then check if an autosave revision is available
+        if (hasUnhandledAutoSave.invoke(post)) {
+            postListDialogHelper.showAutoSaveRevisionDialog(post)
+            return
+        }
+
+        editPost(site, post)
+    }
+
+    private fun editPost(site: SiteModel, post: PostModel) {
+        if (UploadService.isPostUploadingOrQueued(post)) {
+            // If the post is uploading media, allow the media to continue uploading, but don't upload the
+            // post itself when they finish (since we're about to edit it again)
+            UploadService.cancelQueuedPostUpload(post)
+        }
+        triggerPostListAction.invoke(PostListAction.EditPost(site, post, loadAutoSaveRevision = false))
+    }
+
+    fun deletePost(localPostId: Int) {
+        // If post doesn't exist, nothing else to do
+        val post = postStore.getPostByLocalPostId(localPostId) ?: return
+        criticalPostActionTracker.add(LocalId(post.id), DELETING_POST)
+
+        when {
+            post.isLocalDraft -> {
+                val pushId = PendingDraftsNotificationsUtils.makePendingDraftNotificationId(post.id)
+                triggerPostListAction(DismissPendingNotification(pushId))
+                dispatcher.dispatch(PostActionBuilder.newRemovePostAction(post))
+            }
+            else -> {
+                dispatcher.dispatch(PostActionBuilder.newDeletePostAction(RemotePostPayload(post, site)))
+            }
+        }
+    }
+
+    /**
+     * This function handles a post being deleted and removed. Since deleting remote posts will trigger both delete
+     * and remove actions we only want to remove the critical action when the post is actually successfully removed.
+     *
+     * It's possible to separate these into two methods that handles delete and remove. However, the fact that they
+     * follow the same approach and the tricky nature of delete action makes combining the actions like so makes our
+     * expectations clearer.
+     */
+    fun handlePostDeletedOrRemoved(localPostId: LocalId, isRemoved: Boolean, isError: Boolean) {
+        if (criticalPostActionTracker.get(localPostId) != DELETING_POST) {
+            /*
+             * This is an unexpected action and either it has already been handled or another critical action has
+             * been performed. In either case, safest action is to just ignore it.
+             */
+            return
+        }
+        if (isError) {
+            showToast.invoke(ToastMessageHolder(R.string.error_deleting_post, Duration.SHORT))
+        }
+        if (isRemoved) {
+            criticalPostActionTracker.remove(localPostId = localPostId, criticalPostAction = DELETING_POST)
+        }
+    }
+
+    fun trashPostWithLocalChanges(localPostId: Int) {
+        // If post doesn't exist, nothing else to do
+        val post = postStore.getPostByLocalPostId(localPostId) ?: return
+        trashPost(post, true)
+    }
+
+    fun trashPostWithUnsavedChanges(localPostId: Int) {
+        val post = postStore.getPostByLocalPostId(localPostId) ?: return
+        trashPost(post)
+    }
+
+    private fun trashPost(post: PostModel, hasLocalChanges: Boolean = false) {
+        // We need network connection to trash a post
+        if (!checkNetworkConnection()) {
+            return
+        }
+        val criticalPostAction = if (hasLocalChanges) {
+            TRASHING_POST_WITH_LOCAL_CHANGES
+        } else {
+            TRASHING_POST
+        }
+
+        showSnackbar.invoke(SnackbarMessageHolder(UiStringRes(R.string.post_trashing)))
+        criticalPostActionTracker.add(localPostId = LocalId(post.id), criticalPostAction = criticalPostAction)
+
+        triggerPostUploadAction.invoke(CancelPostAndMediaUpload(post))
+        dispatcher.dispatch(PostActionBuilder.newDeletePostAction(RemotePostPayload(post, site)))
+    }
+
+    @Suppress("UseCheckOrError")
+    fun handlePostTrashed(localPostId: LocalId, isError: Boolean) {
+        val criticalAction = criticalPostActionTracker.get(localPostId)
+        if (criticalAction != TRASHING_POST && criticalAction != TRASHING_POST_WITH_LOCAL_CHANGES) {
+            /*
+             * This is an unexpected action and either it has already been handled or another critical action has
+             * been performed. In either case, safest action is to just ignore it.
+             */
+            return
+        }
+        criticalPostActionTracker.remove(localPostId = localPostId, criticalPostAction = criticalAction)
+        if (isError) {
+            showToast.invoke(ToastMessageHolder(R.string.error_deleting_post, Duration.SHORT))
+        } else {
+            val snackBarHolder = when (criticalAction) {
+                TRASHING_POST -> SnackbarMessageHolder(
+                    message = UiStringRes(R.string.post_trashed),
+                    buttonTitle = UiStringRes(R.string.undo),
+                    buttonAction = {
+                        val post = postStore.getPostByLocalPostId(localPostId.value)
+                        if (post != null) {
+                            restorePost(post)
+                        }
+                    }
+                )
+                TRASHING_POST_WITH_LOCAL_CHANGES -> SnackbarMessageHolder(message = UiStringRes(R.string.post_trashed))
+                else -> throw IllegalStateException("Unexpected action in handlePostTrashed(): $criticalAction")
+            }
+            showSnackbar.invoke(snackBarHolder)
+        }
+    }
+
+    private fun restorePost(post: PostModel) {
+        // We need network connection to restore a post
+        if (!checkNetworkConnection.invoke()) {
+            return
+        }
+        showSnackbar.invoke(SnackbarMessageHolder(message = UiStringRes(R.string.post_restoring)))
+        criticalPostActionTracker.add(localPostId = LocalId(post.id), criticalPostAction = RESTORING_POST)
+        dispatcher.dispatch(PostActionBuilder.newRestorePostAction(RemotePostPayload(post, site)))
+    }
+
+    fun handlePostRestored(localPostId: LocalId, isError: Boolean) {
+        if (criticalPostActionTracker.get(localPostId) != RESTORING_POST) {
+            /*
+             * This is an unexpected action and either it has already been handled or another critical action has
+             * been performed. In either case, safest action is to just ignore it.
+             */
+            return
+        }
+        criticalPostActionTracker.remove(localPostId = localPostId, criticalPostAction = RESTORING_POST)
+        if (isError) {
+            showToast.invoke(ToastMessageHolder(R.string.error_restoring_post, Duration.SHORT))
+        } else {
+            showSnackbar.invoke(SnackbarMessageHolder(message = UiStringRes(R.string.post_restored)))
+        }
+    }
+
+    fun isPerformingCriticalAction(localPostId: LocalId): Boolean {
+        return criticalPostActionTracker.contains(localPostId)
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt]
+[start of WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt]
+package org.wordpress.android.viewmodel.posts
+
+import org.apache.commons.text.StringEscapeUtils
+import org.wordpress.android.BuildConfig
+import org.wordpress.android.R
+import org.wordpress.android.analytics.AnalyticsTracker
+import org.wordpress.android.analytics.AnalyticsTracker.Stat.POST_LIST_BUTTON_PRESSED
+import org.wordpress.android.analytics.AnalyticsTracker.Stat.POST_LIST_ITEM_SELECTED
+import org.wordpress.android.fluxc.model.LocalOrRemoteId.LocalId
+import org.wordpress.android.fluxc.model.LocalOrRemoteId.RemoteId
+import org.wordpress.android.fluxc.model.PostModel
+import org.wordpress.android.fluxc.model.SiteModel
+import org.wordpress.android.fluxc.model.post.PostStatus
+import org.wordpress.android.fluxc.model.post.PostStatus.DRAFT
+import org.wordpress.android.fluxc.model.post.PostStatus.PENDING
+import org.wordpress.android.fluxc.model.post.PostStatus.PRIVATE
+import org.wordpress.android.fluxc.model.post.PostStatus.PUBLISHED
+import org.wordpress.android.fluxc.model.post.PostStatus.SCHEDULED
+import org.wordpress.android.fluxc.model.post.PostStatus.TRASHED
+import org.wordpress.android.fluxc.model.post.PostStatus.UNKNOWN
+import org.wordpress.android.ui.blaze.BlazeFeatureUtils
+import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureRemovalPhaseHelper
+import org.wordpress.android.ui.posts.AuthorFilterSelection
+import org.wordpress.android.ui.posts.AuthorFilterSelection.EVERYONE
+import org.wordpress.android.ui.posts.PostModelUploadStatusTracker
+import org.wordpress.android.ui.posts.PostUtils
+import org.wordpress.android.ui.prefs.AppPrefsWrapper
+import org.wordpress.android.ui.uploads.UploadUtils
+import org.wordpress.android.ui.utils.UiString
+import org.wordpress.android.ui.utils.UiString.UiStringRes
+import org.wordpress.android.ui.utils.UiString.UiStringText
+import org.wordpress.android.util.AppLog
+import org.wordpress.android.util.AppLog.T.POSTS
+import org.wordpress.android.util.HtmlUtils
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.NothingToUpload
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.UploadFailed
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.UploadQueued
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.UploadWaitingForConnection
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.UploadingMedia
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.UploadingPost
+import org.wordpress.android.viewmodel.pages.PostPageListLabelColorUseCase
+import org.wordpress.android.viewmodel.posts.PostListItemIdentifier.LocalPostId
+import org.wordpress.android.viewmodel.posts.PostListItemIdentifier.RemotePostId
+import org.wordpress.android.viewmodel.posts.PostListItemType.PostListItemUiState
+import org.wordpress.android.viewmodel.uistate.ProgressBarUiState
+import org.wordpress.android.widgets.PostListButtonType
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_COMMENTS
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_COPY
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_COPY_URL
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_DELETE
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_DELETE_PERMANENTLY
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_EDIT
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_MOVE_TO_DRAFT
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_PREVIEW
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_PROMOTE_WITH_BLAZE
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_PUBLISH
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_RETRY
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_SHOW_MOVE_TRASHED_POST_TO_DRAFT_DIALOG
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_STATS
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_SUBMIT
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_SYNC
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_TRASH
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_VIEW
+import javax.inject.Inject
+
+/**
+ * Helper class which encapsulates logic for creating UiStates for items in the PostsList.
+ */
+class PostListItemUiStateHelper @Inject constructor(
+    private val appPrefsWrapper: AppPrefsWrapper,
+    private val uploadUiStateUseCase: PostModelUploadUiStateUseCase,
+    private val labelColorUseCase: PostPageListLabelColorUseCase,
+    private val jetpackFeatureRemovalPhaseHelper: JetpackFeatureRemovalPhaseHelper,
+    private val blazeFeatureUtils: BlazeFeatureUtils
+) {
+    @Suppress("LongParameterList", "LongMethod")
+    fun createPostListItemUiState(
+        authorFilterSelection: AuthorFilterSelection,
+        isFilteringByAuthorSupported: Boolean,
+        post: PostModel,
+        site: SiteModel,
+        unhandledConflicts: Boolean,
+        hasAutoSave: Boolean,
+        capabilitiesToPublish: Boolean,
+        statsSupported: Boolean,
+        featuredImageUrl: String?,
+        formattedDate: String,
+        performingCriticalAction: Boolean,
+        isSearch: Boolean,
+        uploadStatusTracker: PostModelUploadStatusTracker,
+        onAction: (PostModel, PostListButtonType, AnalyticsTracker.Stat) -> Unit,
+    ): PostListItemUiState {
+        val postStatus: PostStatus = PostStatus.fromPost(post)
+        val uploadUiState = uploadUiStateUseCase.createUploadUiState(post, site, uploadStatusTracker)
+
+        val onButtonClicked = { buttonType: PostListButtonType ->
+            onAction.invoke(post, buttonType, POST_LIST_BUTTON_PRESSED)
+        }
+        val buttonTypes = createButtonTypes(
+            postStatus = postStatus,
+            isLocalDraft = post.isLocalDraft,
+            isLocallyChanged = post.isLocallyChanged,
+            uploadUiState = uploadUiState,
+            siteHasCapabilitiesToPublish = capabilitiesToPublish,
+            statsSupported = statsSupported,
+            shouldShowStatsInJetpackRemovalPhase =
+            jetpackFeatureRemovalPhaseHelper.shouldShowPublishedPostStatsButton(),
+            shouldShowPromoteWithBlaze = blazeFeatureUtils.isPostBlazeEligible(
+                site,
+                postStatus,
+                post
+            ),
+        )
+        // val defaultActions = createDefaultViewActions(buttonTypes, onButtonClicked)
+        val moreActions = createMoreActions(buttonTypes, onButtonClicked)
+
+        val remotePostId = RemotePostId(RemoteId(post.remotePostId))
+        val localPostId = LocalPostId(LocalId(post.id))
+        val baseTitle = getTitle(post = post)
+        val excerpt = getExcerpt(post = post)
+
+        val title =
+            if (baseTitle == UiStringRes(R.string.untitled_in_parentheses) && excerpt != null) null else baseTitle
+
+        val postInfo = getPostInfoLabels(
+            postStatus,
+            formattedDate,
+            post.authorDisplayName,
+            authorFilterSelection,
+            isSearch,
+            isFilteringByAuthorSupported
+        )
+        val statuses = getStatuses(
+            postStatus = postStatus,
+            post = post,
+            uploadUiState = uploadUiState,
+            hasUnhandledConflicts = unhandledConflicts,
+            hasAutoSave = hasAutoSave
+        )
+        val statusesColor = labelColorUseCase.getLabelsColor(post, uploadUiState, unhandledConflicts, hasAutoSave)
+        val statusesDelimiter = UiStringRes(R.string.multiple_status_label_delimiter)
+        val onSelected = {
+            when (postStatus) {
+                TRASHED -> {
+                    onAction.invoke(
+                        post,
+                        BUTTON_SHOW_MOVE_TRASHED_POST_TO_DRAFT_DIALOG,
+                        POST_LIST_ITEM_SELECTED
+                    )
+                }
+
+                UNKNOWN, PUBLISHED, DRAFT, PRIVATE, PENDING, SCHEDULED -> onAction.invoke(
+                    post,
+                    BUTTON_EDIT,
+                    POST_LIST_ITEM_SELECTED
+                )
+            }
+        }
+        val itemUiData = PostListItemUiStateData(
+            remotePostId = remotePostId,
+            localPostId = localPostId,
+            title = title,
+            excerpt = excerpt,
+            imageUrl = featuredImageUrl,
+            postInfo = postInfo,
+            statuses = statuses,
+            statusesColor = statusesColor,
+            statusesDelimiter = statusesDelimiter,
+            progressBarUiState = getProgressBarState(
+                uploadUiState = uploadUiState,
+                performingCriticalAction = performingCriticalAction
+            ),
+            showOverlay = shouldShowOverlay(
+                uploadUiState = uploadUiState,
+                performingCriticalAction = performingCriticalAction
+            ),
+            disableRippleEffect = postStatus == TRASHED
+        )
+
+        return PostListItemUiState(
+            data = itemUiData,
+            moreActions = moreActions,
+            onSelected = onSelected
+        )
+    }
+
+    @Suppress("LongParameterList")
+    private fun getPostInfoLabels(
+        postStatus: PostStatus,
+        formattedDate: String,
+        displayName: String?,
+        authorFilterSelection: AuthorFilterSelection,
+        isSearch: Boolean,
+        isAuthorFilterVisible: Boolean
+    ): List<UiString> {
+        val uiStrings: MutableList<UiString> = mutableListOf()
+
+        if (isSearch) {
+            val postStatusText = when (postStatus) {
+                UNKNOWN -> R.string.unknown
+                PUBLISHED -> R.string.post_status_post_published
+                DRAFT -> R.string.post_status_draft
+                PRIVATE -> R.string.post_status_post_private
+                PENDING -> R.string.post_status_pending_review
+                TRASHED -> R.string.post_status_post_trashed
+                SCHEDULED -> R.string.post_status_post_scheduled
+            }
+            uiStrings.add(UiStringRes(postStatusText))
+        }
+
+        if (formattedDate.isNotBlank()) {
+            uiStrings.add(UiStringText(formattedDate))
+        }
+        if (isAuthorFilterVisible && authorFilterSelection == EVERYONE && !displayName.isNullOrBlank()) {
+            uiStrings.add(UiStringText(displayName))
+        }
+        return uiStrings
+    }
+
+    private fun getTitle(post: PostModel): UiString {
+        return if (post.title.isNotBlank()) {
+            UiStringText(StringEscapeUtils.unescapeHtml4(post.title).let { HtmlUtils.stripHtml(it) })
+        } else UiStringRes(R.string.untitled_in_parentheses)
+    }
+
+    private fun getExcerpt(post: PostModel): UiString? =
+        PostUtils.getPostListExcerptFromPost(post)
+            .takeIf { !it.isNullOrBlank() }
+            ?.let { StringEscapeUtils.unescapeHtml4(it) }
+            ?.let { PostUtils.collapseShortcodes(it) }
+            ?.let { UiStringText(getTextBeforeLargeSpaceGap(it)) }
+    private fun getTextBeforeLargeSpaceGap(input: String): String {
+        val parts = input.split(Regex("\\s+\\n+"))
+        return parts.first()
+    }
+
+    private fun getProgressBarState(
+        uploadUiState: PostUploadUiState,
+        performingCriticalAction: Boolean
+    ): ProgressBarUiState {
+        return if (shouldShowProgress(uploadUiState, performingCriticalAction)) {
+            if (uploadUiState is UploadingMedia) {
+                ProgressBarUiState.Determinate(uploadUiState.progress)
+            } else {
+                ProgressBarUiState.Indeterminate
+            }
+        } else {
+            ProgressBarUiState.Hidden
+        }
+    }
+
+    private fun shouldShowProgress(uploadUiState: PostUploadUiState, performingCriticalAction: Boolean): Boolean {
+        return performingCriticalAction || uploadUiState is UploadingPost || uploadUiState is UploadingMedia ||
+                uploadUiState is UploadQueued
+    }
+
+    private fun getErrorAndProgressStatuses(
+        uploadUiState: PostUploadUiState,
+        postStatus: PostStatus,
+        hasUnhandledConflicts: Boolean,
+        hasAutoSave: Boolean
+    ): MutableList<UiString> {
+        val labels: MutableList<UiString> = ArrayList()
+        when {
+            uploadUiState is UploadFailed -> {
+                getErrorLabel(uploadUiState, postStatus).let { labels.add(it) }
+            }
+
+            uploadUiState is UploadingPost -> if (uploadUiState.isDraft) {
+                labels.add(UiStringRes(R.string.post_uploading_draft))
+            } else {
+                labels.add(UiStringRes(R.string.post_uploading))
+            }
+
+            uploadUiState is UploadingMedia -> labels.add(UiStringRes(R.string.uploading_media))
+            uploadUiState is UploadQueued -> labels.add(UiStringRes(R.string.post_queued))
+            uploadUiState is UploadWaitingForConnection -> {
+                getWaitingForConnectionStatus(uploadUiState.postStatus)?.let {
+                    labels.add(it)
+                }
+            }
+
+            hasUnhandledConflicts -> labels.add(UiStringRes(R.string.local_post_is_conflicted))
+            hasAutoSave -> labels.add(UiStringRes(R.string.local_post_autosave_revision_available))
+        }
+        return labels
+    }
+
+    private fun getWaitingForConnectionStatus(postStatus: PostStatus): UiString? {
+        return when (postStatus) {
+            UNKNOWN, PUBLISHED -> (UiStringRes(R.string.post_waiting_for_connection_publish))
+            PRIVATE -> (UiStringRes(R.string.post_waiting_for_connection_private))
+            PENDING -> (UiStringRes(R.string.post_waiting_for_connection_pending))
+            SCHEDULED -> (UiStringRes(R.string.post_waiting_for_connection_scheduled))
+            DRAFT -> (UiStringRes(R.string.post_waiting_for_connection_draft))
+            TRASHED -> {
+                AppLog.e(
+                    POSTS,
+                    "Developer error: This state shouldn't happen. Trashed post is in " +
+                            "UploadWaitingForConnection state."
+                )
+                return null
+            }
+        }
+    }
+
+    private fun getStatuses(
+        postStatus: PostStatus,
+        post: PostModel,
+        uploadUiState: PostUploadUiState,
+        hasUnhandledConflicts: Boolean,
+        hasAutoSave: Boolean
+    ): List<UiString> {
+        val labels = getErrorAndProgressStatuses(
+            uploadUiState,
+            postStatus,
+            hasUnhandledConflicts,
+            hasAutoSave
+        )
+
+        // we want to show either single error/progress label or 0-n info labels.
+        if (labels.isEmpty()) {
+            if (post.isLocalDraft) {
+                labels.add(UiStringRes(R.string.local_draft))
+            } else if (post.isLocallyChanged) {
+                labels.add(UiStringRes(R.string.local_changes))
+            }
+            if (postStatus == PRIVATE) {
+                labels.add(UiStringRes(R.string.post_status_post_private))
+            }
+            if (postStatus == PENDING) {
+                labels.add(UiStringRes(R.string.post_status_pending_review))
+            }
+            if (post.sticky) {
+                labels.add(UiStringRes(R.string.post_status_sticky))
+            }
+        }
+        return labels
+    }
+
+    private fun getErrorLabel(uploadUiState: UploadFailed, postStatus: PostStatus): UiString {
+        return when {
+            uploadUiState.error.mediaError != null -> getMediaUploadErrorMessage(uploadUiState, postStatus)
+            uploadUiState.error.postError != null -> UploadUtils.getErrorMessageResIdFromPostError(
+                postStatus,
+                false,
+                uploadUiState.error.postError,
+                uploadUiState.isEligibleForAutoUpload
+            )
+
+            else -> {
+                val errorMsg = "MediaError and postError are both null."
+                if (BuildConfig.DEBUG) {
+                    throw IllegalStateException(errorMsg)
+                } else {
+                    AppLog.e(POSTS, errorMsg)
+                }
+                UiStringRes(R.string.error_generic)
+            }
+        }
+    }
+
+    private fun getMediaUploadErrorMessage(uploadUiState: UploadFailed, postStatus: PostStatus): UiStringRes {
+        return when {
+            uploadUiState.isEligibleForAutoUpload -> when (postStatus) {
+                PUBLISHED -> UiStringRes(R.string.error_media_recover_post_not_published_retrying)
+                PRIVATE -> UiStringRes(R.string.error_media_recover_post_not_published_retrying_private)
+                SCHEDULED -> UiStringRes(R.string.error_media_recover_post_not_scheduled_retrying)
+                PENDING -> UiStringRes(R.string.error_media_recover_post_not_submitted_retrying)
+                DRAFT, TRASHED, UNKNOWN -> UiStringRes(R.string.error_generic_error_retrying)
+            }
+
+            uploadUiState.retryWillPushChanges -> when (postStatus) {
+                PUBLISHED -> UiStringRes(R.string.error_media_recover_post_not_published)
+                PRIVATE -> UiStringRes(R.string.error_media_recover_post_not_published_private)
+                SCHEDULED -> UiStringRes(R.string.error_media_recover_post_not_scheduled)
+                PENDING -> UiStringRes(R.string.error_media_recover_post_not_submitted)
+                DRAFT, TRASHED, UNKNOWN -> UiStringRes(R.string.error_media_recover_post)
+            }
+
+            else -> UiStringRes(R.string.error_media_recover_post)
+        }
+    }
+
+    private fun shouldShowOverlay(uploadUiState: PostUploadUiState, performingCriticalAction: Boolean): Boolean {
+        // show overlay when post upload is in progress or (media upload is in progress and the user is not using Aztec)
+        return performingCriticalAction ||
+                (uploadUiState is UploadingPost ||
+                        (!appPrefsWrapper.isAztecEditorEnabled && uploadUiState is UploadingMedia))
+    }
+
+    @Suppress("LongParameterList", "ComplexMethod")
+    private fun createButtonTypes(
+        postStatus: PostStatus,
+        isLocalDraft: Boolean,
+        isLocallyChanged: Boolean,
+        uploadUiState: PostUploadUiState,
+        siteHasCapabilitiesToPublish: Boolean,
+        statsSupported: Boolean,
+        shouldShowStatsInJetpackRemovalPhase: Boolean,
+        shouldShowPromoteWithBlaze: Boolean
+    ): List<PostListButtonType> {
+        val canRetryUpload = uploadUiState is UploadFailed
+        val canCancelPendingAutoUpload = (uploadUiState is UploadWaitingForConnection ||
+                (uploadUiState is UploadFailed && uploadUiState.isEligibleForAutoUpload))
+        val canPublishPost = (canRetryUpload || uploadUiState is NothingToUpload || !canCancelPendingAutoUpload) &&
+                (isLocallyChanged || isLocalDraft || postStatus == DRAFT ||
+                        (siteHasCapabilitiesToPublish && postStatus == PENDING))
+
+        val canShowStats = statsSupported &&
+                postStatus == PUBLISHED &&
+                !isLocalDraft &&
+                !isLocallyChanged &&
+                shouldShowStatsInJetpackRemovalPhase
+        val canShowComments = postStatus == PUBLISHED &&
+                !isLocalDraft &&
+                !isLocallyChanged
+        val canShowCopy = postStatus == PUBLISHED || postStatus == DRAFT
+        val canShowCopyUrlButton = !isLocalDraft && postStatus != TRASHED
+        val canShowViewButton = !canRetryUpload && postStatus != TRASHED
+        val canShowPublishButton = canRetryUpload || canPublishPost
+        val buttonTypes = ArrayList<PostListButtonType>()
+
+        if (canCancelPendingAutoUpload) {
+            buttonTypes.add(BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+        }
+
+        if (canShowPublishButton) {
+            buttonTypes.add(
+                when {
+                    canRetryUpload -> BUTTON_RETRY
+                    !siteHasCapabilitiesToPublish -> BUTTON_SUBMIT
+                    postStatus == SCHEDULED && isLocallyChanged -> BUTTON_SYNC
+                    else -> BUTTON_PUBLISH
+                }
+            )
+        }
+
+        if (canShowViewButton) {
+            buttonTypes.addViewOrPreviewAction(isLocalDraft || isLocallyChanged)
+        }
+
+        if (canShowStats) {
+            buttonTypes.add(BUTTON_STATS)
+        }
+
+        if (canShowComments) {
+            buttonTypes.add(BUTTON_COMMENTS)
+        }
+
+        if (canShowCopy) {
+            buttonTypes.add(BUTTON_COPY)
+        }
+
+        buttonTypes.addMoveToDraftActionIfAvailable(postStatus)
+
+        if (canShowCopyUrlButton) {
+            buttonTypes.add(BUTTON_COPY_URL)
+        }
+
+        if (shouldShowPromoteWithBlaze) {
+            buttonTypes.add(BUTTON_PROMOTE_WITH_BLAZE)
+        }
+
+        buttonTypes.addDeletingOrTrashAction(isLocalDraft, postStatus)
+
+        return sortPostListButtons(buttonTypes)
+    }
+
+    private fun sortPostListButtons(list: List<PostListButtonType>): List<PostListButtonType> {
+        return list.sortedWith(compareBy(
+            { it.groupId },
+            { it.positionInGroup }
+        ))
+    }
+
+    private fun MutableList<PostListButtonType>.addViewOrPreviewAction(shouldShowPreview: Boolean) {
+        add(if (shouldShowPreview) BUTTON_PREVIEW else BUTTON_VIEW)
+    }
+
+    private fun MutableList<PostListButtonType>.addDeletingOrTrashAction(
+        isLocalDraft: Boolean,
+        postStatus: PostStatus
+    ) {
+        when {
+            isLocalDraft -> add(BUTTON_DELETE)
+            postStatus == TRASHED -> add(BUTTON_DELETE_PERMANENTLY)
+            postStatus != TRASHED -> add(BUTTON_TRASH)
+        }
+    }
+
+    private fun MutableList<PostListButtonType>.addMoveToDraftActionIfAvailable(postStatus: PostStatus) {
+        val canMovePostToDraft = postStatus == PUBLISHED || postStatus == TRASHED
+
+        if (canMovePostToDraft) {
+            add(BUTTON_MOVE_TO_DRAFT)
+        }
+    }
+
+    private fun createMoreActions(
+        buttonTypes: List<PostListButtonType>,
+        onButtonClicked: (PostListButtonType) -> Unit
+    ): PostListItemAction.MoreItem {
+        val allItems = buttonTypes.map { buttonType: PostListButtonType ->
+            PostListItemAction.SingleItem(buttonType, onButtonClicked)
+        }
+        return PostListItemAction.MoreItem(allItems, onButtonClicked)
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt]

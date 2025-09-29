@@ -1,0 +1,593 @@
+[start of WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt]
+package org.wordpress.android.ui.deeplinks.handlers
+
+import org.wordpress.android.fluxc.model.SiteModel
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction.OpenStats
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction.OpenStatsForSite
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction.OpenStatsForSiteAndTimeframe
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction.OpenStatsForTimeframe
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction.OpenJetpackStaticPosterView
+import org.wordpress.android.ui.deeplinks.DeepLinkUriUtils
+import org.wordpress.android.ui.deeplinks.DeepLinkingIntentReceiverViewModel.Companion.APPLINK_SCHEME
+import org.wordpress.android.ui.deeplinks.DeepLinkingIntentReceiverViewModel.Companion.HOST_WORDPRESS_COM
+import org.wordpress.android.ui.deeplinks.DeepLinkingIntentReceiverViewModel.Companion.SITE_DOMAIN
+import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureRemovalPhaseHelper
+import org.wordpress.android.ui.stats.StatsTimeframe
+import org.wordpress.android.util.UriWrapper
+import javax.inject.Inject
+
+class StatsLinkHandler
+@Inject constructor(
+    private val deepLinkUriUtils: DeepLinkUriUtils,
+    private val jetpackFeatureRemovalPhaseHelper: JetpackFeatureRemovalPhaseHelper
+) : DeepLinkHandler {
+    /**
+     * Builds navigate action from URL like:
+     * https://wordpress.com/stats/$timeframe/$site
+     * where timeframe and site are optional
+     * or
+     * wordpress://stats
+     *
+     * Additionally supports:
+     * https://wordpress.com/stats/traffic/$timeframe/$site (timeframe and site optional)
+     * https://wordpress.com/stats/subscribers/$site (site optional)
+     */
+    override fun buildNavigateAction(uri: UriWrapper): NavigateAction {
+        val pathSegments = uri.pathSegments
+        val offset = when {
+            uri.host == STATS_PATH -> 0
+            pathSegments.firstOrNull() == STATS_PATH -> 1
+            else -> 0
+        }
+
+        if (jetpackFeatureRemovalPhaseHelper.shouldShowStaticPage()) {
+            return OpenJetpackStaticPosterView
+        }
+
+        val firstAfterStats = pathSegments.getOrNull(offset)
+
+        return when (firstAfterStats) {
+            // Traffic path with optional timeframe and site:
+            "traffic" -> {
+                val timeframe = pathSegments.getOrNull(offset + 1)?.toStatsTimeframe()
+                val site = pathSegments.getOrNull(offset + 2)?.toSite()
+                when {
+                    site != null && timeframe != null -> OpenStatsForSiteAndTimeframe(site, timeframe)
+                    site != null -> OpenStatsForSite(site)
+                    timeframe != null -> OpenStatsForTimeframe(timeframe)
+                    else -> OpenStats
+                }
+            }
+            // Subscribers path (site optional) - navigate to Stats; section selection handled in Stats UI from intent data
+            "subscribers" -> {
+                val site = pathSegments.getOrNull(offset + 1)?.toSite()
+                if (site != null) OpenStatsForSite(site) else OpenStats
+            }
+            // Legacy forms: /stats/day/$site, /stats/$site, /stats/insights, etc.
+            else -> {
+                val potentialTimeframe = firstAfterStats?.toStatsTimeframe()
+                val siteFromSecond = pathSegments.getOrNull(offset + 1)?.toSite()
+                val siteFromFirst = firstAfterStats?.toSite()
+
+                when {
+                    potentialTimeframe != null && siteFromSecond != null -> OpenStatsForSiteAndTimeframe(
+                        siteFromSecond,
+                        potentialTimeframe
+                    )
+                    potentialTimeframe != null -> OpenStatsForTimeframe(potentialTimeframe)
+                    siteFromFirst != null -> OpenStatsForSite(siteFromFirst)
+                    else -> {
+                        // Fallback for old format where last segment is site and previous is timeframe
+                        val length = pathSegments.size
+                        val site = pathSegments.getOrNull(length - 1)?.toSite()
+                        val statsTimeframe = pathSegments.getOrNull(length - 2)?.toStatsTimeframe()
+                        when {
+                            site != null && statsTimeframe != null -> OpenStatsForSiteAndTimeframe(site, statsTimeframe)
+                            site != null -> OpenStatsForSite(site)
+                            statsTimeframe != null -> OpenStatsForTimeframe(statsTimeframe)
+                            else -> OpenStats
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns true if the URI should be handled by StatsLinkHandler.
+     * The handled links are `https://wordpress.com/stats/...` and `wordpress://stats/...`
+     */
+    override fun shouldHandleUrl(uri: UriWrapper): Boolean {
+        return (uri.host == HOST_WORDPRESS_COM &&
+                uri.pathSegments.firstOrNull() == STATS_PATH) || uri.host == STATS_PATH
+    }
+
+    override fun stripUrl(uri: UriWrapper): String {
+        return buildString {
+            val offset = if (uri.host == STATS_PATH) {
+                append(APPLINK_SCHEME)
+                0
+            } else {
+                append("$HOST_WORDPRESS_COM/")
+                1
+            }
+            append(STATS_PATH)
+            val pathSegments = uri.pathSegments
+            val size = pathSegments.size
+            val firstAfterStats = if (size > offset) pathSegments.getOrNull(offset) else null
+
+            when (firstAfterStats) {
+                "traffic" -> {
+                    append("/traffic")
+                    val timeframe = pathSegments.getOrNull(offset + 1)
+                    if (!timeframe.isNullOrEmpty()) {
+                        append("/$timeframe")
+                    }
+                    val hasSiteUrl = pathSegments.getOrNull(offset + 2) != null
+                    if (hasSiteUrl) {
+                        append("/$SITE_DOMAIN")
+                    }
+                }
+                "subscribers" -> {
+                    append("/subscribers")
+                    val hasSiteUrl = pathSegments.getOrNull(offset + 1) != null
+                    if (hasSiteUrl) {
+                        append("/$SITE_DOMAIN")
+                    }
+                }
+                else -> {
+                    val statsTimeframe = if (size > offset) pathSegments.getOrNull(offset) else null
+                    val hasSiteUrl = if (size > offset + 1) pathSegments.getOrNull(offset + 1) != null else false
+                    if (!statsTimeframe.isNullOrEmpty()) {
+                        append("/$statsTimeframe")
+                    }
+                    if (hasSiteUrl) {
+                        append("/$SITE_DOMAIN")
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Converts HOST name of a site to SiteModel. It finds the Site in the current local sites and matches the name
+     * to the host.
+     */
+    private fun String.toSite(): SiteModel? {
+        return deepLinkUriUtils.hostToSite(this)
+    }
+
+    private fun String.toStatsTimeframe(): StatsTimeframe? {
+        return when (this) {
+            "day" -> StatsTimeframe.DAY
+            "week" -> StatsTimeframe.WEEK
+            "month" -> StatsTimeframe.MONTH
+            "year" -> StatsTimeframe.YEAR
+            "insights" -> StatsTimeframe.INSIGHTS
+            else -> null
+        }
+    }
+
+    companion object {
+        private const val STATS_PATH = "stats"
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt]
+[start of WordPress/src/main/java/org/wordpress/android/ui/stats/refresh/StatsFragment.kt]
+package org.wordpress.android.ui.stats.refresh
+
+import android.annotation.SuppressLint
+import android.os.Bundle
+import android.view.MotionEvent
+import android.view.View
+import androidx.appcompat.app.AppCompatActivity
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.activityViewModels
+import androidx.recyclerview.widget.RecyclerView
+import androidx.viewpager2.adapter.FragmentStateAdapter
+import androidx.viewpager2.widget.MarginPageTransformer
+import com.google.android.material.snackbar.Snackbar
+import com.google.android.material.tabs.TabLayout.OnTabSelectedListener
+import com.google.android.material.tabs.TabLayout.Tab
+import com.google.android.material.tabs.TabLayoutMediator
+import dagger.hilt.android.AndroidEntryPoint
+import org.wordpress.android.R
+import org.wordpress.android.WordPress
+import org.wordpress.android.databinding.StatsFragmentBinding
+import org.wordpress.android.ui.ScrollableViewInitializedListener
+import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureFullScreenOverlayFragment
+import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureRemovalOverlayUtil.JetpackFeatureOverlayScreenType
+import org.wordpress.android.ui.main.WPMainNavigationView.PageType.MY_SITE
+import org.wordpress.android.ui.mysite.jetpackbadge.JetpackPoweredBottomSheetFragment
+import org.wordpress.android.ui.pages.SnackbarMessageHolder
+import org.wordpress.android.ui.stats.refresh.StatsViewModel.StatsModuleUiModel
+import org.wordpress.android.ui.stats.refresh.lists.StatsListFragment
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.ANNUAL_STATS
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.DAYS
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.DETAIL
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.INSIGHTS
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.INSIGHT_DETAIL
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.MONTHS
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.SUBSCRIBERS
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.TOTAL_COMMENTS_DETAIL
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.TOTAL_FOLLOWERS_DETAIL
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.TOTAL_LIKES_DETAIL
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.WEEKS
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.YEARS
+import org.wordpress.android.ui.stats.refresh.utils.StatsSiteProvider.SiteUpdateResult
+import org.wordpress.android.ui.utils.UiHelpers
+import org.wordpress.android.util.JetpackBrandingUtils
+import org.wordpress.android.models.JetpackPoweredScreen
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.TRAFFIC
+import org.wordpress.android.util.WPSwipeToRefreshHelper
+import org.wordpress.android.util.config.StatsTrafficSubscribersTabFeatureConfig
+import org.wordpress.android.util.helpers.SwipeToRefreshHelper
+import org.wordpress.android.viewmodel.observeEvent
+import org.wordpress.android.widgets.WPSnackbar
+import javax.inject.Inject
+
+private val statsSections = listOf(INSIGHTS, DAYS, WEEKS, MONTHS, YEARS)
+private val statsSectionsWithTrafficTab = listOf(TRAFFIC, INSIGHTS, SUBSCRIBERS)
+private var statsTrafficTabEnabled = false
+
+@AndroidEntryPoint
+class StatsFragment : Fragment(R.layout.stats_fragment), ScrollableViewInitializedListener {
+    @Inject
+    lateinit var uiHelpers: UiHelpers
+
+    @Inject
+    lateinit var jetpackBrandingUtils: JetpackBrandingUtils
+
+    @Inject
+    lateinit var mStatsTrafficSubscribersTabFeatureConfig: StatsTrafficSubscribersTabFeatureConfig
+
+    private val viewModel: StatsViewModel by activityViewModels()
+    private lateinit var swipeToRefreshHelper: SwipeToRefreshHelper
+    private lateinit var selectedTabListener: SelectedTabListener
+
+    private var restorePreviousSearch = false
+    private var isFirstStart = false
+
+    private var binding: StatsFragmentBinding? = null
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+
+        val nonNullActivity = requireActivity()
+        with(StatsFragmentBinding.bind(view)) {
+            binding = this
+            with(nonNullActivity as AppCompatActivity) {
+                setSupportActionBar(toolbar)
+                supportActionBar?.let {
+                    it.setHomeButtonEnabled(true)
+                    it.setDisplayHomeAsUpEnabled(true)
+                }
+            }
+            initializeViewModels(nonNullActivity, savedInstanceState == null, savedInstanceState)
+            initializeViews()
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt(WordPress.LOCAL_SITE_ID, activity?.intent?.getIntExtra(WordPress.LOCAL_SITE_ID, 0) ?: 0)
+        viewModel.onSaveInstanceState(outState)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun StatsFragmentBinding.initializeViews() {
+        statsTrafficTabEnabled = mStatsTrafficSubscribersTabFeatureConfig.isEnabled()
+
+        val adapter = StatsPagerAdapter(this@StatsFragment)
+        statsPager.adapter = adapter
+        statsPager.setPageTransformer(
+            MarginPageTransformer(resources.getDimensionPixelSize(R.dimen.margin_extra_large))
+        )
+        statsPager.offscreenPageLimit = 2
+        selectedTabListener = SelectedTabListener(viewModel)
+        TabLayoutMediator(tabLayout, statsPager) { tab, position ->
+            tab.text = adapter.getTabTitle(position)
+        }.attach()
+        tabLayout.addOnTabSelectedListener(selectedTabListener)
+
+        swipeToRefreshHelper = WPSwipeToRefreshHelper.buildSwipeToRefreshHelper(pullToRefresh) {
+            viewModel.onPullToRefresh()
+        }
+        disabledView.statsDisabledView.button.setOnClickListener {
+            viewModel.onEnableStatsModuleClick()
+        }
+
+        // Apply deep link selection (Subscribers tab or Traffic granularity) on first start
+        if (isFirstStart) {
+            handleDeepLinkSelectionIfAny()
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun StatsFragmentBinding.initializeViewModels(
+        activity: FragmentActivity,
+        isFirstStart: Boolean,
+        savedInstanceState: Bundle?
+    ) {
+        // keep flag for later, when views are fully initialized
+        this@StatsFragment.isFirstStart = isFirstStart
+
+        viewModel.onRestoreInstanceState(savedInstanceState)
+
+        setupObservers(activity)
+
+        viewModel.start(activity.intent)
+
+        if (!isFirstStart) {
+            restorePreviousSearch = true
+        }
+
+        statsPager.setOnTouchListener { _, event ->
+            swipeToRefreshHelper.setEnabled(false)
+            if (event.action == MotionEvent.ACTION_UP) {
+                swipeToRefreshHelper.setEnabled(true)
+            }
+            return@setOnTouchListener false
+        }
+
+        viewModel.showJetpackPoweredBottomSheet.observeEvent(viewLifecycleOwner) {
+            if (isFirstStart) {
+                JetpackPoweredBottomSheetFragment
+                    .newInstance(it, MY_SITE)
+                    .show(childFragmentManager, JetpackPoweredBottomSheetFragment.TAG)
+            }
+        }
+
+        viewModel.showJetpackOverlay.observeEvent(viewLifecycleOwner) {
+            if (isFirstStart) {
+                JetpackFeatureFullScreenOverlayFragment
+                    .newInstance(JetpackFeatureOverlayScreenType.STATS)
+                    .show(childFragmentManager, JetpackFeatureFullScreenOverlayFragment.TAG)
+            }
+        }
+    }
+
+    private fun StatsFragmentBinding.setupObservers(activity: FragmentActivity) {
+        viewModel.isRefreshing.observe(viewLifecycleOwner) {
+            it?.let { isRefreshing ->
+                swipeToRefreshHelper.isRefreshing = isRefreshing
+            }
+        }
+
+        viewModel.showSnackbarMessage.observe(viewLifecycleOwner) { holder ->
+            showSnackbar(activity, holder)
+        }
+
+        viewModel.toolbarHasShadow.observe(viewLifecycleOwner) { hasShadow ->
+            appBarLayout.showShadow(hasShadow == true)
+        }
+
+        viewModel.siteChanged.observeEvent(viewLifecycleOwner) { siteUpdateResult ->
+            when (siteUpdateResult) {
+                is SiteUpdateResult.SiteConnected -> viewModel.onSiteChanged()
+                is SiteUpdateResult.NotConnectedJetpackSite -> getActivity()?.finish()
+            }
+        }
+
+        viewModel.hideToolbar.observeEvent(viewLifecycleOwner) { hideToolbar ->
+            appBarLayout.setExpanded(!hideToolbar, true)
+        }
+
+        viewModel.selectedSection.observe(viewLifecycleOwner) { selectedSection ->
+            selectedSection?.let {
+                if (statsTrafficTabEnabled) {
+                    handleSelectedSectionWithTrafficTab(selectedSection)
+                } else {
+                    handleSelectedSection(selectedSection)
+                }
+            }
+        }
+
+        viewModel.statsModuleUiModel.observeEvent(viewLifecycleOwner) { event ->
+            updateUi(event)
+        }
+    }
+
+    private fun StatsFragmentBinding.updateUi(statsModuleUiModel: StatsModuleUiModel) {
+        if (statsModuleUiModel.disabledStatsViewVisible) {
+            disabledView.statsDisabledView.visibility = View.VISIBLE
+            tabLayout.visibility = View.GONE
+            pullToRefresh.visibility = View.GONE
+
+            if (statsModuleUiModel.disabledStatsProgressVisible) {
+                disabledView.statsDisabledView.progressBar.visibility = View.VISIBLE
+                disabledView.statsDisabledView.button.visibility = View.GONE
+            } else {
+                disabledView.statsDisabledView.progressBar.visibility = View.GONE
+                disabledView.statsDisabledView.button.visibility = View.VISIBLE
+            }
+        } else {
+            disabledView.statsDisabledView.visibility = View.GONE
+            tabLayout.visibility = View.VISIBLE
+            pullToRefresh.visibility = View.VISIBLE
+        }
+    }
+
+    @Suppress("MagicNumber")
+    private fun StatsFragmentBinding.handleSelectedSectionWithTrafficTab(
+        selectedSection: StatsSection
+    ) {
+        val position = when (selectedSection) {
+            // Traffic tab is at position 0. We also map the legacy timeframes to Traffic
+            TRAFFIC, DAYS, WEEKS, MONTHS, YEARS -> 0
+            INSIGHTS -> 1
+            SUBSCRIBERS -> 2
+            DETAIL,
+            INSIGHT_DETAIL,
+            TOTAL_LIKES_DETAIL,
+            TOTAL_COMMENTS_DETAIL,
+            TOTAL_FOLLOWERS_DETAIL,
+            ANNUAL_STATS -> null
+            else -> null
+        }
+        position?.let {
+            if (statsPager.currentItem != position) {
+                tabLayout.removeOnTabSelectedListener(selectedTabListener)
+                statsPager.setCurrentItem(position, false)
+                tabLayout.addOnTabSelectedListener(selectedTabListener)
+            }
+        }
+    }
+
+    @Suppress("MagicNumber")
+    private fun StatsFragmentBinding.handleSelectedSection(
+        selectedSection: StatsSection
+    ) {
+        val position = when (selectedSection) {
+            INSIGHTS -> 0
+            DAYS -> 1
+            WEEKS -> 2
+            MONTHS -> 3
+            YEARS -> 4
+            DETAIL,
+            INSIGHT_DETAIL,
+            TOTAL_LIKES_DETAIL,
+            TOTAL_COMMENTS_DETAIL,
+            TOTAL_FOLLOWERS_DETAIL,
+            ANNUAL_STATS -> null
+            else -> null
+        }
+        position?.let {
+            if (statsPager.currentItem != position) {
+                tabLayout.removeOnTabSelectedListener(selectedTabListener)
+                statsPager.setCurrentItem(position, false)
+                tabLayout.addOnTabSelectedListener(selectedTabListener)
+            }
+        }
+    }
+
+    private fun showSnackbar(
+        activity: FragmentActivity,
+        holder: SnackbarMessageHolder?
+    ) {
+        val parent = activity.findViewById<View>(R.id.coordinatorLayout)
+        if (holder != null && parent != null) {
+            if (holder.buttonTitle == null) {
+                WPSnackbar.make(
+                    parent,
+                    uiHelpers.getTextOfUiString(requireContext(), holder.message),
+                    Snackbar.LENGTH_LONG
+                ).show()
+            } else {
+                val snackbar = WPSnackbar.make(
+                    parent,
+                    uiHelpers.getTextOfUiString(requireContext(), holder.message),
+                    Snackbar.LENGTH_LONG
+                )
+                snackbar.setAction(uiHelpers.getTextOfUiString(requireContext(), holder.buttonTitle)) {
+                    holder.buttonAction()
+                }
+                snackbar.show()
+            }
+        }
+    }
+
+    override fun onScrollableViewInitialized(containerId: Int) {
+        StatsFragmentBinding.bind(requireView()).appBarLayout.liftOnScrollTargetViewId = containerId
+        initJetpackBanner(containerId)
+    }
+
+    private fun initJetpackBanner(scrollableContainerId: Int) {
+        if (jetpackBrandingUtils.shouldShowJetpackBranding()) {
+            val screen = JetpackPoweredScreen.WithDynamicText.STATS
+            binding?.root?.post {
+                val jetpackBannerView = binding?.jetpackBanner?.root ?: return@post
+                val scrollableView = binding?.root?.findViewById<View>(scrollableContainerId) as? RecyclerView
+                    ?: return@post
+
+                jetpackBrandingUtils.showJetpackBannerIfScrolledToTop(jetpackBannerView, scrollableView)
+                jetpackBrandingUtils.initJetpackBannerAnimation(jetpackBannerView, scrollableView)
+                binding?.jetpackBanner?.jetpackBannerText?.text = uiHelpers.getTextOfUiString(
+                    requireContext(),
+                    jetpackBrandingUtils.getBrandingTextForScreen(screen)
+                )
+
+                if (jetpackBrandingUtils.shouldShowJetpackPoweredBottomSheet()) {
+                    binding?.jetpackBanner?.root?.setOnClickListener {
+                        jetpackBrandingUtils.trackBannerTapped(screen)
+                        JetpackPoweredBottomSheetFragment
+                            .newInstance()
+                            .show(childFragmentManager, JetpackPoweredBottomSheetFragment.TAG)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Handles deep link specific to the new Stats Tabs:
+     * - stats/subscribers[/<site>]
+     * - stats/traffic/<day|week|month|year>[/<site>]
+     *
+     * This complements the existing deep link handling which already supports
+     * stats/day, stats/week, etc.
+     */
+    private fun StatsFragmentBinding.handleDeepLinkSelectionIfAny() {
+        val data = activity?.intent?.data ?: return
+        val segments = data.pathSegments ?: return
+
+        // Determine where the "stats" segment is in the path to compute offset
+        val offset = when {
+            data.host == "stats" -> 0 // wordpress://stats/...
+            segments.firstOrNull() == "stats" -> 1 // https://wordpress.com/stats/...
+            else -> return
+        }
+
+        val firstAfterStats = segments.getOrNull(offset) ?: return
+
+        if (statsTrafficTabEnabled) {
+            when (firstAfterStats) {
+                "subscribers" -> {
+                    // Open Subscribers tab
+                    viewModel.onSectionSelected(SUBSCRIBERS)
+                }
+                "traffic" -> {
+                    // Open Traffic tab and set requested granularity if provided
+                    viewModel.onSectionSelected(TRAFFIC)
+                    when (segments.getOrNull(offset + 1)) {
+                        "day" -> viewModel.onSectionSelected(DAYS)
+                        "week" -> viewModel.onSectionSelected(WEEKS)
+                        "month" -> viewModel.onSectionSelected(MONTHS)
+                        "year" -> viewModel.onSectionSelected(YEARS)
+                    }
+                }
+            }
+        }
+    }
+}
+
+class StatsPagerAdapter(private val parent: Fragment) : FragmentStateAdapter(parent) {
+    private val statsTabs = if (statsTrafficTabEnabled) statsSectionsWithTrafficTab else statsSections
+    override fun getItemCount(): Int = statsTabs.size
+
+    override fun createFragment(position: Int): Fragment {
+        return StatsListFragment.newInstance(statsTabs[position])
+    }
+
+    fun getTabTitle(position: Int): CharSequence {
+        return parent.context?.getString(statsTabs[position].titleRes).orEmpty()
+    }
+}
+
+private class SelectedTabListener(val viewModel: StatsViewModel) : OnTabSelectedListener {
+    private val statsTabs = if (statsTrafficTabEnabled) statsSectionsWithTrafficTab else statsSections
+    override fun onTabReselected(tab: Tab?) {
+        // Do nothing
+    }
+
+    override fun onTabUnselected(tab: Tab?) {
+        // Do nothing
+    }
+
+    override fun onTabSelected(tab: Tab) {
+        viewModel.onSectionSelected(statsTabs[tab.position])
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/stats/refresh/StatsFragment.kt]

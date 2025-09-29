@@ -1,0 +1,949 @@
+[start of WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt]
+package org.wordpress.android.ui.reader.discover
+
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MediatorLiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.Observer
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CoroutineDispatcher
+import org.wordpress.android.R
+import org.wordpress.android.analytics.AnalyticsTracker
+import org.wordpress.android.models.ReaderPost
+import org.wordpress.android.models.ReaderTagType.FOLLOWED
+import org.wordpress.android.models.discover.ReaderDiscoverCard.InterestsYouMayLikeCard
+import org.wordpress.android.models.discover.ReaderDiscoverCard.ReaderPostCard
+import org.wordpress.android.models.discover.ReaderDiscoverCard.ReaderRecommendedBlogsCard
+import org.wordpress.android.models.discover.ReaderDiscoverCards
+import org.wordpress.android.modules.IO_THREAD
+import org.wordpress.android.modules.UI_THREAD
+import org.wordpress.android.ui.pages.SnackbarMessageHolder
+import org.wordpress.android.ui.reader.ReaderTypes.ReaderPostListType.TAG_FOLLOWED
+import org.wordpress.android.ui.reader.discover.ReaderCardUiState.ReaderPostNewUiState
+import org.wordpress.android.ui.reader.discover.ReaderCardUiState.ReaderPostUiState
+import org.wordpress.android.ui.reader.discover.ReaderCardUiState.ReaderRecommendedBlogsCardUiState.ReaderRecommendedBlogUiState
+import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowBlogPreview
+import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowPostsByTag
+import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowReaderSubs
+import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowSitePickerForResult
+import org.wordpress.android.ui.reader.reblog.ReblogUseCase
+import org.wordpress.android.ui.reader.repository.ReaderDiscoverCommunication
+import org.wordpress.android.ui.reader.repository.ReaderDiscoverCommunication.Error
+import org.wordpress.android.ui.reader.repository.ReaderDiscoverCommunication.Started
+import org.wordpress.android.ui.reader.repository.ReaderDiscoverCommunication.Success
+import org.wordpress.android.ui.reader.repository.ReaderDiscoverDataProvider
+import org.wordpress.android.ui.reader.repository.usecases.tags.GetFollowedTagsUseCase
+import org.wordpress.android.ui.reader.services.discover.ReaderDiscoverLogic.DiscoverTasks.REQUEST_FIRST_PAGE
+import org.wordpress.android.ui.reader.services.discover.ReaderDiscoverLogic.DiscoverTasks.REQUEST_MORE
+import org.wordpress.android.ui.reader.tracker.ReaderTracker
+import org.wordpress.android.ui.reader.usecases.BookmarkPostState.PreLoadPostContent
+import org.wordpress.android.ui.reader.utils.ReaderUtilsWrapper
+import org.wordpress.android.ui.reader.viewmodels.ReaderViewModel
+import org.wordpress.android.ui.utils.UiString.UiStringRes
+import org.wordpress.android.util.DisplayUtilsWrapper
+import org.wordpress.android.util.config.ReaderImprovementsFeatureConfig
+import org.wordpress.android.viewmodel.Event
+import org.wordpress.android.viewmodel.ScopedViewModel
+import javax.inject.Inject
+import javax.inject.Named
+
+const val INITIATE_LOAD_MORE_OFFSET = 3
+const val PHOTON_WIDTH_QUALITY_RATION = 0.5 // load images in 1/2 screen width to save users' data
+const val FEATURED_IMAGE_HEIGHT_WIDTH_RATION = 0.56 // 9:16
+
+class ReaderDiscoverViewModel @Inject constructor(
+    private val postUiStateBuilder: ReaderPostUiStateBuilder,
+    private val readerPostMoreButtonUiStateBuilder: ReaderPostMoreButtonUiStateBuilder,
+    private val readerPostCardActionsHandler: ReaderPostCardActionsHandler,
+    private val readerDiscoverDataProvider: ReaderDiscoverDataProvider,
+    private val reblogUseCase: ReblogUseCase,
+    private val readerUtilsWrapper: ReaderUtilsWrapper,
+    private val readerTracker: ReaderTracker,
+    displayUtilsWrapper: DisplayUtilsWrapper,
+    private val getFollowedTagsUseCase: GetFollowedTagsUseCase,
+    private val readerImprovementsFeatureConfig: ReaderImprovementsFeatureConfig,
+    @Named(UI_THREAD) private val mainDispatcher: CoroutineDispatcher,
+    @Named(IO_THREAD) private val ioDispatcher: CoroutineDispatcher
+) : ScopedViewModel(mainDispatcher) {
+    private var isStarted = false
+
+    private lateinit var parentViewModel: ReaderViewModel
+
+    private val _uiState = MediatorLiveData<DiscoverUiState>()
+    val uiState: LiveData<DiscoverUiState> = _uiState
+
+    private val _navigationEvents = MediatorLiveData<Event<ReaderNavigationEvents>>()
+    val navigationEvents: LiveData<Event<ReaderNavigationEvents>> = _navigationEvents
+
+    private val _snackbarEvents = MediatorLiveData<Event<SnackbarMessageHolder>>()
+    val snackbarEvents: LiveData<Event<SnackbarMessageHolder>> = _snackbarEvents
+
+    private val _preloadPostEvents = MediatorLiveData<Event<PreLoadPostContent>>()
+    val preloadPostEvents: LiveData<Event<PreLoadPostContent>> = _preloadPostEvents
+
+    private val _scrollToTopEvent = MutableLiveData<Event<Unit>>()
+    val scrollToTopEvent: LiveData<Event<Unit>> = _scrollToTopEvent
+
+    /**
+     * Post which is about to be reblogged after the user selects a target site.
+     */
+    private var pendingReblogPost: ReaderPost? = null
+
+    private var swipeToRefreshTriggered = false
+
+    /**
+     * Don't recalculate the size after a device orientation change as it'd result in change of the url -> it wouldn't
+     * use cached images.
+     */
+    private val photonWidth: Int = (displayUtilsWrapper.getDisplayPixelWidth() * PHOTON_WIDTH_QUALITY_RATION).toInt()
+    private val photonHeight: Int = (photonWidth * FEATURED_IMAGE_HEIGHT_WIDTH_RATION).toInt()
+
+    private val communicationChannelObserver = Observer { data: Event<ReaderDiscoverCommunication>? ->
+        data?.let {
+            data.getContentIfNotHandled()?.let {
+                handleDataProviderEvent(it)
+            }
+        }
+    }
+
+    companion object {
+        private const val DAILY_PROMPT_TAG = "dailyprompt"
+    }
+
+    fun start(parentViewModel: ReaderViewModel) {
+        if (isStarted) return
+        isStarted = true
+        this.parentViewModel = parentViewModel
+        init()
+    }
+
+    private fun init() {
+        // Start with loading state
+        _uiState.value = DiscoverUiState.LoadingUiState
+
+        readerPostCardActionsHandler.initScope(viewModelScope)
+
+        // Get the correct repository
+        readerDiscoverDataProvider.start()
+
+        observeDiscoverFeed()
+        observeFollowStatus()
+
+        // TODO reader improvements: Consider using Channel/Flow
+        readerDiscoverDataProvider.communicationChannel.observeForever(communicationChannelObserver)
+
+        _navigationEvents.addSource(readerPostCardActionsHandler.navigationEvents) { event ->
+            val target = event.peekContent()
+            if (target is ShowSitePickerForResult) {
+                pendingReblogPost = target.post
+            }
+            _navigationEvents.value = event
+        }
+
+        _snackbarEvents.addSource(readerPostCardActionsHandler.snackbarEvents) { event ->
+            _snackbarEvents.value = event
+        }
+
+        _preloadPostEvents.addSource(readerPostCardActionsHandler.preloadPostEvents) { event ->
+            _preloadPostEvents.value = event
+        }
+    }
+
+    private fun observeDiscoverFeed() {
+        // listen to changes to the discover feed
+        _uiState.addSource(readerDiscoverDataProvider.discoverFeed) { posts ->
+            launch {
+                val userTags = getFollowedTagsUseCase.get()
+                // Check if user has no tags or only has the default dailyprompt tag
+                val shouldShowOnboarding = userTags.isEmpty() || 
+                    (userTags.size == 1 && userTags.any { it.tagSlug.equals(DAILY_PROMPT_TAG, ignoreCase = true) })
+                
+                if (shouldShowOnboarding) {
+                    _uiState.value = DiscoverUiState.EmptyUiState.ShowNoFollowedTagsUiState {
+                        parentViewModel.onShowReaderInterests()
+                    }
+                } else {
+                    if (posts != null && posts.cards.isNotEmpty()) {
+                        _uiState.value = DiscoverUiState.ContentUiState(
+                            convertCardsToUiStates(posts),
+                            reloadProgressVisibility = false,
+                            loadMoreProgressVisibility = false,
+                        )
+                        if (swipeToRefreshTriggered) {
+                            _scrollToTopEvent.postValue(Event(Unit))
+                            swipeToRefreshTriggered = false
+                        }
+                    } else {
+                        _uiState.value = DiscoverUiState.EmptyUiState.ShowNoPostsUiState {
+                            _navigationEvents.value = Event(ShowReaderSubs)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun observeFollowStatus() {
+        // listen to changes on follow status for updating the reader recommended blogs state immediately
+        _uiState.addSource(readerPostCardActionsHandler.followStatusUpdated) { data ->
+            val currentUiState: DiscoverUiState.ContentUiState = _uiState.value as? DiscoverUiState.ContentUiState
+                ?: return@addSource
+            val mutableCards = currentUiState.cards.toMutableList()
+            var hasChangedCards = false
+
+            for (i in mutableCards.indices) {
+                val card = mutableCards[i] as? ReaderCardUiState.ReaderRecommendedBlogsCardUiState ?: continue
+                val mutableBlogs = card.blogs.toMutableList()
+                var hasChangedBlogs = false
+
+                for (j in mutableBlogs.indices) {
+                    val blog = mutableBlogs[j]
+                    if (blog.blogId == data.blogId && blog.feedId == data.feedId) {
+                        mutableBlogs[j] = blog.copy(isFollowed = data.following, isFollowEnabled = data.isChangeFinal)
+                        hasChangedBlogs = true
+                    }
+                }
+
+                if (hasChangedBlogs) {
+                    mutableCards[i] = card.copy(blogs = mutableBlogs)
+                    hasChangedCards = true
+                }
+            }
+
+            if (hasChangedCards) {
+                _uiState.value = currentUiState.copy(cards = mutableCards)
+            }
+        }
+    }
+
+    private suspend fun convertCardsToUiStates(posts: ReaderDiscoverCards): List<ReaderCardUiState> {
+        return posts.cards.map { card ->
+            when (card) {
+                is ReaderPostCard -> if (readerImprovementsFeatureConfig.isEnabled()) {
+                    postUiStateBuilder.mapPostToNewUiState(
+                        source = ReaderTracker.SOURCE_DISCOVER,
+                        post = card.post,
+                        photonWidth = photonWidth,
+                        photonHeight = photonHeight,
+                        postListType = TAG_FOLLOWED,
+                        onButtonClicked = this@ReaderDiscoverViewModel::onButtonClicked,
+                        onItemClicked = this@ReaderDiscoverViewModel::onPostItemClicked,
+                        onItemRendered = this@ReaderDiscoverViewModel::onItemRendered,
+                        onMoreButtonClicked = this@ReaderDiscoverViewModel::onMoreButtonClickedNew,
+                        onMoreDismissed = this@ReaderDiscoverViewModel::onMoreMenuDismissedNew,
+                        onVideoOverlayClicked = this@ReaderDiscoverViewModel::onVideoOverlayClicked,
+                        onPostHeaderViewClicked = this@ReaderDiscoverViewModel::onPostHeaderClicked,
+                    )
+                } else {
+                    postUiStateBuilder.mapPostToUiState(
+                        source = ReaderTracker.SOURCE_DISCOVER,
+                        post = card.post,
+                        isDiscover = true,
+                        photonWidth = photonWidth,
+                        photonHeight = photonHeight,
+                        onButtonClicked = this@ReaderDiscoverViewModel::onButtonClicked,
+                        onItemClicked = this@ReaderDiscoverViewModel::onPostItemClicked,
+                        onItemRendered = this@ReaderDiscoverViewModel::onItemRendered,
+                        onDiscoverSectionClicked = this@ReaderDiscoverViewModel::onDiscoverClicked,
+                        onMoreButtonClicked = this@ReaderDiscoverViewModel::onMoreButtonClicked,
+                        onMoreDismissed = this@ReaderDiscoverViewModel::onMoreMenuDismissed,
+                        onVideoOverlayClicked = this@ReaderDiscoverViewModel::onVideoOverlayClicked,
+                        onPostHeaderViewClicked = { onPostHeaderClicked(card.post.postId, card.post.blogId) },
+                        onTagItemClicked = this@ReaderDiscoverViewModel::onTagItemClicked,
+                        postListType = TAG_FOLLOWED
+                    )
+                }
+                is InterestsYouMayLikeCard -> {
+                    postUiStateBuilder.mapTagListToReaderInterestUiState(
+                        card.interests,
+                        this@ReaderDiscoverViewModel::onReaderTagClicked
+                    )
+                }
+                is ReaderRecommendedBlogsCard -> {
+                    postUiStateBuilder.mapRecommendedBlogsToReaderRecommendedBlogsCardUiState(
+                        recommendedBlogs = card.blogs,
+                        onItemClicked = this@ReaderDiscoverViewModel::onRecommendedSiteItemClicked,
+                        onFollowClicked = this@ReaderDiscoverViewModel::onFollowSiteClicked
+                    )
+                }
+            }
+        }
+    }
+
+    private fun handleDataProviderEvent(it: ReaderDiscoverCommunication) {
+        when (it) {
+            is Started -> {
+                handleStartedEvent(it)
+            }
+            is Success -> {
+            } // no op
+            is Error ->
+                handleErrorEvent()
+        }
+    }
+
+    private fun handleStartedEvent(it: ReaderDiscoverCommunication) {
+        uiState.value.let { state ->
+            if (state is DiscoverUiState.ContentUiState) {
+                when (it.task) {
+                    REQUEST_FIRST_PAGE -> {
+                        _uiState.value = state.copy(reloadProgressVisibility = true)
+                    }
+                    REQUEST_MORE -> {
+                        _uiState.value = state.copy(loadMoreProgressVisibility = true)
+                    }
+                }
+            } else {
+                _uiState.value = DiscoverUiState.LoadingUiState
+            }
+        }
+    }
+
+    private fun handleErrorEvent() {
+        _uiState.value?.let { uiState ->
+            when (uiState) {
+                is DiscoverUiState.LoadingUiState -> {
+                    // show fullscreen error
+                    _uiState.value = DiscoverUiState.EmptyUiState.RequestFailedUiState { onRetryButtonClick() }
+                }
+                is DiscoverUiState.ContentUiState -> {
+                    _uiState.value = uiState.copy(
+                        reloadProgressVisibility = false,
+                        loadMoreProgressVisibility = false
+                    )
+                    // show snackbar
+                    _snackbarEvents.postValue(
+                        Event(
+                            SnackbarMessageHolder(
+                                UiStringRes(R.string.reader_error_request_failed_title)
+                            )
+                        )
+                    )
+                }
+                is DiscoverUiState.EmptyUiState.RequestFailedUiState -> Unit // Do nothing
+                is DiscoverUiState.EmptyUiState.ShowNoFollowedTagsUiState -> Unit // Do nothing
+                is DiscoverUiState.EmptyUiState.ShowNoPostsUiState -> Unit // Do nothing
+            }
+        }
+    }
+
+    private fun onReaderTagClicked(tag: String) {
+        launch(ioDispatcher) {
+            readerTracker.track(AnalyticsTracker.Stat.READER_DISCOVER_TOPIC_TAPPED)
+            val readerTag = readerUtilsWrapper.getTagFromTagName(tag, FOLLOWED)
+            _navigationEvents.postValue(Event(ShowPostsByTag(readerTag)))
+        }
+    }
+
+    private fun onButtonClicked(postId: Long, blogId: Long, type: ReaderPostCardActionType) {
+        launch {
+            findPost(postId, blogId)?.let {
+                readerPostCardActionsHandler.onAction(
+                    it,
+                    type,
+                    isBookmarkList = false,
+                    source = ReaderTracker.SOURCE_DISCOVER
+                )
+            }
+        }
+    }
+
+    private fun onVideoOverlayClicked(postId: Long, blogId: Long) {
+        launch {
+            findPost(postId, blogId)?.let {
+                readerPostCardActionsHandler.handleVideoOverlayClicked(it.featuredVideo)
+            }
+        }
+    }
+
+    private fun onPostHeaderClicked(postId: Long, blogId: Long) {
+        launch {
+            findPost(postId, blogId)?.let {
+                readerPostCardActionsHandler.handleHeaderClicked(
+                    it.blogId,
+                    it.feedId,
+                    it.isFollowedByCurrentUser
+                )
+            }
+        }
+    }
+
+    private fun onTagItemClicked(tagSlug: String) {
+        launch(ioDispatcher) {
+            val readerTag = readerUtilsWrapper.getTagFromTagName(tagSlug, FOLLOWED)
+            _navigationEvents.postValue(Event(ShowPostsByTag(readerTag)))
+        }
+    }
+
+    private fun onPostItemClicked(postId: Long, blogId: Long) {
+        launch {
+            findPost(postId, blogId)?.let {
+                readerPostCardActionsHandler.handleOnItemClicked(
+                    it,
+                    ReaderTracker.SOURCE_DISCOVER
+                )
+            }
+        }
+    }
+
+    private fun onRecommendedSiteItemClicked(blogId: Long, feedId: Long, isFollowed: Boolean) {
+        readerTracker.trackBlog(
+            AnalyticsTracker.Stat.READER_SUGGESTED_SITE_VISITED,
+            blogId,
+            feedId
+        )
+        _navigationEvents.postValue(Event(ShowBlogPreview(blogId, feedId, isFollowed)))
+    }
+
+    private fun onFollowSiteClicked(recommendedBlogUiState: ReaderRecommendedBlogUiState) {
+        launch {
+            readerTracker.trackBlog(
+                AnalyticsTracker.Stat.READER_SUGGESTED_SITE_TOGGLE_FOLLOW,
+                recommendedBlogUiState.blogId,
+                recommendedBlogUiState.feedId,
+                !recommendedBlogUiState.isFollowed
+            )
+            readerPostCardActionsHandler.handleFollowRecommendedSiteClicked(
+                recommendedBlogUiState,
+                ReaderTracker.SOURCE_DISCOVER
+            )
+        }
+    }
+
+    private fun onItemRendered(itemUiState: ReaderCardUiState) {
+        initiateLoadMoreIfNecessary(itemUiState)
+    }
+
+    private fun findPost(postId: Long, blogId: Long): ReaderPost? {
+        return readerDiscoverDataProvider.discoverFeed.value?.cards?.let {
+            it.filterIsInstance<ReaderPostCard>()
+                .find { card -> card.post.postId == postId && card.post.blogId == blogId }
+                ?.post
+        }
+    }
+
+    private fun initiateLoadMoreIfNecessary(item: ReaderCardUiState) {
+        (uiState.value as? DiscoverUiState.ContentUiState)?.cards?.let {
+            val closeToEndIndex = it.size - INITIATE_LOAD_MORE_OFFSET
+            if (closeToEndIndex > 0) {
+                val isCardCloseToEnd: Boolean = it.getOrNull(closeToEndIndex) == item
+                if (isCardCloseToEnd) {
+                    readerTracker.track(AnalyticsTracker.Stat.READER_DISCOVER_PAGINATED)
+                    launch(ioDispatcher) { readerDiscoverDataProvider.loadMoreCards() }
+                }
+            }
+        }
+    }
+
+    @Suppress("unused", "UNUSED_PARAMETER")
+    private fun onDiscoverClicked(postId: Long, blogId: Long) {
+        // TODO malinjir: add on discover clicked listener
+    }
+
+    private fun onMoreButtonClicked(postUiState: ReaderPostUiState) {
+        changeMoreMenuVisibility(postUiState, true)
+    }
+
+    private fun onMoreMenuDismissed(postUiState: ReaderPostUiState) {
+        changeMoreMenuVisibility(postUiState, false)
+    }
+
+    private fun changeMoreMenuVisibility(currentUiState: ReaderPostUiState, show: Boolean) {
+        launch {
+            findPost(currentUiState.postId, currentUiState.blogId)?.let { post ->
+                val moreMenuItems = if (show) {
+                    readerPostMoreButtonUiStateBuilder.buildMoreMenuItems(
+                        post, false, this@ReaderDiscoverViewModel::onButtonClicked
+                    )
+                } else {
+                    null
+                }
+
+                replaceUiStateItem(currentUiState, currentUiState.copy(moreMenuItems = moreMenuItems))
+            }
+        }
+    }
+
+    private fun onMoreButtonClickedNew(postUiState: ReaderPostNewUiState) {
+        changeMoreMenuVisibilityNew(postUiState, true)
+    }
+
+    private fun onMoreMenuDismissedNew(postUiState: ReaderPostNewUiState) {
+        changeMoreMenuVisibilityNew(postUiState, false)
+    }
+
+    private fun changeMoreMenuVisibilityNew(currentUiState: ReaderPostNewUiState, show: Boolean) {
+        launch {
+            findPost(currentUiState.postId, currentUiState.blogId)?.let { post ->
+                val moreMenuItems = if (show) {
+                    readerPostMoreButtonUiStateBuilder.buildMoreMenuItems(
+                        post, true, this@ReaderDiscoverViewModel::onButtonClicked
+                    )
+                } else {
+                    null
+                }
+
+                replaceUiStateItem(currentUiState, currentUiState.copy(moreMenuItems = moreMenuItems))
+            }
+        }
+    }
+
+    private fun replaceUiStateItem(before: ReaderCardUiState, after: ReaderCardUiState) {
+        (_uiState.value as? DiscoverUiState.ContentUiState)?.let {
+            val updatedList = it.cards.toMutableList()
+            val index = it.cards.indexOf(before)
+            if (index != -1) {
+                updatedList[index] = after
+                _uiState.value = it.copy(cards = updatedList)
+            }
+        }
+    }
+
+    fun onReblogSiteSelected(siteLocalId: Int) {
+        launch {
+            val state = reblogUseCase.onReblogSiteSelected(siteLocalId, pendingReblogPost)
+            val navigationTarget = reblogUseCase.convertReblogStateToNavigationEvent(state)
+            if (navigationTarget != null) {
+                _navigationEvents.value = Event(navigationTarget)
+            } else {
+                _snackbarEvents.value = Event(SnackbarMessageHolder(UiStringRes(R.string.reader_reblog_error)))
+            }
+            pendingReblogPost = null
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        readerDiscoverDataProvider.stop()
+        readerPostCardActionsHandler.onCleared()
+        readerDiscoverDataProvider.communicationChannel.removeObserver(communicationChannelObserver)
+    }
+
+    fun swipeToRefresh() {
+        readerTracker.track(AnalyticsTracker.Stat.READER_PULL_TO_REFRESH)
+        swipeToRefreshTriggered = true
+        launch {
+            readerDiscoverDataProvider.refreshCards()
+        }
+    }
+
+    fun onRetryButtonClick() {
+        launch {
+            readerDiscoverDataProvider.refreshCards()
+        }
+    }
+
+    sealed class DiscoverUiState(
+        val contentVisiblity: Boolean = false,
+        val fullscreenProgressVisibility: Boolean = false,
+        val swipeToRefreshEnabled: Boolean = false,
+        open val fullscreenEmptyVisibility: Boolean = false,
+    ) {
+        open val reloadProgressVisibility: Boolean = false
+        open val loadMoreProgressVisibility: Boolean = false
+
+        data class ContentUiState(
+            val cards: List<ReaderCardUiState>,
+            override val reloadProgressVisibility: Boolean,
+            override val loadMoreProgressVisibility: Boolean,
+        ) : DiscoverUiState(contentVisiblity = true, swipeToRefreshEnabled = true)
+
+        object LoadingUiState : DiscoverUiState(fullscreenProgressVisibility = true)
+
+        sealed class EmptyUiState : DiscoverUiState(fullscreenEmptyVisibility = true) {
+            abstract val titleResId: Int
+            abstract val buttonResId: Int
+            open val subTitleRes: Int? = null
+            abstract val action: () -> Unit
+            open val illustrationResId: Int? = null
+
+            data class RequestFailedUiState(override val action: () -> Unit) : EmptyUiState() {
+                override val titleResId = R.string.connection_error
+                override val subTitleRes = R.string.reader_error_request_failed_title
+                override val buttonResId = R.string.retry
+            }
+
+            data class ShowNoFollowedTagsUiState(override val action: () -> Unit) : EmptyUiState() {
+                override val titleResId = R.string.reader_discover_empty_title
+                override val subTitleRes = R.string.reader_discover_empty_subtitle_subscribe
+                override val buttonResId = R.string.reader_discover_empty_button_text
+            }
+
+            data class ShowNoPostsUiState(override val action: () -> Unit) : EmptyUiState() {
+                override val titleResId = R.string.reader_discover_no_posts_title
+                override val buttonResId = R.string.reader_discover_no_posts_button_tags_text
+                override val subTitleRes = R.string.reader_discover_no_posts_subscribe_subtitle
+                override val illustrationResId = R.drawable.illustration_reader_empty
+            }
+        }
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt]
+[start of WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt]
+package org.wordpress.android.ui.reader.discover.interests
+
+import androidx.annotation.StringRes
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MediatorLiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.launch
+import org.wordpress.android.R
+import org.wordpress.android.analytics.AnalyticsTracker
+import org.wordpress.android.models.ReaderTag
+import org.wordpress.android.models.ReaderTagList
+import org.wordpress.android.ui.pages.SnackbarMessageHolder
+import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsFragment.EntryPoint
+import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewModel.DoneButtonUiState.DoneButtonDisabledUiState
+import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewModel.DoneButtonUiState.DoneButtonEnabledUiState
+import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewModel.DoneButtonUiState.DoneButtonHiddenUiState
+import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewModel.UiState.ContentUiState
+import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewModel.UiState.ErrorUiState.ConnectionErrorUiState
+import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewModel.UiState.ErrorUiState.RequestFailedErrorUiState
+import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewModel.UiState.InitialLoadingUiState
+import org.wordpress.android.ui.reader.repository.ReaderRepositoryCommunication
+import org.wordpress.android.ui.reader.repository.ReaderTagRepository
+import org.wordpress.android.ui.reader.tracker.ReaderTracker
+import org.wordpress.android.ui.reader.viewmodels.ReaderViewModel
+import org.wordpress.android.ui.utils.UiString.UiStringRes
+import org.wordpress.android.viewmodel.Event
+import javax.inject.Inject
+
+class ReaderInterestsViewModel @Inject constructor(
+    private val readerTagRepository: ReaderTagRepository,
+    private val readerTracker: ReaderTracker
+) : ViewModel() {
+    private var isStarted = false
+    private lateinit var currentLanguage: String
+    private var parentViewModel: ReaderViewModel? = null
+
+    private var entryPoint = EntryPoint.DISCOVER
+    private var userTags = ReaderTagList()
+
+    private val _uiState: MutableLiveData<UiState> = MutableLiveData()
+    val uiState: LiveData<UiState> = _uiState
+
+    private val _snackbarEvents = MediatorLiveData<Event<SnackbarMessageHolder>>()
+    val snackbarEvents: LiveData<Event<SnackbarMessageHolder>> = _snackbarEvents
+
+    private val _closeReaderInterests = MutableLiveData<Event<Unit>>()
+    val closeReaderInterests: LiveData<Event<Unit>> = _closeReaderInterests
+
+    private var userTagsFetchedSuccessfully = false
+
+    companion object {
+        private const val DAILY_PROMPT_TAG = "dailyprompt"
+    }
+
+    fun start(
+        currentLanguage: String,
+        parentViewModel: ReaderViewModel?,
+        entryPoint: EntryPoint
+    ) {
+        if (isStarted && this.currentLanguage == currentLanguage) {
+            return
+        }
+        isStarted = true
+        this.currentLanguage = currentLanguage
+        this.parentViewModel = parentViewModel
+        this.entryPoint = entryPoint
+        parentViewModel?.dismissQuickStartSnackbarIfNeeded()
+        loadUserTags()
+    }
+
+    private fun loadUserTags() {
+        updateUiState(InitialLoadingUiState)
+        viewModelScope.launch {
+            when (val result = readerTagRepository.getUserTags()) {
+                is ReaderRepositoryCommunication.SuccessWithData<*> -> {
+                    userTagsFetchedSuccessfully = true
+                    userTags = result.data as ReaderTagList
+                    when (entryPoint) {
+                        EntryPoint.DISCOVER -> checkAndLoadInterests(userTags)
+                        EntryPoint.SETTINGS -> loadInterests(userTags)
+                    }
+                }
+                is ReaderRepositoryCommunication.Error -> {
+                    if (result is ReaderRepositoryCommunication.Error.NetworkUnavailable) {
+                        updateUiState(ConnectionErrorUiState)
+                    } else if (result is ReaderRepositoryCommunication.Error.RemoteRequestFailure) {
+                        updateUiState(RequestFailedErrorUiState)
+                    }
+                }
+                ReaderRepositoryCommunication.Started -> Unit // Do nothing
+                ReaderRepositoryCommunication.Success -> Unit // Do nothing
+            }
+        }
+    }
+
+    private fun checkAndLoadInterests(userTags: ReaderTagList) {
+        // Check if user has no tags or only has the default dailyprompt tag
+        val shouldShowOnboarding = userTags.isEmpty() || 
+            (userTags.size == 1 && userTags.any { it.tagSlug.equals(DAILY_PROMPT_TAG, ignoreCase = true) })
+        
+        if (shouldShowOnboarding) {
+            loadInterests(userTags)
+        } else {
+            parentViewModel?.onCloseReaderInterests()
+        }
+    }
+
+    private fun loadInterests(userTags: ReaderTagList) {
+        updateUiState(InitialLoadingUiState)
+        viewModelScope.launch {
+            val newUiState: UiState? = when (val result = readerTagRepository.getInterests()) {
+                is ReaderRepositoryCommunication.SuccessWithData<*> -> {
+                    readerTracker.track(AnalyticsTracker.Stat.SELECT_INTERESTS_SHOWN)
+
+                    val tags = (result.data as ReaderTagList).filter { checkAndExcludeTag(userTags, it) }
+                    val distinctTags = ReaderTagList().apply { addAll(tags.distinctBy { it.tagSlug }) }
+                    when (entryPoint) {
+                        EntryPoint.DISCOVER -> ContentUiState(
+                            interestsUiState = transformToInterestsUiState(distinctTags),
+                            interests = distinctTags,
+                            doneButtonUiState = DoneButtonDisabledUiState(),
+                            titleVisible = true
+                        )
+                        EntryPoint.SETTINGS -> ContentUiState(
+                            interestsUiState = transformToInterestsUiState(distinctTags),
+                            interests = distinctTags,
+                            doneButtonUiState = DoneButtonDisabledUiState(R.string.reader_btn_done),
+                            titleVisible = false
+                        )
+                    }
+                }
+                is ReaderRepositoryCommunication.Error.NetworkUnavailable -> {
+                    ConnectionErrorUiState
+                }
+                is ReaderRepositoryCommunication.Error.RemoteRequestFailure -> {
+                    RequestFailedErrorUiState
+                }
+                else -> {
+                    null
+                }
+            }
+
+            newUiState?.let {
+                updateUiState(it)
+            }
+        }
+    }
+
+    private fun checkAndExcludeTag(userTags: ReaderTagList, tag: ReaderTag): Boolean {
+        var contain = false
+        userTags.forEach { excludedTag ->
+            if (excludedTag.tagSlug.equals(tag.tagSlug)) {
+                contain = true
+                return@forEach
+            }
+        }
+        return !contain
+    }
+
+    fun onInterestAtIndexToggled(index: Int, isChecked: Boolean) {
+        uiState.value?.let {
+            val currentUiState = uiState.value as ContentUiState
+            val updatedInterestsUiState = getUpdatedInterestsUiState(index, isChecked)
+
+            updateUiState(
+                currentUiState.copy(
+                    interestsUiState = updatedInterestsUiState,
+                    doneButtonUiState = currentUiState.getDoneButtonState(
+                        entryPoint = entryPoint,
+                        isInterestChecked = isChecked
+                    )
+                )
+            )
+
+            parentViewModel?.completeQuickStartFollowSiteTaskIfNeeded()
+        }
+    }
+
+    fun onDoneButtonClick() {
+        val contentUiState = uiState.value as ContentUiState
+
+        updateUiState(
+            contentUiState.copy(
+                progressBarVisible = true,
+                doneButtonUiState = DoneButtonDisabledUiState(R.string.reader_btn_done)
+            )
+        )
+
+        trackInterests(contentUiState.getSelectedInterests())
+
+        viewModelScope.launch {
+            readerTagRepository.clearTagLastUpdated(ReaderTag.createDiscoverPostCardsTag())
+            when (val result = readerTagRepository.saveInterests(contentUiState.getSelectedInterests())) {
+                is ReaderRepositoryCommunication.Success -> {
+                    when (entryPoint) {
+                        EntryPoint.DISCOVER -> parentViewModel?.onCloseReaderInterests()
+                        EntryPoint.SETTINGS -> _closeReaderInterests.value = Event(Unit)
+                    }
+                }
+                is ReaderRepositoryCommunication.Error -> {
+                    if (result is ReaderRepositoryCommunication.Error.NetworkUnavailable) {
+                        _snackbarEvents.postValue(
+                            Event(SnackbarMessageHolder(UiStringRes(R.string.no_network_message)))
+                        )
+                    } else if (result is ReaderRepositoryCommunication.Error.RemoteRequestFailure) {
+                        _snackbarEvents.postValue(
+                            Event(SnackbarMessageHolder(UiStringRes(R.string.reader_error_request_failed_title)))
+                        )
+                    }
+                    updateUiState(
+                        contentUiState.copy(
+                            progressBarVisible = false,
+                            doneButtonUiState = DoneButtonEnabledUiState(R.string.reader_btn_done)
+                        )
+                    )
+                }
+                is ReaderRepositoryCommunication.Started -> Unit // Do nothing
+                is ReaderRepositoryCommunication.SuccessWithData<*> -> Unit // Do nothing
+            }
+        }
+    }
+
+    fun onRetryButtonClick() {
+        if (!userTagsFetchedSuccessfully) {
+            loadUserTags()
+        } else {
+            loadInterests(userTags)
+        }
+    }
+
+    private fun transformToInterestsUiState(interests: ReaderTagList) =
+        interests.map { interest ->
+            TagUiState(interest.tagTitle, interest.tagSlug)
+        }
+
+    private fun getUpdatedInterestsUiState(index: Int, isChecked: Boolean): List<TagUiState> {
+        val currentUiState = uiState.value as ContentUiState
+        val newInterestsUiState = currentUiState.interestsUiState.toMutableList()
+        newInterestsUiState[index] = currentUiState.interestsUiState[index].copy(isChecked = isChecked)
+        return newInterestsUiState
+    }
+
+    private fun updateUiState(uiState: UiState) {
+        _uiState.value = uiState
+    }
+
+    private fun trackInterests(tags: List<ReaderTag>) {
+        tags.forEach {
+            val source = when (entryPoint) {
+                EntryPoint.DISCOVER -> ReaderTracker.SOURCE_DISCOVER
+                EntryPoint.SETTINGS -> ReaderTracker.SOURCE_SETTINGS
+            }
+            readerTracker.trackTag(
+                AnalyticsTracker.Stat.READER_TAG_FOLLOWED,
+                it.tagSlug,
+                source
+            )
+        }
+        readerTracker.trackTagQuantity(AnalyticsTracker.Stat.SELECT_INTERESTS_PICKED, tags.size)
+    }
+
+    fun onBackButtonClick() {
+        when (entryPoint) {
+            EntryPoint.DISCOVER -> parentViewModel?.onCloseReaderInterests()
+            EntryPoint.SETTINGS -> _closeReaderInterests.value = Event(Unit)
+        }
+    }
+
+    sealed class UiState(
+        open val doneButtonUiState: DoneButtonUiState = DoneButtonHiddenUiState,
+        open val progressBarVisible: Boolean = false,
+        open val titleVisible: Boolean = false,
+        val errorLayoutVisible: Boolean = false
+    ) {
+        object InitialLoadingUiState : UiState(
+            progressBarVisible = true
+        )
+
+        data class ContentUiState(
+            val interestsUiState: List<TagUiState>,
+            val interests: ReaderTagList,
+            override val progressBarVisible: Boolean = false,
+            override val doneButtonUiState: DoneButtonUiState,
+            override val titleVisible: Boolean
+        ) : UiState(
+            progressBarVisible = false,
+            titleVisible = titleVisible,
+            errorLayoutVisible = false
+        )
+
+        sealed class ErrorUiState constructor(
+            val titleRes: Int
+        ) : UiState(
+            progressBarVisible = false,
+            errorLayoutVisible = true
+        ) {
+            object ConnectionErrorUiState : ErrorUiState(R.string.no_network_message)
+
+            object RequestFailedErrorUiState : ErrorUiState(R.string.reader_error_request_failed_title)
+        }
+
+        private fun getCheckedInterestsUiState(): List<TagUiState> {
+            return if (this is ContentUiState) {
+                interestsUiState.filter { it.isChecked }
+            } else {
+                emptyList()
+            }
+        }
+
+        fun getSelectedInterests(): List<ReaderTag> {
+            return if (this is ContentUiState) {
+                interests.filter {
+                    getCheckedInterestsUiState().map { checkedInterestUiState ->
+                        checkedInterestUiState.slug
+                    }.contains(it.tagSlug)
+                }
+            } else {
+                emptyList()
+            }
+        }
+
+        fun getDoneButtonState(
+            entryPoint: EntryPoint,
+            isInterestChecked: Boolean = false
+        ): DoneButtonUiState {
+            return if (this is ContentUiState) {
+                val disableDoneButton = interests.isEmpty() ||
+                        (getCheckedInterestsUiState().size == 1 && !isInterestChecked)
+                if (disableDoneButton) {
+                    when (entryPoint) {
+                        EntryPoint.DISCOVER -> DoneButtonDisabledUiState()
+                        EntryPoint.SETTINGS -> DoneButtonDisabledUiState(R.string.reader_btn_done)
+                    }
+                } else {
+                    DoneButtonEnabledUiState()
+                }
+            } else {
+                DoneButtonHiddenUiState
+            }
+        }
+    }
+
+    sealed class DoneButtonUiState(
+        @StringRes open val titleRes: Int = R.string.reader_btn_done,
+        val enabled: Boolean = false,
+        val visible: Boolean = true
+    ) {
+        data class DoneButtonEnabledUiState(
+            @StringRes override val titleRes: Int = R.string.reader_btn_done
+        ) : DoneButtonUiState(
+            enabled = true
+        )
+
+        data class DoneButtonDisabledUiState(
+            @StringRes override val titleRes: Int = R.string.reader_btn_select_few_interests
+        ) : DoneButtonUiState(
+            enabled = false
+        )
+
+        object DoneButtonHiddenUiState : DoneButtonUiState(
+            visible = false
+        )
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt]

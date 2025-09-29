@@ -1,0 +1,2140 @@
+[start of core/common/src/internal/format/FieldSpec.kt]
+/*
+ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime.internal.format
+
+import kotlinx.datetime.internal.format.parser.AssignableField
+import kotlin.reflect.KMutableProperty1
+
+/**
+ * A lens-like interface for accessing fields of objects.
+ */
+internal interface Accessor<in Object, Field>: AssignableField<Object, Field> {
+    /**
+     * The value of the field in the given object, or `null` if the field is not set.
+     */
+    fun getter(container: Object): Field?
+
+    /**
+     * Function that returns the value of the field in the given object,
+     * or throws [IllegalStateException] if the field is not set.
+     *
+     * This function is used to access fields during formatting.
+     */
+    fun getterNotNull(container: Object, userFriendlyName: String? = null, suggestion: String? = null): Field =
+        getter(container) ?: run {
+            val fieldName = userFriendlyName ?: name
+            val message = buildString {
+                append("Required field '$fieldName' is not set")
+                if (suggestion != null) {
+                    append(". $suggestion")
+                }
+            }
+            throw IllegalStateException(message)
+        }
+}
+
+/**
+ * An implementation of [Accessor] for a mutable property of an object.
+ */
+internal class PropertyAccessor<Object, Field>(private val property: KMutableProperty1<Object, Field?>): Accessor<Object, Field> {
+    override val name: String get() = property.name
+
+    override fun trySetWithoutReassigning(container: Object, newValue: Field): Field? {
+        val oldValue = property.get(container)
+        return when {
+            oldValue === null -> {
+                property.set(container, newValue)
+                null
+            }
+            oldValue == newValue -> null
+            else -> oldValue
+        }
+    }
+
+    override fun getter(container: Object): Field? = property.get(container)
+}
+
+/**
+ * A description of the field's numeric sign.
+ *
+ * Several fields can share the same sign. For example, the hour and the minute of the UTC offset have the same sign,
+ * and setting the sign of the hour also sets the sign of the minute.
+ *
+ * Implementations of this interface are *not* required to redefine [equals] and [hashCode].
+ * Instead, signs should be defined as singletons and compared by reference.
+ */
+internal interface FieldSign<in Target> {
+    /**
+     * The field that is `true` if the value of the field is known to be negative, and `false` otherwise.
+     * Can be both read from and written to.
+     */
+    val isNegative: Accessor<Target, Boolean>
+
+    /**
+     * A check for whether the current value of the field is zero.
+     */
+    fun isZero(obj: Target): Boolean
+}
+
+/**
+ * A specification of a field.
+ *
+ * Fields represent parts of objects, regardless of how they are stored or formatted.
+ * For example, a field "day of week" can be represented with both strings of various kinds ("Monday", "Mon") and
+ * numbers ("1" for Monday, "2" for Tuesday, etc.), but the field itself is the same.
+ *
+ * Fields can typically contain `null` values, which means that the field is not set.
+ */
+internal interface FieldSpec<in Target, Type> {
+    /**
+     * The function with which the field can be accessed.
+     */
+    val accessor: Accessor<Target, Type>
+
+    /**
+     * The default value of the field, or `null` if the field has none.
+     */
+    val defaultValue: Type?
+
+    /**
+     * The name of the field.
+     */
+    val name: String
+
+    /**
+     * The user-friendly name of the field for error messages.
+     */
+    val userFriendlyName: String
+
+    /**
+     * A suggestion for how to set this field, used in error messages.
+     */
+    val suggestion: String?
+
+    /**
+     * The sign corresponding to the field value, or `null` if the field has none.
+     */
+    val sign: FieldSign<Target>?
+}
+
+/**
+ * Inherit from this class to obtain a sensible [toString] implementation for debugging.
+ */
+internal abstract class AbstractFieldSpec<in Target, Type>: FieldSpec<Target, Type> {
+    override fun toString(): String = "The field $name (default value is $defaultValue)"
+}
+
+/**
+ * A specification of a field that can contain values of any kind.
+ * Used for fields additional information about which is not that important for parsing/formatting.
+ */
+internal class GenericFieldSpec<in Target, Type>(
+    override val accessor: Accessor<Target, Type>,
+    override val name: String = accessor.name,
+    override val userFriendlyName: String = name,
+    override val suggestion: String? = null,
+    override val defaultValue: Type? = null,
+    override val sign: FieldSign<Target>? = null,
+) : AbstractFieldSpec<Target, Type>()
+
+/**
+ * A specification of a field that can only contain non-negative numeric values.
+ */
+internal class UnsignedFieldSpec<in Target>(
+    override val accessor: Accessor<Target, Int>,
+    /**
+     * The minimum value of the field.
+     */
+    val minValue: Int,
+    /**
+     * The maximum value of the field.
+     */
+    val maxValue: Int,
+    override val name: String = accessor.name,
+    override val userFriendlyName: String = name,
+    override val suggestion: String? = null,
+    override val defaultValue: Int? = null,
+    override val sign: FieldSign<Target>? = null,
+) : AbstractFieldSpec<Target, Int>() {
+    /**
+     * The maximum length of the field when represented as a decimal number.
+     */
+    val maxDigits: Int = when {
+        maxValue < 10 -> 1
+        maxValue < 100 -> 2
+        maxValue < 1000 -> 3
+        else -> throw IllegalArgumentException("Max value $maxValue is too large")
+    }
+}
+[end of core/common/src/internal/format/FieldSpec.kt]
+[start of core/common/src/format/UtcOffsetFormat.kt]
+/*
+ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime.format
+
+import kotlinx.datetime.*
+import kotlinx.datetime.internal.format.*
+import kotlinx.datetime.internal.format.parser.Copyable
+import kotlin.math.*
+
+internal interface UtcOffsetFieldContainer {
+    var isNegative: Boolean?
+    var totalHoursAbs: Int?
+    var minutesOfHour: Int?
+    var secondsOfMinute: Int?
+}
+
+internal interface AbstractWithOffsetBuilder : DateTimeFormatBuilder.WithUtcOffset {
+    fun addFormatStructureForOffset(structure: FormatStructure<UtcOffsetFieldContainer>)
+
+    override fun offsetHours(padding: Padding) =
+        addFormatStructureForOffset(
+            SignedFormatStructure(
+                BasicFormatStructure(UtcOffsetWholeHoursDirective(padding)),
+                withPlusSign = true
+            )
+        )
+
+    override fun offsetMinutesOfHour(padding: Padding) =
+        addFormatStructureForOffset(BasicFormatStructure(UtcOffsetMinuteOfHourDirective(padding)))
+
+    override fun offsetSecondsOfMinute(padding: Padding) =
+        addFormatStructureForOffset(BasicFormatStructure(UtcOffsetSecondOfMinuteDirective(padding)))
+
+    @Suppress("NO_ELSE_IN_WHEN")
+    override fun offset(format: DateTimeFormat<UtcOffset>) = when (format) {
+        is UtcOffsetFormat -> addFormatStructureForOffset(format.actualFormat)
+    }
+}
+
+internal class UtcOffsetFormat(override val actualFormat: CachedFormatStructure<UtcOffsetFieldContainer>) :
+    AbstractDateTimeFormat<UtcOffset, IncompleteUtcOffset>() {
+    companion object {
+        fun build(block: DateTimeFormatBuilder.WithUtcOffset.() -> Unit): UtcOffsetFormat {
+            val builder = Builder(AppendableFormatStructure())
+            builder.block()
+            return UtcOffsetFormat(builder.build())
+        }
+    }
+
+    private class Builder(override val actualBuilder: AppendableFormatStructure<UtcOffsetFieldContainer>) :
+        AbstractDateTimeFormatBuilder<UtcOffsetFieldContainer, Builder>, AbstractWithOffsetBuilder {
+
+        override fun addFormatStructureForOffset(structure: FormatStructure<UtcOffsetFieldContainer>) {
+            actualBuilder.add(structure)
+        }
+
+        override fun createEmpty(): Builder = Builder(AppendableFormatStructure())
+    }
+
+    override fun intermediateFromValue(value: UtcOffset): IncompleteUtcOffset =
+        IncompleteUtcOffset().apply { populateFrom(value) }
+
+    override fun valueFromIntermediate(intermediate: IncompleteUtcOffset): UtcOffset = intermediate.toUtcOffset()
+
+    override val emptyIntermediate: IncompleteUtcOffset get() = emptyIncompleteUtcOffset
+
+}
+
+internal enum class WhenToOutput {
+    NEVER,
+    IF_NONZERO,
+    ALWAYS;
+}
+
+internal fun <T : DateTimeFormatBuilder> T.outputIfNeeded(whenToOutput: WhenToOutput, format: T.() -> Unit) {
+    when (whenToOutput) {
+        WhenToOutput.NEVER -> {}
+        WhenToOutput.IF_NONZERO -> {
+            optional {
+                format()
+            }
+        }
+
+        WhenToOutput.ALWAYS -> {
+            format()
+        }
+    }
+}
+
+internal fun DateTimeFormatBuilder.WithUtcOffset.isoOffset(
+    zOnZero: Boolean,
+    useSeparator: Boolean,
+    outputMinute: WhenToOutput,
+    outputSecond: WhenToOutput
+) {
+    require(outputMinute >= outputSecond) { "Seconds cannot be included without minutes" }
+    fun DateTimeFormatBuilder.WithUtcOffset.appendIsoOffsetWithoutZOnZero() {
+        offsetHours()
+        outputIfNeeded(outputMinute) {
+            if (useSeparator) {
+                char(':')
+            }
+            offsetMinutesOfHour()
+            outputIfNeeded(outputSecond) {
+                if (useSeparator) {
+                    char(':')
+                }
+                offsetSecondsOfMinute()
+            }
+        }
+    }
+    if (zOnZero) {
+        optional("Z") {
+            alternativeParsing({
+                char('z')
+            }) {
+                appendIsoOffsetWithoutZOnZero()
+            }
+        }
+    } else {
+        appendIsoOffsetWithoutZOnZero()
+    }
+}
+
+private object OffsetFields {
+    private val sign = object : FieldSign<UtcOffsetFieldContainer> {
+        override val isNegative = PropertyAccessor(UtcOffsetFieldContainer::isNegative)
+        override fun isZero(obj: UtcOffsetFieldContainer): Boolean =
+            (obj.totalHoursAbs ?: 0) == 0 && (obj.minutesOfHour ?: 0) == 0 && (obj.secondsOfMinute ?: 0) == 0
+    }
+    val totalHoursAbs = UnsignedFieldSpec(
+        PropertyAccessor(UtcOffsetFieldContainer::totalHoursAbs),
+        defaultValue = 0,
+        minValue = 0,
+        maxValue = 18,
+        userFriendlyName = "offsetHours",
+        suggestion = "Use setOffset() or setDateTimeOffset() to set the UTC offset fields",
+        sign = sign,
+    )
+    val minutesOfHour = UnsignedFieldSpec(
+        PropertyAccessor(UtcOffsetFieldContainer::minutesOfHour),
+        defaultValue = 0,
+        minValue = 0,
+        maxValue = 59,
+        userFriendlyName = "offsetMinutesOfHour",
+        suggestion = "Use setOffset() or setDateTimeOffset() to set the UTC offset fields",
+        sign = sign,
+    )
+    val secondsOfMinute = UnsignedFieldSpec(
+        PropertyAccessor(UtcOffsetFieldContainer::secondsOfMinute),
+        defaultValue = 0,
+        minValue = 0,
+        maxValue = 59,
+        userFriendlyName = "offsetSecondsOfMinute",
+        suggestion = "Use setOffset() or setDateTimeOffset() to set the UTC offset fields",
+        sign = sign,
+    )
+}
+
+internal class IncompleteUtcOffset(
+    override var isNegative: Boolean? = null,
+    override var totalHoursAbs: Int? = null,
+    override var minutesOfHour: Int? = null,
+    override var secondsOfMinute: Int? = null,
+) : UtcOffsetFieldContainer, Copyable<IncompleteUtcOffset> {
+
+    fun toUtcOffset(): UtcOffset {
+        val sign = if (isNegative == true) -1 else 1
+        return UtcOffset(
+            totalHoursAbs?.let { it * sign }, minutesOfHour?.let { it * sign }, secondsOfMinute?.let { it * sign }
+        )
+    }
+
+    fun populateFrom(offset: UtcOffset) {
+        isNegative = offset.totalSeconds < 0
+        val totalSecondsAbs = offset.totalSeconds.absoluteValue
+        totalHoursAbs = totalSecondsAbs / 3600
+        minutesOfHour = (totalSecondsAbs / 60) % 60
+        secondsOfMinute = totalSecondsAbs % 60
+    }
+
+    override fun equals(other: Any?): Boolean =
+        other is IncompleteUtcOffset && isNegative == other.isNegative && totalHoursAbs == other.totalHoursAbs &&
+            minutesOfHour == other.minutesOfHour && secondsOfMinute == other.secondsOfMinute
+
+    override fun hashCode(): Int =
+        isNegative.hashCode() + totalHoursAbs.hashCode() + minutesOfHour.hashCode() + secondsOfMinute.hashCode()
+
+    override fun copy(): IncompleteUtcOffset =
+        IncompleteUtcOffset(isNegative, totalHoursAbs, minutesOfHour, secondsOfMinute)
+
+    override fun toString(): String =
+        "${isNegative?.let { if (it) "-" else "+" } ?: " "}${totalHoursAbs ?: "??"}:${minutesOfHour ?: "??"}:${secondsOfMinute ?: "??"}"
+}
+
+internal class UtcOffsetWholeHoursDirective(private val padding: Padding) :
+    UnsignedIntFieldFormatDirective<UtcOffsetFieldContainer>(
+        OffsetFields.totalHoursAbs,
+        minDigits = padding.minDigits(2),
+        spacePadding = padding.spaces(2)
+    ) {
+
+    override val builderRepresentation: String
+        get() =
+            "${DateTimeFormatBuilder.WithUtcOffset::offsetHours.name}(${padding.toKotlinCode()})"
+
+    override fun equals(other: Any?): Boolean = other is UtcOffsetWholeHoursDirective && padding == other.padding
+    override fun hashCode(): Int = padding.hashCode()
+}
+
+private class UtcOffsetMinuteOfHourDirective(private val padding: Padding) :
+    UnsignedIntFieldFormatDirective<UtcOffsetFieldContainer>(
+        OffsetFields.minutesOfHour,
+        minDigits = padding.minDigits(2), spacePadding = padding.spaces(2)
+    ) {
+
+    override val builderRepresentation: String
+        get() = when (padding) {
+            Padding.NONE -> "${DateTimeFormatBuilder.WithUtcOffset::offsetMinutesOfHour.name}()"
+            else -> "${DateTimeFormatBuilder.WithUtcOffset::offsetMinutesOfHour.name}(${padding.toKotlinCode()})"
+        }
+
+    override fun equals(other: Any?): Boolean = other is UtcOffsetMinuteOfHourDirective && padding == other.padding
+    override fun hashCode(): Int = padding.hashCode()
+}
+
+private class UtcOffsetSecondOfMinuteDirective(private val padding: Padding) :
+    UnsignedIntFieldFormatDirective<UtcOffsetFieldContainer>(
+        OffsetFields.secondsOfMinute,
+        minDigits = padding.minDigits(2), spacePadding = padding.spaces(2)
+    ) {
+
+    override val builderRepresentation: String
+        get() = when (padding) {
+            Padding.NONE -> "${DateTimeFormatBuilder.WithUtcOffset::offsetSecondsOfMinute.name}()"
+            else -> "${DateTimeFormatBuilder.WithUtcOffset::offsetSecondsOfMinute.name}(${padding.toKotlinCode()})"
+        }
+
+    override fun equals(other: Any?): Boolean = other is UtcOffsetSecondOfMinuteDirective && padding == other.padding
+    override fun hashCode(): Int = padding.hashCode()
+}
+
+// these are constants so that the formats are not recreated every time they are used
+internal val ISO_OFFSET by lazy {
+    UtcOffsetFormat.build {
+        alternativeParsing({ chars("z") }) {
+            optional("Z") {
+                offsetHours()
+                char(':')
+                offsetMinutesOfHour()
+                optional {
+                    char(':')
+                    offsetSecondsOfMinute()
+                }
+            }
+        }
+    }
+}
+internal val ISO_OFFSET_BASIC by lazy {
+    UtcOffsetFormat.build {
+        alternativeParsing({ chars("z") }) {
+            optional("Z") {
+                offsetHours()
+                optional {
+                    offsetMinutesOfHour()
+                    optional {
+                        offsetSecondsOfMinute()
+                    }
+                }
+            }
+        }
+    }
+}
+
+internal val FOUR_DIGIT_OFFSET by lazy {
+    UtcOffsetFormat.build {
+        offsetHours()
+        offsetMinutesOfHour()
+    }
+}
+
+private val emptyIncompleteUtcOffset = IncompleteUtcOffset()
+[end of core/common/src/format/UtcOffsetFormat.kt]
+[start of core/common/src/format/LocalDateFormat.kt]
+/*
+ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime.format
+
+import kotlinx.datetime.*
+import kotlinx.datetime.format.MonthNames.Companion.ENGLISH_ABBREVIATED
+import kotlinx.datetime.format.MonthNames.Companion.ENGLISH_FULL
+import kotlinx.datetime.internal.*
+import kotlinx.datetime.internal.format.*
+import kotlinx.datetime.internal.format.parser.Copyable
+
+/**
+ * A description of how month names are formatted.
+ *
+ * Instances of this class are typically used as arguments to [DateTimeFormatBuilder.WithDate.monthName].
+ *
+ * Predefined instances are available as [ENGLISH_FULL] and [ENGLISH_ABBREVIATED].
+ * You can also create custom instances using the constructor.
+ *
+ * An [IllegalArgumentException] will be thrown if some month name is empty or there are duplicate names.
+ *
+ * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.MonthNamesSamples.usage
+ * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.MonthNamesSamples.constructionFromList
+ */
+public class MonthNames(
+    /**
+     * A list of month names in order from January to December.
+     *
+     * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.MonthNamesSamples.names
+     */
+    public val names: List<String>
+) {
+    init {
+        require(names.size == 12) { "Month names must contain exactly 12 elements" }
+        names.indices.forEach { ix ->
+            require(names[ix].isNotEmpty()) { "A month name can not be empty" }
+            for (ix2 in 0 until ix) {
+                require(names[ix] != names[ix2]) {
+                    "Month names must be unique, but '${names[ix]}' was repeated"
+                }
+            }
+        }
+    }
+
+    /**
+     * Create a [MonthNames] using the month names in order from January to December.
+     *
+     * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.MonthNamesSamples.constructionFromStrings
+     */
+    public constructor(
+        january: String, february: String, march: String, april: String, may: String, june: String,
+        july: String, august: String, september: String, october: String, november: String, december: String
+    ) :
+        this(listOf(january, february, march, april, may, june, july, august, september, october, november, december))
+
+    public companion object {
+        /**
+         * English month names from 'January' to 'December'.
+         *
+         * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.MonthNamesSamples.englishFull
+         */
+        public val ENGLISH_FULL: MonthNames = MonthNames(
+            listOf(
+                "January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"
+            )
+        )
+
+        /**
+         * Shortened English month names from 'Jan' to 'Dec'.
+         *
+         * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.MonthNamesSamples.englishAbbreviated
+         */
+        public val ENGLISH_ABBREVIATED: MonthNames = MonthNames(
+            listOf(
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+            )
+        )
+    }
+
+    /** @suppress */
+    override fun toString(): String =
+        names.joinToString(", ", "MonthNames(", ")", transform = String::toString)
+
+    /** @suppress */
+    override fun equals(other: Any?): Boolean = other is MonthNames && names == other.names
+
+    /** @suppress */
+    override fun hashCode(): Int = names.hashCode()
+}
+
+private fun MonthNames.toKotlinCode(): String = when (this.names) {
+    MonthNames.ENGLISH_FULL.names -> "MonthNames.${MonthNames.Companion::ENGLISH_FULL.name}"
+    MonthNames.ENGLISH_ABBREVIATED.names -> "MonthNames.${MonthNames.Companion::ENGLISH_ABBREVIATED.name}"
+    else -> names.joinToString(", ", "MonthNames(", ")", transform = String::toKotlinCode)
+}
+
+/**
+ * A description of how the names of weekdays are formatted.
+ *
+ * Instances of this class are typically used as arguments to [DateTimeFormatBuilder.WithDate.dayOfWeek].
+ *
+ * Predefined instances are available as [ENGLISH_FULL] and [ENGLISH_ABBREVIATED].
+ * You can also create custom instances using the constructor.
+ *
+ * An [IllegalArgumentException] will be thrown if some day-of-week name is empty or there are duplicate names.
+ *
+ * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.DayOfWeekNamesSamples.usage
+ * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.DayOfWeekNamesSamples.constructionFromList
+ */
+public class DayOfWeekNames(
+    /**
+     * A list of the names of weekdays in order from Monday to Sunday.
+     *
+     * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.DayOfWeekNamesSamples.names
+     */
+    public val names: List<String>
+) {
+    init {
+        require(names.size == 7) { "Day of week names must contain exactly 7 elements" }
+        names.indices.forEach { ix ->
+            require(names[ix].isNotEmpty()) { "A day-of-week name can not be empty" }
+            for (ix2 in 0 until ix) {
+                require(names[ix] != names[ix2]) {
+                    "Day-of-week names must be unique, but '${names[ix]}' was repeated"
+                }
+            }
+        }
+    }
+
+    /**
+     * A constructor that takes the names of weekdays in order from Monday to Sunday.
+     *
+     * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.DayOfWeekNamesSamples.constructionFromStrings
+     */
+    public constructor(
+        monday: String,
+        tuesday: String,
+        wednesday: String,
+        thursday: String,
+        friday: String,
+        saturday: String,
+        sunday: String
+    ) :
+        this(listOf(monday, tuesday, wednesday, thursday, friday, saturday, sunday))
+
+    public companion object {
+        /**
+         * English names of weekdays from 'Monday' to 'Sunday'.
+         *
+         * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.DayOfWeekNamesSamples.englishFull
+         */
+        public val ENGLISH_FULL: DayOfWeekNames = DayOfWeekNames(
+            listOf(
+                "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
+            )
+        )
+
+        /**
+         * Shortened English names of weekdays from 'Mon' to 'Sun'.
+         *
+         * @sample kotlinx.datetime.test.samples.format.LocalDateFormatSamples.DayOfWeekNamesSamples.englishAbbreviated
+         */
+        public val ENGLISH_ABBREVIATED: DayOfWeekNames = DayOfWeekNames(
+            listOf(
+                "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"
+            )
+        )
+    }
+
+    /** @suppress */
+    override fun toString(): String =
+        names.joinToString(", ", "DayOfWeekNames(", ")", transform = String::toString)
+
+    /** @suppress */
+    override fun equals(other: Any?): Boolean = other is DayOfWeekNames && names == other.names
+
+    /** @suppress */
+    override fun hashCode(): Int = names.hashCode()
+}
+
+private fun DayOfWeekNames.toKotlinCode(): String = when (this.names) {
+    DayOfWeekNames.ENGLISH_FULL.names -> "DayOfWeekNames.${DayOfWeekNames.Companion::ENGLISH_FULL.name}"
+    DayOfWeekNames.ENGLISH_ABBREVIATED.names -> "DayOfWeekNames.${DayOfWeekNames.Companion::ENGLISH_ABBREVIATED.name}"
+    else -> names.joinToString(", ", "DayOfWeekNames(", ")", transform = String::toKotlinCode)
+}
+
+internal fun <T> requireParsedField(field: T?, name: String): T {
+    if (field == null) {
+        throw DateTimeFormatException("Can not create a $name from the given input: the field $name is missing")
+    }
+    return field
+}
+
+internal interface DateFieldContainer {
+    var year: Int?
+    var monthNumber: Int?
+    var dayOfMonth: Int?
+    var isoDayOfWeek: Int?
+    var dayOfYear: Int?
+}
+
+private object DateFields {
+    val year = GenericFieldSpec(
+        PropertyAccessor(DateFieldContainer::year),
+        userFriendlyName = "year",
+        suggestion = "Use setDate() or setDateTime() to set the date fields"
+    )
+    val month = UnsignedFieldSpec(
+        PropertyAccessor(DateFieldContainer::monthNumber),
+        minValue = 1,
+        maxValue = 12,
+        userFriendlyName = "monthNumber",
+        suggestion = "Use setDate() or setDateTime() to set the date fields"
+    )
+    val dayOfMonth = UnsignedFieldSpec(
+        PropertyAccessor(DateFieldContainer::dayOfMonth),
+        minValue = 1,
+        maxValue = 31,
+        userFriendlyName = "dayOfMonth",
+        suggestion = "Use setDate() or setDateTime() to set the date fields"
+    )
+    val isoDayOfWeek = UnsignedFieldSpec(
+        PropertyAccessor(DateFieldContainer::isoDayOfWeek),
+        minValue = 1,
+        maxValue = 7,
+        userFriendlyName = "dayOfWeek",
+        suggestion = "Use setDate() or setDateTime() to set the date fields"
+    )
+    val dayOfYear = UnsignedFieldSpec(
+        PropertyAccessor(DateFieldContainer::dayOfYear),
+        minValue = 1,
+        maxValue = 366,
+        userFriendlyName = "dayOfYear",
+        suggestion = "Use setDate() or setDateTime() to set the date fields"
+    )
+}
+
+/**
+ * A [kotlinx.datetime.LocalDate], but potentially incomplete and inconsistent.
+ */
+internal class IncompleteLocalDate(
+    override var year: Int? = null,
+    override var monthNumber: Int? = null,
+    override var dayOfMonth: Int? = null,
+    override var isoDayOfWeek: Int? = null,
+    override var dayOfYear: Int? = null,
+) : DateFieldContainer, Copyable<IncompleteLocalDate> {
+    fun toLocalDate(): LocalDate {
+        val year = requireParsedField(year, "year")
+        val date = when (val dayOfYear = dayOfYear) {
+            null -> LocalDate(
+                year,
+                requireParsedField(monthNumber, "monthNumber"),
+                requireParsedField(dayOfMonth, "dayOfMonth")
+            )
+            else -> LocalDate(year, 1, 1).plus(dayOfYear - 1, DateTimeUnit.DAY).also {
+                if (it.year != year) {
+                    throw DateTimeFormatException(
+                        "Can not create a LocalDate from the given input: " +
+                            "the day of year is $dayOfYear, which is not a valid day of year for the year $year"
+                    )
+                }
+                if (monthNumber != null && it.monthNumber != monthNumber) {
+                    throw DateTimeFormatException(
+                        "Can not create a LocalDate from the given input: " +
+                            "the day of year is $dayOfYear, which is ${it.month}, " +
+                                "but $monthNumber was specified as the month number"
+                    )
+                }
+                if (dayOfMonth != null && it.dayOfMonth != dayOfMonth) {
+                    throw DateTimeFormatException(
+                        "Can not create a LocalDate from the given input: " +
+                            "the day of year is $dayOfYear, which is the day ${it.dayOfMonth} of ${it.month}, " +
+                                "but $dayOfMonth was specified as the day of month"
+                    )
+                }
+            }
+        }
+        isoDayOfWeek?.let {
+            if (it != date.dayOfWeek.isoDayNumber) {
+                throw DateTimeFormatException(
+                    "Can not create a LocalDate from the given input: " +
+                        "the day of week is ${DayOfWeek(it)} but the date is $date, which is a ${date.dayOfWeek}"
+                )
+            }
+        }
+        return date
+    }
+
+    fun populateFrom(date: LocalDate) {
+        year = date.year
+        monthNumber = date.monthNumber
+        dayOfMonth = date.dayOfMonth
+        isoDayOfWeek = date.dayOfWeek.isoDayNumber
+        dayOfYear = date.dayOfYear
+    }
+
+    override fun copy(): IncompleteLocalDate =
+        IncompleteLocalDate(year, monthNumber, dayOfMonth, isoDayOfWeek, dayOfYear)
+
+    override fun equals(other: Any?): Boolean =
+        other is IncompleteLocalDate && year == other.year && monthNumber == other.monthNumber &&
+            dayOfMonth == other.dayOfMonth && isoDayOfWeek == other.isoDayOfWeek && dayOfYear == other.dayOfYear
+
+    override fun hashCode(): Int = year.hashCode() * 923521 +
+            monthNumber.hashCode() * 29791 +
+            dayOfMonth.hashCode() * 961 +
+            isoDayOfWeek.hashCode() * 31 +
+            dayOfYear.hashCode()
+
+    override fun toString(): String =
+        "${year ?: "??"}-${monthNumber ?: "??"}-${dayOfMonth ?: "??"} (day of week is ${isoDayOfWeek ?: "??"})"
+}
+
+private class YearDirective(private val padding: Padding, private val isYearOfEra: Boolean = false) :
+    SignedIntFieldFormatDirective<DateFieldContainer>(
+        DateFields.year,
+        minDigits = padding.minDigits(4),
+        maxDigits = null,
+        spacePadding = padding.spaces(4),
+        outputPlusOnExceededWidth = 4,
+    ) {
+    override val builderRepresentation: String
+        get() = when (padding) {
+            Padding.ZERO -> "${DateTimeFormatBuilder.WithDate::year.name}()"
+            else -> "${DateTimeFormatBuilder.WithDate::year.name}(${padding.toKotlinCode()})"
+        }.let {
+            if (isYearOfEra) {
+                it + YEAR_OF_ERA_COMMENT
+            } else it
+        }
+
+    override fun equals(other: Any?): Boolean =
+        other is YearDirective && padding == other.padding && isYearOfEra == other.isYearOfEra
+
+    override fun hashCode(): Int = padding.hashCode() * 31 + isYearOfEra.hashCode()
+}
+
+private class ReducedYearDirective(val base: Int, private val isYearOfEra: Boolean = false) :
+    ReducedIntFieldDirective<DateFieldContainer>(
+        DateFields.year,
+        digits = 2,
+        base = base,
+    ) {
+    override val builderRepresentation: String
+        get() =
+            "${DateTimeFormatBuilder.WithDate::yearTwoDigits.name}($base)".let {
+                if (isYearOfEra) {
+                    it + YEAR_OF_ERA_COMMENT
+                } else it
+            }
+
+    override fun equals(other: Any?): Boolean =
+        other is ReducedYearDirective && base == other.base && isYearOfEra == other.isYearOfEra
+
+    override fun hashCode(): Int = base.hashCode() * 31 + isYearOfEra.hashCode()
+}
+
+private const val YEAR_OF_ERA_COMMENT =
+    " /** TODO: the original format had an `y` directive, so the behavior is different on years earlier than 1 AD. See the [kotlinx.datetime.format.byUnicodePattern] documentation for details. */"
+
+/**
+ * A special directive for year-of-era that behaves equivalently to [DateTimeFormatBuilder.WithDate.year].
+ * This is the result of calling [byUnicodePattern] on a pattern that uses the ubiquitous "y" symbol.
+ * We need a separate directive so that, when using [DateTimeFormat.formatAsKotlinBuilderDsl], we can print an
+ * additional comment and explain that the behavior was not preserved exactly.
+ */
+internal fun DateTimeFormatBuilder.WithDate.yearOfEra(padding: Padding) {
+    @Suppress("NO_ELSE_IN_WHEN")
+    when (this) {
+        is AbstractWithDateBuilder -> addFormatStructureForDate(
+            BasicFormatStructure(YearDirective(padding, isYearOfEra = true))
+        )
+    }
+}
+
+/**
+ * A special directive for year-of-era that behaves equivalently to [DateTimeFormatBuilder.WithDate.year].
+ * This is the result of calling [byUnicodePattern] on a pattern that uses the ubiquitous "y" symbol.
+ * We need a separate directive so that, when using [DateTimeFormat.formatAsKotlinBuilderDsl], we can print an
+ * additional comment and explain that the behavior was not preserved exactly.
+ */
+internal fun DateTimeFormatBuilder.WithDate.yearOfEraTwoDigits(baseYear: Int) {
+    @Suppress("NO_ELSE_IN_WHEN")
+    when (this) {
+        is AbstractWithDateBuilder -> addFormatStructureForDate(
+            BasicFormatStructure(ReducedYearDirective(baseYear, isYearOfEra = true))
+        )
+    }
+}
+
+private class MonthDirective(private val padding: Padding) :
+    UnsignedIntFieldFormatDirective<DateFieldContainer>(
+        DateFields.month,
+        minDigits = padding.minDigits(2),
+        spacePadding = padding.spaces(2),
+    ) {
+    override val builderRepresentation: String
+        get() = when (padding) {
+            Padding.ZERO -> "${DateTimeFormatBuilder.WithDate::monthNumber.name}()"
+            else -> "${DateTimeFormatBuilder.WithDate::monthNumber.name}(${padding.toKotlinCode()})"
+        }
+
+    override fun equals(other: Any?): Boolean = other is MonthDirective && padding == other.padding
+    override fun hashCode(): Int = padding.hashCode()
+}
+
+private class MonthNameDirective(private val names: MonthNames) :
+    NamedUnsignedIntFieldFormatDirective<DateFieldContainer>(DateFields.month, names.names, "monthName") {
+    override val builderRepresentation: String
+        get() =
+            "${DateTimeFormatBuilder.WithDate::monthName.name}(${names.toKotlinCode()})"
+
+    override fun equals(other: Any?): Boolean = other is MonthNameDirective && names.names == other.names.names
+    override fun hashCode(): Int = names.names.hashCode()
+}
+
+private class DayDirective(private val padding: Padding) :
+    UnsignedIntFieldFormatDirective<DateFieldContainer>(
+        DateFields.dayOfMonth,
+        minDigits = padding.minDigits(2),
+        spacePadding = padding.spaces(2),
+    ) {
+    override val builderRepresentation: String
+        get() = when (padding) {
+            Padding.ZERO -> "${DateTimeFormatBuilder.WithDate::dayOfMonth.name}()"
+            else -> "${DateTimeFormatBuilder.WithDate::dayOfMonth.name}(${padding.toKotlinCode()})"
+        }
+
+    override fun equals(other: Any?): Boolean = other is DayDirective && padding == other.padding
+    override fun hashCode(): Int = padding.hashCode()
+}
+
+private class DayOfYearDirective(private val padding: Padding) :
+    UnsignedIntFieldFormatDirective<DateFieldContainer>(
+        DateFields.dayOfYear,
+        minDigits = padding.minDigits(3),
+        spacePadding = padding.spaces(3),
+    ) {
+    override val builderRepresentation: String
+        get() = when (padding) {
+            Padding.ZERO -> "${DateTimeFormatBuilder.WithDate::dayOfYear.name}()"
+            else -> "${DateTimeFormatBuilder.WithDate::dayOfYear.name}(${padding.toKotlinCode()})"
+        }
+
+    override fun equals(other: Any?): Boolean = other is DayOfYearDirective && padding == other.padding
+    override fun hashCode(): Int = padding.hashCode()
+}
+
+private class DayOfWeekDirective(private val names: DayOfWeekNames) :
+    NamedUnsignedIntFieldFormatDirective<DateFieldContainer>(DateFields.isoDayOfWeek, names.names, "dayOfWeekName") {
+
+    override val builderRepresentation: String
+        get() =
+            "${DateTimeFormatBuilder.WithDate::dayOfWeek.name}(${names.toKotlinCode()})"
+
+    override fun equals(other: Any?): Boolean = other is DayOfWeekDirective && names.names == other.names.names
+    override fun hashCode(): Int = names.names.hashCode()
+}
+
+internal class LocalDateFormat(override val actualFormat: CachedFormatStructure<DateFieldContainer>) :
+    AbstractDateTimeFormat<LocalDate, IncompleteLocalDate>() {
+    override fun intermediateFromValue(value: LocalDate): IncompleteLocalDate =
+        IncompleteLocalDate().apply { populateFrom(value) }
+
+    override fun valueFromIntermediate(intermediate: IncompleteLocalDate): LocalDate = intermediate.toLocalDate()
+
+    override val emptyIntermediate get() = emptyIncompleteLocalDate
+
+    companion object {
+        fun build(block: DateTimeFormatBuilder.WithDate.() -> Unit): DateTimeFormat<LocalDate> {
+            val builder = Builder(AppendableFormatStructure())
+            builder.block()
+            return LocalDateFormat(builder.build())
+        }
+    }
+
+    internal class Builder(override val actualBuilder: AppendableFormatStructure<DateFieldContainer>) :
+        AbstractDateTimeFormatBuilder<DateFieldContainer, Builder>, AbstractWithDateBuilder {
+
+        override fun addFormatStructureForDate(structure: FormatStructure<DateFieldContainer>) =
+            actualBuilder.add(structure)
+
+        override fun createEmpty(): Builder = Builder(AppendableFormatStructure())
+    }
+}
+
+internal interface AbstractWithDateBuilder : DateTimeFormatBuilder.WithDate {
+    fun addFormatStructureForDate(structure: FormatStructure<DateFieldContainer>)
+
+    override fun year(padding: Padding) =
+        addFormatStructureForDate(BasicFormatStructure(YearDirective(padding)))
+
+    override fun yearTwoDigits(baseYear: Int) =
+        addFormatStructureForDate(BasicFormatStructure(ReducedYearDirective(baseYear)))
+
+    override fun monthNumber(padding: Padding) =
+        addFormatStructureForDate(BasicFormatStructure(MonthDirective(padding)))
+
+    override fun monthName(names: MonthNames) =
+        addFormatStructureForDate(BasicFormatStructure(MonthNameDirective(names)))
+
+    override fun dayOfMonth(padding: Padding) = addFormatStructureForDate(BasicFormatStructure(DayDirective(padding)))
+    override fun dayOfWeek(names: DayOfWeekNames) =
+        addFormatStructureForDate(BasicFormatStructure(DayOfWeekDirective(names)))
+
+    override fun dayOfYear(padding: Padding) =
+        addFormatStructureForDate(BasicFormatStructure(DayOfYearDirective(padding)))
+
+    @Suppress("NO_ELSE_IN_WHEN")
+    override fun date(format: DateTimeFormat<LocalDate>) = when (format) {
+        is LocalDateFormat -> addFormatStructureForDate(format.actualFormat)
+    }
+}
+
+// these are constants so that the formats are not recreated every time they are used
+internal val ISO_DATE by lazy {
+    LocalDateFormat.build { year(); char('-'); monthNumber(); char('-'); dayOfMonth() }
+}
+internal val ISO_DATE_BASIC by lazy {
+    LocalDateFormat.build { year(); monthNumber(); dayOfMonth() }
+}
+
+private val emptyIncompleteLocalDate = IncompleteLocalDate()
+[end of core/common/src/format/LocalDateFormat.kt]
+[start of core/common/src/format/LocalTimeFormat.kt]
+/*
+ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime.format
+
+import kotlinx.datetime.LocalTime
+import kotlinx.datetime.DateTimeFormatException
+import kotlinx.datetime.internal.DecimalFraction
+import kotlinx.datetime.internal.format.*
+import kotlinx.datetime.internal.format.parser.Copyable
+
+/**
+ * The AM/PM marker that indicates whether the hour in range `1..12` is before or after noon.
+ */
+public enum class AmPmMarker {
+    /** The time is before noon. */
+    AM,
+
+    /** The time is after noon. */
+    PM,
+}
+
+internal interface TimeFieldContainer {
+    var minute: Int?
+    var second: Int?
+    var nanosecond: Int?
+    var hour: Int?
+    var hourOfAmPm: Int?
+    var amPm: AmPmMarker?
+
+    var fractionOfSecond: DecimalFraction?
+        get() = nanosecond?.let { DecimalFraction(it, 9) }
+        set(value) {
+            nanosecond = value?.fractionalPartWithNDigits(9)
+        }
+}
+
+private object TimeFields {
+    val hour = UnsignedFieldSpec(
+        PropertyAccessor(TimeFieldContainer::hour),
+        minValue = 0,
+        maxValue = 23,
+        userFriendlyName = "hour",
+        suggestion = "Use setTime() or setDateTime() to set the time fields"
+    )
+    val minute = UnsignedFieldSpec(
+        PropertyAccessor(TimeFieldContainer::minute),
+        minValue = 0,
+        maxValue = 59,
+        userFriendlyName = "minute",
+        suggestion = "Use setTime() or setDateTime() to set the time fields"
+    )
+    val second = UnsignedFieldSpec(
+        PropertyAccessor(TimeFieldContainer::second),
+        minValue = 0,
+        maxValue = 59,
+        defaultValue = 0,
+        userFriendlyName = "second",
+        suggestion = "Use setTime() or setDateTime() to set the time fields"
+    )
+    val fractionOfSecond = GenericFieldSpec(
+        PropertyAccessor(TimeFieldContainer::fractionOfSecond),
+        defaultValue = DecimalFraction(0, 9),
+        userFriendlyName = "nanosecond",
+        suggestion = "Use setTime() or setDateTime() to set the time fields"
+    )
+    val amPm = GenericFieldSpec(
+        PropertyAccessor(TimeFieldContainer::amPm),
+        userFriendlyName = "amPm",
+        suggestion = "Use setTime() or setDateTime() to set the time fields"
+    )
+    val hourOfAmPm = UnsignedFieldSpec(
+        PropertyAccessor(TimeFieldContainer::hourOfAmPm),
+        minValue = 1,
+        maxValue = 12,
+        userFriendlyName = "hourOfAmPm",
+        suggestion = "Use setTime() or setDateTime() to set the time fields"
+    )
+}
+
+internal class IncompleteLocalTime(
+    override var hour: Int? = null,
+    override var hourOfAmPm: Int? = null,
+    override var amPm: AmPmMarker? = null,
+    override var minute: Int? = null,
+    override var second: Int? = null,
+    override var nanosecond: Int? = null
+) : TimeFieldContainer, Copyable<IncompleteLocalTime> {
+    fun toLocalTime(): LocalTime {
+        val hour: Int = hour?.let { hour ->
+            hourOfAmPm?.let {
+                require((hour + 11) % 12 + 1 == it) { "Inconsistent hour and hour-of-am-pm: hour is $hour, but hour-of-am-pm is $it" }
+            }
+            amPm?.let { amPm ->
+                require((amPm == AmPmMarker.PM) == (hour >= 12)) {
+                    "Inconsistent hour and the AM/PM marker: hour is $hour, but the AM/PM marker is $amPm"
+                }
+            }
+            hour
+        } ?: hourOfAmPm?.let { hourOfAmPm ->
+            amPm?.let { amPm ->
+                hourOfAmPm.let { if (it == 12) 0 else it } + if (amPm == AmPmMarker.PM) 12 else 0
+            }
+        } ?: throw DateTimeFormatException("Incomplete time: missing hour")
+        return LocalTime(
+            hour,
+            requireParsedField(minute, "minute"),
+            second ?: 0,
+            nanosecond ?: 0,
+        )
+    }
+
+    fun populateFrom(localTime: LocalTime) {
+        hour = localTime.hour
+        hourOfAmPm = (localTime.hour + 11) % 12 + 1
+        amPm = if (localTime.hour >= 12) AmPmMarker.PM else AmPmMarker.AM
+        minute = localTime.minute
+        second = localTime.second
+        nanosecond = localTime.nanosecond
+    }
+
+    override fun copy(): IncompleteLocalTime = IncompleteLocalTime(hour, hourOfAmPm, amPm, minute, second, nanosecond)
+
+    override fun equals(other: Any?): Boolean =
+        other is IncompleteLocalTime && hour == other.hour && hourOfAmPm == other.hourOfAmPm && amPm == other.amPm &&
+            minute == other.minute && second == other.second && nanosecond == other.nanosecond
+
+    override fun hashCode(): Int =
+        (hour ?: 0) * 31 + (hourOfAmPm ?: 0) * 31 + (amPm?.hashCode() ?: 0) * 31 + (minute ?: 0) * 31 +
+            (second ?: 0) * 31 + (nanosecond ?: 0)
+
+    override fun toString(): String =
+        "${hour ?: "??"}:${minute ?: "??"}:${second ?: "??"}.${
+            nanosecond?.let { nanos ->
+                nanos.toString().let { it.padStart(9 - it.length, '0') }
+            } ?: "???"
+        }"
+}
+
+internal interface AbstractWithTimeBuilder : DateTimeFormatBuilder.WithTime {
+    fun addFormatStructureForTime(structure: FormatStructure<TimeFieldContainer>)
+
+    override fun hour(padding: Padding) = addFormatStructureForTime(BasicFormatStructure(HourDirective(padding)))
+    override fun amPmHour(padding: Padding) =
+        addFormatStructureForTime(BasicFormatStructure(AmPmHourDirective(padding)))
+
+    override fun amPmMarker(am: String, pm: String) =
+        addFormatStructureForTime(BasicFormatStructure(AmPmMarkerDirective(am, pm)))
+
+    override fun minute(padding: Padding) = addFormatStructureForTime(BasicFormatStructure(MinuteDirective(padding)))
+    override fun second(padding: Padding) = addFormatStructureForTime(BasicFormatStructure(SecondDirective(padding)))
+    override fun secondFraction(minLength: Int, maxLength: Int) =
+        addFormatStructureForTime(BasicFormatStructure(FractionalSecondDirective(minLength, maxLength)))
+
+    @Suppress("NO_ELSE_IN_WHEN")
+    override fun time(format: DateTimeFormat<LocalTime>) = when (format) {
+        is LocalTimeFormat -> addFormatStructureForTime(format.actualFormat)
+    }
+}
+
+private class HourDirective(private val padding: Padding) :
+    UnsignedIntFieldFormatDirective<TimeFieldContainer>(
+        TimeFields.hour,
+        minDigits = padding.minDigits(2),
+        spacePadding = padding.spaces(2)
+    ) {
+    override val builderRepresentation: String
+        get() = when (padding) {
+            Padding.ZERO -> "${DateTimeFormatBuilder.WithTime::hour.name}()"
+            else -> "${DateTimeFormatBuilder.WithTime::hour.name}(${padding.toKotlinCode()})"
+        }
+
+    override fun equals(other: Any?): Boolean = other is HourDirective && padding == other.padding
+    override fun hashCode(): Int = padding.hashCode()
+}
+
+private class AmPmHourDirective(private val padding: Padding) :
+    UnsignedIntFieldFormatDirective<TimeFieldContainer>(
+        TimeFields.hourOfAmPm, minDigits = padding.minDigits(2),
+        spacePadding = padding.spaces(2)
+    ) {
+    override val builderRepresentation: String
+        get() = when (padding) {
+            Padding.ZERO -> "${DateTimeFormatBuilder.WithTime::amPmHour.name}()"
+            else -> "${DateTimeFormatBuilder.WithTime::amPmHour.name}(${padding.toKotlinCode()})"
+        }
+
+    override fun equals(other: Any?): Boolean = other is AmPmHourDirective && padding == other.padding
+    override fun hashCode(): Int = padding.hashCode()
+}
+
+private class AmPmMarkerDirective(private val amString: String, private val pmString: String) :
+    NamedEnumIntFieldFormatDirective<TimeFieldContainer, AmPmMarker>(
+        TimeFields.amPm, mapOf(
+            AmPmMarker.AM to amString,
+            AmPmMarker.PM to pmString,
+        ),
+        "AM/PM marker"
+    ) {
+
+    override val builderRepresentation: String
+        get() =
+            "${DateTimeFormatBuilder.WithTime::amPmMarker.name}($amString, $pmString)"
+
+    override fun equals(other: Any?): Boolean =
+        other is AmPmMarkerDirective && amString == other.amString && pmString == other.pmString
+
+    override fun hashCode(): Int = 31 * amString.hashCode() + pmString.hashCode()
+}
+
+private class MinuteDirective(private val padding: Padding) :
+    UnsignedIntFieldFormatDirective<TimeFieldContainer>(
+        TimeFields.minute,
+        minDigits = padding.minDigits(2),
+        spacePadding = padding.spaces(2)
+    ) {
+
+    override val builderRepresentation: String
+        get() = when (padding) {
+            Padding.ZERO -> "${DateTimeFormatBuilder.WithTime::minute.name}()"
+            else -> "${DateTimeFormatBuilder.WithTime::minute.name}(${padding.toKotlinCode()})"
+        }
+
+    override fun equals(other: Any?): Boolean = other is MinuteDirective && padding == other.padding
+    override fun hashCode(): Int = padding.hashCode()
+}
+
+private class SecondDirective(private val padding: Padding) :
+    UnsignedIntFieldFormatDirective<TimeFieldContainer>(
+        TimeFields.second,
+        minDigits = padding.minDigits(2),
+        spacePadding = padding.spaces(2)
+    ) {
+
+    override val builderRepresentation: String
+        get() = when (padding) {
+            Padding.ZERO -> "${DateTimeFormatBuilder.WithTime::second.name}()"
+            else -> "${DateTimeFormatBuilder.WithTime::second.name}(${padding.toKotlinCode()})"
+        }
+
+    override fun equals(other: Any?): Boolean = other is SecondDirective && padding == other.padding
+    override fun hashCode(): Int = padding.hashCode()
+}
+
+internal class FractionalSecondDirective(
+    private val minDigits: Int,
+    private val maxDigits: Int,
+    zerosToAdd: List<Int> = NO_EXTRA_ZEROS,
+) :
+    DecimalFractionFieldFormatDirective<TimeFieldContainer>(
+        TimeFields.fractionOfSecond,
+        minDigits,
+        maxDigits,
+        zerosToAdd
+    ) {
+
+    override val builderRepresentation: String
+        get() {
+            val ref = "secondFraction" // can't directly reference `secondFraction` due to resolution ambiguity
+            // we ignore `grouping`, as it's not representable in the end users' code
+            return when {
+                minDigits == 1 && maxDigits == 9 -> "$ref()"
+                minDigits == 1 -> "$ref(maxLength = $maxDigits)"
+                maxDigits == 1 -> "$ref(minLength = $minDigits)"
+                maxDigits == minDigits -> "$ref($minDigits)"
+                else -> "$ref($minDigits, $maxDigits)"
+            }
+        }
+
+    override fun equals(other: Any?): Boolean =
+        other is FractionalSecondDirective && minDigits == other.minDigits && maxDigits == other.maxDigits
+
+    override fun hashCode(): Int = 31 * minDigits + maxDigits
+
+    companion object {
+        val NO_EXTRA_ZEROS = listOf(0, 0, 0, 0, 0, 0, 0, 0, 0)
+        val GROUP_BY_THREE = listOf(2, 1, 0, 2, 1, 0, 2, 1, 0)
+    }
+}
+
+internal class LocalTimeFormat(override val actualFormat: CachedFormatStructure<TimeFieldContainer>) :
+    AbstractDateTimeFormat<LocalTime, IncompleteLocalTime>() {
+    override fun intermediateFromValue(value: LocalTime): IncompleteLocalTime =
+        IncompleteLocalTime().apply { populateFrom(value) }
+
+    override fun valueFromIntermediate(intermediate: IncompleteLocalTime): LocalTime = intermediate.toLocalTime()
+
+    override val emptyIntermediate: IncompleteLocalTime get() = emptyIncompleteLocalTime
+
+    companion object {
+        fun build(block: DateTimeFormatBuilder.WithTime.() -> Unit): LocalTimeFormat {
+            val builder = Builder(AppendableFormatStructure())
+            builder.block()
+            return LocalTimeFormat(builder.build())
+        }
+
+    }
+
+    private class Builder(override val actualBuilder: AppendableFormatStructure<TimeFieldContainer>) :
+        AbstractDateTimeFormatBuilder<TimeFieldContainer, Builder>, AbstractWithTimeBuilder {
+
+        override fun addFormatStructureForTime(structure: FormatStructure<TimeFieldContainer>) {
+            actualBuilder.add(structure)
+        }
+
+        override fun createEmpty(): Builder = Builder(AppendableFormatStructure())
+    }
+
+}
+
+// these are constants so that the formats are not recreated every time they are used
+internal val ISO_TIME by lazy {
+    LocalTimeFormat.build {
+        hour()
+        char(':')
+        minute()
+        alternativeParsing({
+            // intentionally empty
+        }) {
+            char(':')
+            second()
+            optional {
+                char('.')
+                secondFraction(1, 9)
+            }
+        }
+    }
+}
+
+private val emptyIncompleteLocalTime = IncompleteLocalTime()
+[end of core/common/src/format/LocalTimeFormat.kt]
+[start of core/common/src/format/DateTimeComponents.kt]
+/*
+ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime.format
+
+import kotlinx.datetime.*
+import kotlinx.datetime.DayOfWeek
+import kotlinx.datetime.internal.*
+import kotlinx.datetime.internal.format.*
+import kotlinx.datetime.internal.format.parser.Copyable
+import kotlinx.datetime.internal.safeMultiply
+import kotlin.reflect.*
+
+/**
+ * A collection of datetime fields used specifically for parsing and formatting.
+ *
+ * Its main purpose is to support complex datetime formats that don't correspond to any of the standard
+ * entities in the library. For example, a format that includes only the month and the day of the month but not the
+ * year cannot be represented and parsed as a [LocalDate], but it is valid for a [DateTimeComponents].
+ * See sample 1.
+ *
+ * Another purpose is to support parsing and formatting data with out-of-bounds values. For example, parsing
+ * `23:59:60` as a [LocalTime] is not possible, but it is possible to parse it as a [DateTimeComponents], adjust the value by
+ * setting [second] to `59`, and then convert it to a [LocalTime] via [toLocalTime].
+ * See sample 2.
+ *
+ * Because this class has limited applications, constructing it directly is not possible.
+ * For formatting, use the [format] overload that accepts a lambda with a [DateTimeComponents] receiver.
+ * See sample 3.
+ *
+ * Accessing the fields of this class is not thread-safe.
+ * Make sure to apply proper synchronization if you are using a single instance from multiple threads.
+ *
+ * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.parsingComplexInput
+ * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.parsingInvalidInput
+ * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.simpleFormatting
+ */
+public class DateTimeComponents internal constructor(internal val contents: DateTimeComponentsContents = DateTimeComponentsContents()) {
+    public companion object {
+        /**
+         * Creates a [DateTimeFormat] for [DateTimeComponents] values using [DateTimeFormatBuilder.WithDateTimeComponents].
+         *
+         * There is a collection of predefined formats in [DateTimeComponents.Formats].
+         *
+         * @throws IllegalArgumentException if parsing using this format is ambiguous.
+         * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.customFormat
+         */
+        @Suppress("FunctionName")
+        public fun Format(block: DateTimeFormatBuilder.WithDateTimeComponents.() -> Unit): DateTimeFormat<DateTimeComponents> {
+            val builder = DateTimeComponentsFormat.Builder(AppendableFormatStructure())
+            block(builder)
+            return DateTimeComponentsFormat(builder.build())
+        }
+    }
+
+    /**
+     * A collection of formats for parsing and formatting [DateTimeComponents] values.
+     *
+     * If predefined formats are not sufficient, use [DateTimeComponents.Format] to create a custom
+     * [kotlinx.datetime.format.DateTimeFormat] for [DateTimeComponents] values.
+     */
+    public object Formats {
+
+        /**
+         * ISO 8601 extended format for dates and times with UTC offset.
+         *
+         * The format uses the [UtcOffset.Formats.ISO] format to specify the time zone offset, except that
+         * specifying the minutes of the offset is optional during parsing (so offsets like `+03` are also allowed).
+         *
+         * This format differs from [LocalTime.Formats.ISO] in its time part in that
+         * specifying the seconds is *not* optional.
+         *
+         * Examples of instants in the ISO 8601 format:
+         * - `2020-08-30T18:43:00Z`
+         * - `2020-08-30T18:43:00.50Z`
+         * - `2020-08-30T18:43:00.123456789Z`
+         * - `2020-08-30T18:40:00+03:00`
+         * - `2020-08-30T18:40:00+03:30:20`
+         * * `2020-01-01T23:59:59.123456789+01`
+         * * `+12020-01-31T23:59:59Z`
+         *
+         * This format uses the local date, local time, and UTC offset fields of [DateTimeComponents].
+         *
+         * See ISO-8601-1:2019, 5.4.2.1b), excluding the format without the offset.
+         *
+         * Guaranteed to parse all strings that [Instant.toString] produces.
+         *
+         * Typically, to use this format, you can simply call [Instant.toString] and [Instant.parse].
+         * However, by accessing this format directly, you can obtain the UTC offset, which is not returned from [Instant.parse],
+         * or specify the UTC offset to be formatted.
+         *
+         * ```
+         * val components = DateTimeComponents.Formats.ISO_DATE_TIME_OFFSET.parse("2020-08-30T18:43:00.123456789+03:00")
+         * val instant = components.toInstantUsingOffset() // 2020-08-30T15:43:00.123456789Z
+         * val localDateTime = components.toLocalDateTime() // 2020-08-30T18:43:00.123456789
+         * val offset = components.toUtcOffset() // UtcOffset(hours = 3)
+         * ```
+         *
+         * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.Formats.iso
+         */
+        public val ISO_DATE_TIME_OFFSET: DateTimeFormat<DateTimeComponents> = Format {
+            date(ISO_DATE)
+            alternativeParsing({
+                char('t')
+            }) {
+                char('T')
+            }
+            hour()
+            char(':')
+            minute()
+            char(':')
+            second()
+            optional {
+                char('.')
+                secondFraction(1, 9)
+            }
+            alternativeParsing({
+                offsetHours()
+            }) {
+                offset(UtcOffset.Formats.ISO)
+            }
+        }
+
+        /**
+         * RFC 1123 format for dates and times with UTC offset.
+         *
+         * Examples of valid strings:
+         * * `Mon, 30 Jun 2008 11:05:30 GMT`
+         * * `Mon, 30 Jun 2008 11:05:30 -0300`
+         * * `30 Jun 2008 11:05:30 UT`
+         *
+         * North American and military time zone abbreviations are not supported.
+         *
+         * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.Formats.rfc1123parsing
+         * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.Formats.rfc1123formatting
+         */
+        public val RFC_1123: DateTimeFormat<DateTimeComponents> = Format {
+            alternativeParsing({
+                // the day of week may be missing
+            }) {
+                dayOfWeek(DayOfWeekNames.ENGLISH_ABBREVIATED)
+                chars(", ")
+            }
+            dayOfMonth(Padding.NONE)
+            char(' ')
+            monthName(MonthNames.ENGLISH_ABBREVIATED)
+            char(' ')
+            year()
+            char(' ')
+            hour()
+            char(':')
+            minute()
+            optional {
+                char(':')
+                second()
+            }
+            chars(" ")
+            alternativeParsing({
+                chars("UT")
+            }, {
+                chars("Z")
+            }) {
+                optional("GMT") {
+                    offset(UtcOffset.Formats.FOUR_DIGITS)
+                }
+            }
+        }
+    }
+
+    /**
+     * Writes the contents of the specified [localTime] to this [DateTimeComponents].
+     * The [localTime] is written to the [hour], [hourOfAmPm], [amPm], [minute], [second] and [nanosecond] fields.
+     *
+     * If any of the fields are already set, they will be overwritten.
+     *
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.time
+     */
+    public fun setTime(localTime: LocalTime) {
+        contents.time.populateFrom(localTime)
+    }
+
+    /**
+     * Writes the contents of the specified [localDate] to this [DateTimeComponents].
+     * The [localDate] is written to the [year], [monthNumber], [dayOfMonth], and [dayOfWeek] fields.
+     *
+     * If any of the fields are already set, they will be overwritten.
+     *
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.date
+     */
+    public fun setDate(localDate: LocalDate) {
+        contents.date.populateFrom(localDate)
+    }
+
+    /**
+     * Writes the contents of the specified [localDateTime] to this [DateTimeComponents].
+     * The [localDateTime] is written to the
+     * [year], [monthNumber], [dayOfMonth], [dayOfWeek],
+     * [hour], [hourOfAmPm], [amPm], [minute], [second] and [nanosecond] fields.
+     *
+     * If any of the fields are already set, they will be overwritten.
+     *
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.setDateTime
+     */
+    public fun setDateTime(localDateTime: LocalDateTime) {
+        contents.date.populateFrom(localDateTime.date)
+        contents.time.populateFrom(localDateTime.time)
+    }
+
+    /**
+     * Writes the contents of the specified [utcOffset] to this [DateTimeComponents].
+     * The [utcOffset] is written to the [offsetHours], [offsetMinutesOfHour], [offsetSecondsOfMinute], and
+     * [offsetIsNegative] fields.
+     *
+     * If any of the fields are already set, they will be overwritten.
+     *
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.offset
+     */
+    public fun setOffset(utcOffset: UtcOffset) {
+        contents.offset.populateFrom(utcOffset)
+    }
+
+    /**
+     * Writes the contents of the specified [instant] to this [DateTimeComponents].
+     *
+     * This method is almost always equivalent to the following code:
+     * ```
+     * setDateTime(instant.toLocalDateTime(offset))
+     * setOffset(utcOffset)
+     * ```
+     * However, this also works for instants that are too large to be represented as a [LocalDateTime].
+     *
+     * If any of the fields are already set, they will be overwritten.
+     *
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.setDateTimeOffsetInstant
+     */
+    public fun setDateTimeOffset(instant: Instant, utcOffset: UtcOffset) {
+        val smallerInstant = Instant.fromEpochSeconds(
+            instant.epochSeconds % SECONDS_PER_10000_YEARS, instant.nanosecondsOfSecond
+        )
+        setDateTime(smallerInstant.toLocalDateTime(utcOffset))
+        setOffset(utcOffset)
+        year = year!! + ((instant.epochSeconds / SECONDS_PER_10000_YEARS) * 10000).toInt()
+    }
+
+    /**
+     * Writes the contents of the specified [localDateTime] and [utcOffset] to this [DateTimeComponents].
+     *
+     * A shortcut for calling [setDateTime] and [setOffset] separately.
+     *
+     * If [localDateTime] is obtained from an [Instant] using [LocalDateTime.toInstant], it is recommended to use
+     * [setDateTimeOffset] that accepts an [Instant] directly.
+     *
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.setDateTimeOffset
+     */
+    public fun setDateTimeOffset(localDateTime: LocalDateTime, utcOffset: UtcOffset) {
+        setDateTime(localDateTime)
+        setOffset(utcOffset)
+    }
+
+    /**
+     * The year component of the date.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.date
+     */
+    public var year: Int? by contents.date::year
+
+    /**
+     * The number-of-month (1..12) component of the date.
+     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.date
+     */
+    public var monthNumber: Int? by TwoDigitNumber(contents.date::monthNumber)
+
+    /**
+     * The month ([Month]) component of the date.
+     *
+     * This is a view of [monthNumber].
+     * Setting it will set [monthNumber], and getting it will return a [Month] instance if [monthNumber] is a valid
+     * month.
+     *
+     * @throws IllegalArgumentException during getting if [monthNumber] is outside the `1..12` range.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.date
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.setMonth
+     */
+    public var month: Month?
+        get() = monthNumber?.let { Month(it) }
+        set(value) {
+            monthNumber = value?.number
+        }
+
+    /**
+     * The day-of-month component of the date.
+     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.date
+     */
+    public var dayOfMonth: Int? by TwoDigitNumber(contents.date::dayOfMonth)
+
+    /**
+     * The day-of-week component of the date.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.dayOfWeek
+     */
+    public var dayOfWeek: DayOfWeek?
+        get() = contents.date.isoDayOfWeek?.let { DayOfWeek(it) }
+        set(value) {
+            contents.date.isoDayOfWeek = value?.isoDayNumber
+        }
+
+    /**
+     * The day-of-year component of the date.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.dayOfYear
+     */
+    public var dayOfYear: Int? by ThreeDigitNumber(contents.date::dayOfYear)
+
+    /**
+     * The hour-of-day (0..23) time component.
+     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.time
+     */
+    public var hour: Int? by TwoDigitNumber(contents.time::hour)
+
+    /**
+     * The 12-hour (1..12) time component.
+     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.
+     * @see amPm
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.timeAmPm
+     */
+    public var hourOfAmPm: Int? by TwoDigitNumber(contents.time::hourOfAmPm)
+
+    /**
+     * The AM/PM state of the time component.
+     * @see hourOfAmPm
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.timeAmPm
+     */
+    public var amPm: AmPmMarker? by contents.time::amPm
+
+    /**
+     * The minute-of-hour component.
+     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.time
+     */
+    public var minute: Int? by TwoDigitNumber(contents.time::minute)
+
+    /**
+     * The second-of-minute component.
+     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.time
+     */
+    public var second: Int? by TwoDigitNumber(contents.time::second)
+
+    /**
+     * The nanosecond-of-second component.
+     * @throws IllegalArgumentException during assignment if the value is outside the `0..999_999_999` range.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.time
+     */
+    public var nanosecond: Int?
+        get() = contents.time.nanosecond
+        set(value) {
+            require(value == null || value in 0..999_999_999) {
+                "Nanosecond must be in the range [0, 999_999_999]."
+            }
+            contents.time.nanosecond = value
+        }
+
+    /**
+     * True if the offset is negative.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.offset
+     */
+    public var offsetIsNegative: Boolean? by contents.offset::isNegative
+
+    /**
+     * The total amount of full hours in the UTC offset, in the range [0; 18].
+     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.offset
+     */
+    public var offsetHours: Int? by TwoDigitNumber(contents.offset::totalHoursAbs)
+
+    /**
+     * The amount of minutes that don't add to a whole hour in the UTC offset, in the range [0; 59].
+     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.offset
+     */
+    public var offsetMinutesOfHour: Int? by TwoDigitNumber(contents.offset::minutesOfHour)
+
+    /**
+     * The amount of seconds that don't add to a whole minute in the UTC offset, in the range [0; 59].
+     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.offset
+     */
+    public var offsetSecondsOfMinute: Int? by TwoDigitNumber(contents.offset::secondsOfMinute)
+
+    /**
+     * The timezone identifier, for example, "Europe/Berlin".
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.timeZoneId
+     */
+    public var timeZoneId: String? by contents::timeZoneId
+
+    /**
+     * Builds a [UtcOffset] from the fields in this [DateTimeComponents].
+     *
+     * This method uses the following fields:
+     * * [offsetIsNegative] (default value is `false`)
+     * * [offsetHours] (default value is 0)
+     * * [offsetMinutesOfHour] (default value is 0)
+     * * [offsetSecondsOfMinute] (default value is 0)
+     *
+     * @throws IllegalArgumentException if any of the fields has an out-of-range value.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.toUtcOffset
+     */
+    public fun toUtcOffset(): UtcOffset = contents.offset.toUtcOffset()
+
+    /**
+     * Builds a [LocalDate] from the fields in this [DateTimeComponents].
+     *
+     * This method uses the following fields:
+     * * [year]
+     * * [monthNumber]
+     * * [dayOfMonth]
+     *
+     * Also, [dayOfWeek] is checked for consistency with the other fields.
+     *
+     * @throws IllegalArgumentException if any of the fields is missing or invalid.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.toLocalDate
+     */
+    public fun toLocalDate(): LocalDate = contents.date.toLocalDate()
+
+    /**
+     * Builds a [LocalTime] from the fields in this [DateTimeComponents].
+     *
+     * This method uses the following fields:
+     * * [hour], [hourOfAmPm], and [amPm]
+     * * [minute]
+     * * [second] (default value is 0)
+     * * [nanosecond] (default value is 0)
+     *
+     * @throws IllegalArgumentException if hours or minutes are not present, if any of the fields are invalid, or
+     * [hourOfAmPm] and [amPm] are inconsistent with [hour].
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.toLocalTime
+     */
+    public fun toLocalTime(): LocalTime = contents.time.toLocalTime()
+
+    /**
+     * Builds a [LocalDateTime] from the fields in this [DateTimeComponents].
+     *
+     * This method uses the following fields:
+     * * [year]
+     * * [monthNumber]
+     * * [dayOfMonth]
+     * * [hour], [hourOfAmPm], and [amPm]
+     * * [minute]
+     * * [second] (default value is 0)
+     * * [nanosecond] (default value is 0)
+     *
+     * Also, [dayOfWeek] is checked for consistency with the other fields.
+     *
+     * @throws IllegalArgumentException if any of the required fields are not present,
+     * any of the fields are invalid, or there's inconsistency.
+     *
+     * @see toLocalDate
+     * @see toLocalTime
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.toLocalDateTime
+     */
+    public fun toLocalDateTime(): LocalDateTime = toLocalDate().atTime(toLocalTime())
+
+    /**
+     * Builds an [Instant] from the fields in this [DateTimeComponents].
+     *
+     * Uses the fields required for [toLocalDateTime] and [toUtcOffset].
+     *
+     * Almost always equivalent to `toLocalDateTime().toInstant(toUtcOffset())`, but also accounts for cases when
+     * the year is outside the range representable by [LocalDate] but not outside the range representable by [Instant].
+     *
+     * @throws IllegalArgumentException if any of the required fields are not present, out-of-range, or inconsistent
+     * with one another.
+     * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.toInstantUsingOffset
+     */
+    public fun toInstantUsingOffset(): Instant {
+        val offset = toUtcOffset()
+        val time = toLocalTime()
+        val truncatedDate = contents.date.copy()
+        /**
+         * 10_000 is a number that is both
+         * * guaranteed to be representable as the number of years in a [LocalDate],
+         * * and is a multiple of 400, which is the number of years in a leap cycle, which means that taking the
+         *   remainder of the year after dividing by 40_000 will not change the leap year status of the year.
+         */
+        truncatedDate.year = requireParsedField(truncatedDate.year, "year") % 10_000
+        val totalSeconds = try {
+            val secDelta = safeMultiply((year!! / 10_000).toLong(), SECONDS_PER_10000_YEARS)
+            val epochDays = truncatedDate.toLocalDate().toEpochDays().toLong()
+            safeAdd(secDelta, epochDays * SECONDS_PER_DAY + time.toSecondOfDay() - offset.totalSeconds)
+        } catch (e: ArithmeticException) {
+            throw DateTimeFormatException("The parsed date is outside the range representable by Instant", e)
+        }
+        if (totalSeconds < Instant.MIN.epochSeconds || totalSeconds > Instant.MAX.epochSeconds)
+            throw DateTimeFormatException("The parsed date is outside the range representable by Instant")
+        return Instant.fromEpochSeconds(totalSeconds, nanosecond ?: 0)
+    }
+}
+
+/**
+ * Uses this format to format an unstructured [DateTimeComponents].
+ *
+ * [block] is called on an initially-empty [DateTimeComponents] before formatting.
+ *
+ * Example:
+ * ```
+ * // Mon, 16 Mar 2020 23:59:59 +0300
+ * DateTimeComponents.Formats.RFC_1123.format {
+ *    setDateTime(LocalDateTime(2020, 3, 16, 23, 59, 59, 999_999_999))
+ *    setOffset(UtcOffset(hours = 3))
+ * }
+ * ```
+ *
+ * @throws IllegalStateException if some values needed for the format are not present or can not be formatted:
+ * for example, trying to format [DateTimeFormatBuilder.WithDate.monthName] using a [DateTimeComponents.monthNumber]
+ * value of 20.
+ * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.formatting
+ */
+public fun DateTimeFormat<DateTimeComponents>.format(block: DateTimeComponents.() -> Unit): String =
+    format(DateTimeComponents().apply { block() })
+
+/**
+ * Parses a [DateTimeComponents] from [input] using the given format.
+ * Equivalent to calling [DateTimeFormat.parse] on [format] with [input].
+ *
+ * [DateTimeComponents] does not perform any validation, so even invalid values may be parsed successfully if the string pattern
+ * matches.
+ *
+ * @throws IllegalArgumentException if the text does not match the format.
+ * @sample kotlinx.datetime.test.samples.format.DateTimeComponentsSamples.parsing
+ */
+public fun DateTimeComponents.Companion.parse(
+    input: CharSequence,
+    format: DateTimeFormat<DateTimeComponents>
+): DateTimeComponents =
+    format.parse(input)
+
+internal class DateTimeComponentsContents internal constructor(
+    val date: IncompleteLocalDate = IncompleteLocalDate(),
+    val time: IncompleteLocalTime = IncompleteLocalTime(),
+    val offset: IncompleteUtcOffset = IncompleteUtcOffset(),
+    var timeZoneId: String? = null,
+) : DateFieldContainer by date, TimeFieldContainer by time, UtcOffsetFieldContainer by offset,
+    DateTimeFieldContainer, Copyable<DateTimeComponentsContents> {
+    override fun copy(): DateTimeComponentsContents =
+        DateTimeComponentsContents(date.copy(), time.copy(), offset.copy(), timeZoneId)
+
+    override fun equals(other: Any?): Boolean =
+        other is DateTimeComponentsContents && other.date == date && other.time == time &&
+            other.offset == offset && other.timeZoneId == timeZoneId
+
+    override fun hashCode(): Int =
+        date.hashCode() xor time.hashCode() xor offset.hashCode() xor (timeZoneId?.hashCode() ?: 0)
+}
+
+internal val timeZoneField = GenericFieldSpec(
+    PropertyAccessor(DateTimeComponentsContents::timeZoneId),
+    userFriendlyName = "timeZoneId",
+    suggestion = "Set the timeZoneId property or use a different format that doesn't require a time zone ID"
+)
+
+internal class TimeZoneIdDirective(private val knownZones: Set<String>) :
+    StringFieldFormatDirective<DateTimeComponentsContents>(timeZoneField, knownZones) {
+
+    override val builderRepresentation: String
+        get() =
+            "${DateTimeFormatBuilder.WithDateTimeComponents::timeZoneId.name}()"
+
+    override fun equals(other: Any?): Boolean = other is TimeZoneIdDirective && other.knownZones == knownZones
+    override fun hashCode(): Int = knownZones.hashCode()
+}
+
+internal class DateTimeComponentsFormat(override val actualFormat: CachedFormatStructure<DateTimeComponentsContents>) :
+    AbstractDateTimeFormat<DateTimeComponents, DateTimeComponentsContents>() {
+    override fun intermediateFromValue(value: DateTimeComponents): DateTimeComponentsContents = value.contents
+
+    override fun valueFromIntermediate(intermediate: DateTimeComponentsContents): DateTimeComponents =
+        DateTimeComponents(intermediate)
+
+    override val emptyIntermediate get() = emptyDateTimeComponentsContents
+
+    class Builder(override val actualBuilder: AppendableFormatStructure<DateTimeComponentsContents>) :
+        AbstractDateTimeFormatBuilder<DateTimeComponentsContents, Builder>, AbstractWithDateTimeBuilder,
+        AbstractWithOffsetBuilder, DateTimeFormatBuilder.WithDateTimeComponents {
+        override fun addFormatStructureForDateTime(structure: FormatStructure<DateTimeFieldContainer>) {
+            actualBuilder.add(structure)
+        }
+
+        override fun addFormatStructureForOffset(structure: FormatStructure<UtcOffsetFieldContainer>) {
+            actualBuilder.add(structure)
+        }
+
+        override fun timeZoneId() =
+            actualBuilder.add(BasicFormatStructure(TimeZoneIdDirective(TimeZone.availableZoneIds)))
+
+        @Suppress("NO_ELSE_IN_WHEN")
+        override fun dateTimeComponents(format: DateTimeFormat<DateTimeComponents>) = when (format) {
+            is DateTimeComponentsFormat -> actualBuilder.add(format.actualFormat)
+        }
+
+        override fun createEmpty(): Builder = Builder(AppendableFormatStructure())
+    }
+}
+
+private class TwoDigitNumber(private val reference: KMutableProperty0<Int?>) {
+    operator fun getValue(thisRef: Any?, property: KProperty<*>) = reference.getValue(thisRef, property)
+
+    operator fun setValue(thisRef: Any?, property: KProperty<*>, value: Int?) {
+        require(value === null || value in 0..99) { "${property.name} must be a two-digit number, got '$value'" }
+        reference.setValue(thisRef, property, value)
+    }
+}
+
+private class ThreeDigitNumber(private val reference: KMutableProperty0<Int?>) {
+    operator fun getValue(thisRef: Any?, property: KProperty<*>) = reference.getValue(thisRef, property)
+
+    operator fun setValue(thisRef: Any?, property: KProperty<*>, value: Int?) {
+        require(value === null || value in 0..999) {
+            "${property.name} must be a three-digit number, got '$value'"
+        }
+        reference.setValue(thisRef, property, value)
+    }
+}
+
+private val emptyDateTimeComponentsContents = DateTimeComponentsContents()
+[end of core/common/src/format/DateTimeComponents.kt]
+[start of core/common/src/internal/format/FormatDirective.kt]
+/*
+ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
+ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
+ */
+
+package kotlinx.datetime.internal.format
+
+import kotlinx.datetime.internal.format.parser.AssignableField
+import kotlinx.datetime.internal.format.parser.FormatToken
+import kotlinx.datetime.internal.format.parser.FieldLocation
+import kotlinx.datetime.internal.DecimalFraction
+import kotlin.math.max
+import kotlin.math.min
+
+internal interface FormatDirective<in Target> {
+    fun buildFormatToken(scope: FormattingContext): FormatToken<Target>
+
+    /**
+     * A representation of how this directive would look in a Kotlin DSL.
+     */
+    val builderRepresentation: String
+}
+
+internal interface FormattingContext {
+    fun withFieldParsed(field: AssignableField<*, *>): FormattingContext
+}
+
+internal abstract class FieldFormatDirective<in Target, Type>(
+    protected val fieldSpec: FieldSpec<Target, Type>,
+) : FormatDirective<Target> {
+
+    protected fun getField(container: Target): Type =
+        fieldSpec.accessor.getterNotNull(container, fieldSpec.userFriendlyName, fieldSpec.suggestion)
+}
+
+internal abstract class UnsignedIntFieldFormatDirective<in Target>(
+    fieldSpec: UnsignedFieldSpec<Target>,
+    private val minDigits: Int,
+    private val maxDigits: Int? = null,
+    private val spacePadding: Int = 0,
+) : FieldFormatDirective<Target, Int>(fieldSpec) {
+
+    init {
+        require(minDigits >= 1) { "The minimum number of digits must be at least 1" }
+        if (maxDigits != null) {
+            require(maxDigits >= minDigits) { "The maximum number of digits must be at least the minimum" }
+        }
+        require(spacePadding >= 0) { "Space padding must be non-negative" }
+    }
+
+    override fun buildFormatToken(scope: FormattingContext): FormatToken<Target> {
+        val fieldSpec = this.fieldSpec as UnsignedFieldSpec<Target>
+        return UnsignedIntFieldToken(
+            fieldSpec.accessor,
+            maxDigits ?: fieldSpec.maxDigits,
+            minDigits,
+            spacePadding
+        )
+    }
+}
+
+internal abstract class SignedIntFieldFormatDirective<in Target>(
+    fieldSpec: FieldSpec<Target, Int>,
+    private val minDigits: Int,
+    private val maxDigits: Int? = null,
+    private val spacePadding: Int = 0,
+    private val outputPlusOnExceededWidth: Int? = null,
+) : FieldFormatDirective<Target, Int>(fieldSpec) {
+
+    init {
+        require(minDigits >= 1) { "The minimum number of digits must be at least 1" }
+        if (maxDigits != null) {
+            require(maxDigits >= minDigits) { "The maximum number of digits must be at least the minimum" }
+        }
+        require(spacePadding >= 0) { "Space padding must be non-negative" }
+        if (outputPlusOnExceededWidth != null) {
+            require(outputPlusOnExceededWidth >= 1) { "The width to start outputting the plus sign at must be at least 1" }
+        }
+    }
+
+    override fun buildFormatToken(scope: FormattingContext): FormatToken<Target> = SignedIntFieldToken(
+        fieldSpec.accessor,
+        maxDigits,
+        minDigits,
+        spacePadding,
+        outputPlusOnExceededWidth
+    )
+}
+
+internal class ReducedIntFieldDirective<in Target>(
+    fieldSpec: FieldSpec<Target, Int>,
+    private val digits: Int,
+    private val base: Int,
+) : FieldFormatDirective<Target, Int>(fieldSpec) {
+
+    init {
+        require(digits >= 1) { "The number of digits must be at least 1" }
+    }
+
+    override fun buildFormatToken(scope: FormattingContext): FormatToken<Target> = ReducedIntFieldToken(
+        fieldSpec.accessor,
+        digits,
+        base
+    )
+}
+
+internal abstract class StringFieldFormatDirective<in Target>(
+    fieldSpec: FieldSpec<Target, String>,
+    private val knownStrings: Set<String>,
+) : FieldFormatDirective<Target, String>(fieldSpec) {
+
+    init {
+        require(knownStrings.isNotEmpty()) { "The set of known strings must not be empty" }
+    }
+
+    override fun buildFormatToken(scope: FormattingContext): FormatToken<Target> = StringFieldToken(
+        fieldSpec.accessor,
+        knownStrings
+    )
+}
+
+internal abstract class NamedUnsignedIntFieldFormatDirective<in Target>(
+    fieldSpec: UnsignedFieldSpec<Target>,
+    private val names: List<String>,
+    humanName: String,
+) : FieldFormatDirective<Target, Int>(fieldSpec) {
+
+    init {
+        require(names.isNotEmpty()) { "The list of names must not be empty" }
+        names.indices.forEach { ix ->
+            for (ix2 in 0 until ix) {
+                require(names[ix] != names[ix2]) {
+                    "Names for the $humanName must be unique, but '${names[ix]}' was repeated"
+                }
+            }
+        }
+    }
+
+    override fun buildFormatToken(scope: FormattingContext): FormatToken<Target> = NamedUnsignedIntFieldToken(
+        fieldSpec.accessor,
+        names
+    )
+}
+
+internal abstract class NamedEnumIntFieldFormatDirective<in Target, Enum>(
+    fieldSpec: FieldSpec<Target, Enum>,
+    private val nameMapping: Map<Enum, String>,
+    humanName: String,
+) : FieldFormatDirective<Target, Enum>(fieldSpec) {
+
+    init {
+        require(nameMapping.isNotEmpty()) { "The name mapping must not be empty" }
+        nameMapping.values.toSet().let { names ->
+            require(names.size == nameMapping.size) {
+                "Names for the $humanName must be unique, but duplicates were found"
+            }
+        }
+    }
+
+    override fun buildFormatToken(scope: FormattingContext): FormatToken<Target> = NamedEnumFieldToken(
+        fieldSpec.accessor,
+        nameMapping
+    )
+}
+
+internal abstract class DecimalFractionFieldFormatDirective<in Target>(
+    fieldSpec: FieldSpec<Target, DecimalFraction>,
+    private val minDigits: Int,
+    private val maxDigits: Int,
+    private val zerosToAdd: List<Int>,
+) : FieldFormatDirective<Target, DecimalFraction>(fieldSpec) {
+
+    init {
+        require(minDigits >= 0) { "The minimum number of digits must be non-negative" }
+        require(maxDigits >= minDigits) { "The maximum number of digits must be at least the minimum" }
+        require(maxDigits <= 9) { "The maximum number of digits must be at most 9" }
+    }
+
+    override fun buildFormatToken(scope: FormattingContext): FormatToken<Target> = DecimalFractionFieldToken(
+        fieldSpec.accessor,
+        minDigits,
+        maxDigits,
+        zerosToAdd
+    )
+}
+[end of core/common/src/internal/format/FormatDirective.kt]

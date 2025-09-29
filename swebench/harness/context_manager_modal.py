@@ -475,6 +475,108 @@ class ModalTaskEnvManager:
         with open(self.log_file, "a") as f:
             f.write(f"{APPLY_PATCH_PASS} ({patch_type})\n")
         return True
+        
+    def _apply_patch_with_service(self, patch: str, patch_type: str) -> bool:
+        """
+        Apply patch using ApplyService API when git apply fails
+        
+        Args:
+            patch (str): Plaintext of patch to apply
+            patch_type (str): Type of patch
+            
+        Returns:
+            bool: True if patch applied successfully, False otherwise
+        """
+        try:
+            # Extract file paths and changes from the patch
+            file_pattern = re.compile(r'^--- a/(.*?)$', re.MULTILINE)
+            file_paths = file_pattern.findall(patch)
+            
+            if not file_paths:
+                self.log.write("No file paths found in patch", level=ERROR)
+                return False
+                
+            success_count = 0
+            total_count = 0
+            
+            # Process each file in the patch
+            for file_path in set(file_paths):  # Use set to handle duplicates
+                # Skip if this is a readme file
+                if 'readme' in file_path.lower():
+                    continue
+                    
+                total_count += 1
+                    
+                # Get the file path relative to repo root
+                abs_file_path = os.path.join(self.testbed, file_path)
+                
+                # Check if file exists
+                if not os.path.exists(abs_file_path):
+                    self.log.write(f"File not found: {file_path}", level=WARNING)
+                    continue
+                    
+                # Read original file content
+                with open(abs_file_path, 'r', encoding='utf-8') as f:
+                    original_content = f.read()
+                    
+                # Extract the change for this file from the patch
+                file_chunk_pattern = re.compile(
+                    r'--- a/' + re.escape(file_path) + r'.*?(?=^--- a/|\Z)',
+                    re.MULTILINE | re.DOTALL
+                )
+                file_chunk_match = file_chunk_pattern.search(patch)
+                
+                if not file_chunk_match:
+                    self.log.write(f"Could not extract patch chunk for {file_path}", level=WARNING)
+                    continue
+                    
+                file_patch = file_chunk_match.group(0)
+                
+                # Prepare data for ApplyService API call
+                user_msg = f"Apply patch to {file_path}"
+                
+                # Call the ApplyService API
+                result_content = self._call_apply_service(
+                    original_content=original_content,
+                    file_path=file_path,
+                    code_snippet=file_patch,
+                    user_msg=user_msg
+                )
+                
+                # If API call failed, skip this file
+                if result_content is None:
+                    self.log.write(f"ApplyService API failed for {file_path}, skipping", level=WARNING)
+                    continue
+                
+                # Check if content actually changed
+                if result_content == original_content:
+                    self.log.write(f"ApplyService API returned unchanged content for {file_path}, skipping", level=WARNING)
+                    continue
+                
+                # Write the updated content to the file
+                with open(abs_file_path, 'w', encoding='utf-8') as f:
+                    f.write(result_content)
+                
+                self.log.write(f"Successfully applied patch to {file_path} using ApplyService API")
+                success_count += 1
+                
+            # Consider the patch successful if we updated at least one file
+            if success_count > 0:
+                self.log.write(f"ApplyService API patch application successful ({success_count}/{total_count} files updated)")
+                with open(self.log_file, "a") as f:
+                    f.write(f"{APPLY_PATCH_PASS} ({patch_type})\n")
+                return True
+            else:
+                self.log.write(f"ApplyService API patch application failed (0/{total_count} files updated)", level=ERROR)
+                with open(self.log_file, "a") as f:
+                    f.write(f"{APPLY_PATCH_FAIL}; Could not apply patch to any files\n")
+                return False
+            
+        except Exception as e:
+            self.log.write(f"ApplyService API patch application error: {str(e)}", level=ERROR)
+            with open(self.log_file, "a") as f:
+                f.write(f"{APPLY_PATCH_FAIL}; ApplyService API error: {str(e)}\n")
+            return False
 
     def run_tests_task(self, instance: dict):
         """
@@ -606,6 +708,7 @@ class ModalTaskEnvManager:
     def apply_full_file_changes(self, full_file_content: str, patch_type: str = "pred") -> bool:
         """
         Applies changes from a full file format response by updating the files directly.
+        Uses ApplyService API to handle imperfectly formatted changes when possible.
         
         Args:
             full_file_content (str): The model output in full file format with [start of]/[end of] markers
@@ -648,26 +751,144 @@ class ModalTaskEnvManager:
                     # Read existing content if file exists
                     if os.path.exists(abs_file_path):
                         with open(abs_file_path, 'r', encoding='utf-8') as f:
-                            old_content = f.read()
+                            original_content = f.read()
                     else:
-                        old_content = ""
+                        original_content = ""
                     
-                    # Only write if content is different
-                    if old_content != new_content:
+                    # Only proceed if content is different
+                    if original_content != new_content:
+                        # Use ApplyService API to get correctly formatted file content
+                        user_msg = f"Apply changes to {file_path}"
+                        
+                        # Call the ApplyService API
+                        result_content = None
+                        # result_content = self._call_apply_service(
+                        #     original_content=original_content,
+                        #     file_path=file_path,
+                        #     code_snippet=new_content,
+                        #     user_msg=user_msg
+                        # )
+                        
+                        # If API call failed, fall back to direct content
+                        if result_content is None:
+                            self.log.write(f"ApplyService API failed, falling back to direct content for {file_path}", level=WARNING)
+                            result_content = new_content
+                        
+                        # Write the result content to the file
                         with open(abs_file_path, 'w', encoding='utf-8') as f:
-                            f.write(new_content)
+                            f.write(result_content)
                         
                         # Log the change
                         self.log.write(f"Updated file: {file_path}")
+                        
                 except Exception as e:
                     self.log.write(f"Error updating file {file_path}: {str(e)}", level=ERROR)
                     return False
             
+            with open(self.log_file, "a") as f:
+                f.write(f"{APPLY_PATCH_PASS} ({patch_type})\n")
+                
             return True
             
         except Exception as e:
-            print(f"Error applying full file changes: {str(e)}")
+            self.log.write(f"Error applying full file changes: {str(e)}", level=ERROR)
+            with open(self.log_file, "a") as f:
+                f.write(f"{APPLY_PATCH_FAIL}; {str(e)}\n")
             return False
+
+    def _call_apply_service(self, original_content: str, file_path: str, code_snippet: str, user_msg: str = None) -> str:
+        """
+        Call the ApplyService API to get corrected file content
+        
+        Args:
+            original_content (str): Original file content
+            file_path (str): Path to the file being modified
+            code_snippet (str): The code snippet or patch to apply
+            user_msg (str): Optional user message providing context
+            
+        Returns:
+            str: The corrected file content, or None if the API call fails
+        """
+        try:
+            import json
+            import urllib.request
+            import urllib.error
+            
+            # Default user message if not provided
+            if user_msg is None:
+                user_msg = f"Apply changes to {file_path}"
+                
+            # Get the instructions and code snippet as markdown
+            instructions = f"**Original Request**: {user_msg}\n\n**Full Solution**:\n```\n{code_snippet}\n```"
+            
+            # Prepare request data
+            request_data = {
+                "agent": False,
+                "instructions": instructions,
+                "currentFileContext": original_content,
+                "codeFileName": file_path,
+                "codeSnippet": code_snippet
+            }
+            
+            # URL to ApplyService API - get from environment variable with fallback
+            url = "https://apply-service.firebender.workers.dev/v1/apply"
+            
+            # Prepare the request
+            request_headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36"
+            }
+            
+            # Log API request
+            self.log.write(f"Calling ApplyService API for file: {file_path}")
+            
+            # Convert request data to JSON
+            data = json.dumps(request_data).encode('utf-8')
+            
+            # Create the request
+            req = urllib.request.Request(
+                url=url,
+                data=data,
+                headers=request_headers,
+                method="POST"
+            )
+            
+            try:
+                # Send the request
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    response_data = response.read().decode('utf-8')
+                    
+                    # Parse the response
+                    response_json = json.loads(response_data)
+                    
+                    # Extract the result content
+                    if 'result' in response_json:
+                        self.log.write(f"Successfully received response from ApplyService API for {file_path}")
+                        return response_json['result']
+                    else:
+                        self.log.write(f"ApplyService API response missing result for {file_path}", level=WARNING)
+                        return None
+                        
+            except urllib.error.HTTPError as http_err:
+                self.log.write(f"ApplyService API HTTP error for {file_path}: {http_err.code} - {http_err.reason}", level=ERROR)
+                
+                # Try to read error response
+                error_response = http_err.read().decode('utf-8')
+                self.log.write(f"ApplyService API error response: {error_response}", level=ERROR)
+                return None
+                
+            except urllib.error.URLError as url_err:
+                self.log.write(f"ApplyService API connection error for {file_path}: {str(url_err)}", level=ERROR)
+                return None
+                
+            except json.JSONDecodeError as json_err:
+                self.log.write(f"ApplyService API response parsing error for {file_path}: {str(json_err)}", level=ERROR)
+                return None
+                
+        except Exception as e:
+            self.log.write(f"ApplyService API error for {file_path}: {str(e)}", level=ERROR)
+            return None
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         """Clean up when exiting the context manager"""

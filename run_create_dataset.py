@@ -25,7 +25,7 @@ if __name__ == "__main__":
     
     # Import argparse to parse arguments
     import argparse
-    
+
     # Create the argument parser 
     parser = argparse.ArgumentParser(description="Create a dataset for text-to-text training from raw task instances")
     parser.add_argument(
@@ -102,7 +102,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Include test files in oracle mode context"
     )
-    
+
     # Parse the arguments and run the main function
     parsed_args = parser.parse_args(args)
-    main(**vars(parsed_args)) 
+    main(**vars(parsed_args))

@@ -1,0 +1,993 @@
+[start of WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt]
+package org.wordpress.android.viewmodel.posts
+
+import org.apache.commons.text.StringEscapeUtils
+import org.wordpress.android.BuildConfig
+import org.wordpress.android.R
+import org.wordpress.android.analytics.AnalyticsTracker
+import org.wordpress.android.analytics.AnalyticsTracker.Stat.POST_LIST_BUTTON_PRESSED
+import org.wordpress.android.fluxc.model.LocalOrRemoteId.LocalId
+import org.wordpress.android.fluxc.model.LocalOrRemoteId.RemoteId
+import org.wordpress.android.fluxc.model.PostModel
+import org.wordpress.android.fluxc.model.SiteModel
+import org.wordpress.android.fluxc.model.post.PostStatus
+import org.wordpress.android.fluxc.model.post.PostStatus.DRAFT
+import org.wordpress.android.fluxc.model.post.PostStatus.PENDING
+import org.wordpress.android.fluxc.model.post.PostStatus.PRIVATE
+import org.wordpress.android.fluxc.model.post.PostStatus.PUBLISHED
+import org.wordpress.android.fluxc.model.post.PostStatus.SCHEDULED
+import org.wordpress.android.fluxc.model.post.PostStatus.TRASHED
+import org.wordpress.android.fluxc.model.post.PostStatus.UNKNOWN
+import org.wordpress.android.ui.blaze.BlazeFeatureUtils
+import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureRemovalPhaseHelper
+import org.wordpress.android.ui.posts.AuthorFilterSelection
+import org.wordpress.android.ui.posts.AuthorFilterSelection.EVERYONE
+import org.wordpress.android.ui.posts.PostModelUploadStatusTracker
+import org.wordpress.android.ui.posts.PostUtils
+import org.wordpress.android.ui.prefs.AppPrefsWrapper
+import org.wordpress.android.ui.uploads.UploadUtils
+import org.wordpress.android.ui.utils.UiString
+import org.wordpress.android.ui.utils.UiString.UiStringRes
+import org.wordpress.android.ui.utils.UiString.UiStringText
+import org.wordpress.android.util.AppLog
+import org.wordpress.android.util.AppLog.T.POSTS
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.NothingToUpload
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.UploadFailed
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.UploadQueued
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.UploadWaitingForConnection
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.UploadingMedia
+import org.wordpress.android.viewmodel.pages.PostModelUploadUiStateUseCase.PostUploadUiState.UploadingPost
+import org.wordpress.android.viewmodel.pages.PostPageListLabelColorUseCase
+import org.wordpress.android.viewmodel.posts.PostListItemIdentifier.LocalPostId
+import org.wordpress.android.viewmodel.posts.PostListItemIdentifier.RemotePostId
+import org.wordpress.android.viewmodel.posts.PostListItemType.PostListItemUiState
+import org.wordpress.android.viewmodel.uistate.ProgressBarUiState
+import org.wordpress.android.widgets.PostListButtonType
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_COPY
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_COPY_URL
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_DELETE
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_DELETE_PERMANENTLY
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_EDIT
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_MOVE_TO_DRAFT
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_PREVIEW
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_PROMOTE_WITH_BLAZE
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_PUBLISH
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_RETRY
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_SHOW_MOVE_TRASHED_POST_TO_DRAFT_DIALOG
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_STATS
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_SUBMIT
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_SYNC
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_TRASH
+import org.wordpress.android.widgets.PostListButtonType.BUTTON_VIEW
+import javax.inject.Inject
+
+/**
+ * Helper class which encapsulates logic for creating UiStates for items in the PostsList.
+ */
+class PostListItemUiStateHelper @Inject constructor(
+    private val appPrefsWrapper: AppPrefsWrapper,
+    private val uploadUiStateUseCase: PostModelUploadUiStateUseCase,
+    private val labelColorUseCase: PostPageListLabelColorUseCase,
+    private val jetpackFeatureRemovalPhaseHelper: JetpackFeatureRemovalPhaseHelper,
+    private val blazeFeatureUtils: BlazeFeatureUtils
+) {
+    @Suppress("LongParameterList", "LongMethod")
+    fun createPostListItemUiState(
+        authorFilterSelection: AuthorFilterSelection,
+        isFilteringByAuthorSupported: Boolean,
+        post: PostModel,
+        site: SiteModel,
+        unhandledConflicts: Boolean,
+        hasAutoSave: Boolean,
+        capabilitiesToPublish: Boolean,
+        statsSupported: Boolean,
+        featuredImageUrl: String?,
+        formattedDate: String,
+        performingCriticalAction: Boolean,
+        isSearch: Boolean,
+        uploadStatusTracker: PostModelUploadStatusTracker,
+        onAction: (PostModel, PostListButtonType, AnalyticsTracker.Stat) -> Unit,
+    ): PostListItemUiState {
+        val postStatus: PostStatus = PostStatus.fromPost(post)
+        val uploadUiState = uploadUiStateUseCase.createUploadUiState(post, site, uploadStatusTracker)
+
+        val onButtonClicked = { buttonType: PostListButtonType ->
+            onAction.invoke(post, buttonType, POST_LIST_BUTTON_PRESSED)
+        }
+        val buttonTypes = createButtonTypes(
+            postStatus = postStatus,
+            isLocalDraft = post.isLocalDraft,
+            isLocallyChanged = post.isLocallyChanged,
+            uploadUiState = uploadUiState,
+            siteHasCapabilitiesToPublish = capabilitiesToPublish,
+            statsSupported = statsSupported,
+            shouldShowStatsInJetpackRemovalPhase =
+            jetpackFeatureRemovalPhaseHelper.shouldShowPublishedPostStatsButton(),
+            shouldShowPromoteWithBlaze = blazeFeatureUtils.isPostBlazeEligible(
+                site,
+                postStatus,
+                post
+            ),
+        )
+        // Re-order actions according to the new UI guidelines per tab/status
+        val orderedButtonTypes = reorderButtonTypes(buttonTypes, postStatus)
+
+        val moreActions = createMoreActions(orderedButtonTypes, onButtonClicked)
+
+        val remotePostId = RemotePostId(RemoteId(post.remotePostId))
+        val localPostId = LocalPostId(LocalId(post.id))
+        val baseTitle = getTitle(post = post)
+        val excerpt = getExcerpt(post = post)
+
+        val title =
+            if (baseTitle == UiStringRes(R.string.untitled_in_parentheses) && excerpt != null) null else baseTitle
+
+        val postInfo = getPostInfoLabels(
+            postStatus,
+            formattedDate,
+            post.authorDisplayName,
+            authorFilterSelection,
+            isSearch,
+            isFilteringByAuthorSupported
+        )
+        val statuses = getStatuses(
+            postStatus = postStatus,
+            post = post,
+            uploadUiState = uploadUiState,
+            hasUnhandledConflicts = unhandledConflicts,
+            hasAutoSave = hasAutoSave
+        )
+        val statusesColor = labelColorUseCase.getLabelsColor(post, uploadUiState, unhandledConflicts, hasAutoSave)
+        val statusesDelimiter = UiStringRes(R.string.multiple_status_label_delimiter)
+        val onSelected = {
+            when (postStatus) {
+                TRASHED -> {
+                    onAction.invoke(
+                        post,
+                        BUTTON_SHOW_MOVE_TRASHED_POST_TO_DRAFT_DIALOG,
+                        POST_LIST_ITEM_SELECTED
+                    )
+                }
+
+                UNKNOWN, PUBLISHED, DRAFT, PRIVATE, PENDING, SCHEDULED -> onAction.invoke(
+                    post,
+                    BUTTON_EDIT,
+                    POST_LIST_ITEM_SELECTED
+                )
+            }
+        }
+        val itemUiData = PostListItemUiStateData(
+            remotePostId = remotePostId,
+            localPostId = localPostId,
+            title = title,
+            excerpt = excerpt,
+            imageUrl = featuredImageUrl,
+            postInfo = postInfo,
+            statuses = statuses,
+            statusesColor = statusesColor,
+            statusesDelimiter = statusesDelimiter,
+            progressBarUiState = getProgressBarState(
+                uploadUiState = uploadUiState,
+                performingCriticalAction = performingCriticalAction
+            ),
+            showOverlay = shouldShowOverlay(
+                uploadUiState = uploadUiState,
+                performingCriticalAction = performingCriticalAction
+            ),
+            disableRippleEffect = postStatus == TRASHED
+        )
+
+        return PostListItemUiState(
+            data = itemUiData,
+            moreActions = moreActions,
+            onSelected = onSelected
+        )
+    }
+
+    @Suppress("LongParameterList")
+    private fun getPostInfoLabels(
+        postStatus: PostStatus,
+        formattedDate: String,
+        displayName: String?,
+        authorFilterSelection: AuthorFilterSelection,
+        isSearch: Boolean,
+        isAuthorFilterVisible: Boolean
+    ): List<UiString> {
+        val uiStrings: MutableList<UiString> = mutableListOf()
+
+        if (isSearch) {
+            val postStatusText = when (postStatus) {
+                UNKNOWN -> R.string.unknown
+                PUBLISHED -> R.string.post_status_post_published
+                DRAFT -> R.string.post_status_draft
+                PRIVATE -> R.string.post_status_post_private
+                PENDING -> R.string.post_status_pending_review
+                TRASHED -> R.string.post_status_post_trashed
+                SCHEDULED -> R.string.post_status_post_scheduled
+            }
+            uiStrings.add(UiStringRes(postStatusText))
+        }
+
+        if (formattedDate.isNotBlank()) {
+            uiStrings.add(UiStringText(formattedDate))
+        }
+        if (isAuthorFilterVisible && authorFilterSelection == EVERYONE && !displayName.isNullOrBlank()) {
+            uiStrings.add(UiStringText(displayName))
+        }
+        return uiStrings
+    }
+
+    private fun getTitle(post: PostModel): UiString {
+        return if (post.title.isNotBlank()) {
+            UiStringText(StringEscapeUtils.unescapeHtml4(post.title).let { HtmlUtils.stripHtml(it) })
+        } else UiStringRes(R.string.untitled_in_parentheses)
+    }
+
+    private fun getExcerpt(post: PostModel): UiString? =
+        PostUtils.getPostListExcerptFromPost(post)
+            .takeIf { !it.isNullOrBlank() }
+            ?.let { StringEscapeUtils.unescapeHtml4(it) }
+            ?.let { PostUtils.collapseShortcodes(it) }
+            ?.let { UiStringText(getTextBeforeLargeSpaceGap(it)) }
+    private fun getTextBeforeLargeSpaceGap(input: String): String {
+        val parts = input.split(Regex("\\s+\\n+"))
+        return parts.first()
+    }
+
+    private fun getProgressBarState(
+        uploadUiState: PostUploadUiState,
+        performingCriticalAction: Boolean
+    ): ProgressBarUiState {
+        return if (shouldShowProgress(uploadUiState, performingCriticalAction)) {
+            if (uploadUiState is UploadingMedia) {
+                ProgressBarUiState.Determinate(uploadUiState.progress)
+            } else {
+                ProgressBarUiState.Indeterminate
+            }
+        } else {
+            ProgressBarUiState.Hidden
+        }
+    }
+
+    private fun shouldShowProgress(uploadUiState: PostUploadUiState, performingCriticalAction: Boolean): Boolean {
+        return performingCriticalAction || uploadUiState is UploadingPost || uploadUiState is UploadingMedia ||
+                uploadUiState is UploadQueued
+    }
+
+    private fun getErrorAndProgressStatuses(
+        uploadUiState: PostUploadUiState,
+        postStatus: PostStatus,
+        hasUnhandledConflicts: Boolean,
+        hasAutoSave: Boolean
+    ): MutableList<UiString> {
+        val labels: MutableList<UiString> = ArrayList()
+        when {
+            uploadUiState is UploadFailed -> {
+                getErrorLabel(uploadUiState, postStatus).let { labels.add(it) }
+            }
+
+            uploadUiState is UploadingPost -> if (uploadUiState.isDraft) {
+                labels.add(UiStringRes(R.string.post_uploading_draft))
+            } else {
+                labels.add(UiStringRes(R.string.post_uploading))
+            }
+
+            uploadUiState is UploadingMedia -> labels.add(UiStringRes(R.string.uploading_media))
+            uploadUiState is UploadQueued -> labels.add(UiStringRes(R.string.post_queued))
+            uploadUiState is UploadWaitingForConnection -> {
+                getWaitingForConnectionStatus(uploadUiState.postStatus)?.let {
+                    labels.add(it)
+                }
+            }
+
+            hasUnhandledConflicts -> labels.add(UiStringRes(R.string.local_post_is_conflicted))
+            hasAutoSave -> labels.add(UiStringRes(R.string.local_post_autosave_revision_available))
+        }
+        return labels
+    }
+
+    private fun getWaitingForConnectionStatus(postStatus: PostStatus): UiString? {
+        return when (postStatus) {
+            UNKNOWN, PUBLISHED -> (UiStringRes(R.string.post_waiting_for_connection_publish))
+            PRIVATE -> (UiStringRes(R.string.post_waiting_for_connection_private))
+            PENDING -> (UiStringRes(R.string.post_waiting_for_connection_pending))
+            SCHEDULED -> (UiStringRes(R.string.post_waiting_for_connection_scheduled))
+            DRAFT -> (UiStringRes(R.string.post_waiting_for_connection_draft))
+            TRASHED -> {
+                AppLog.e(
+                    POSTS,
+                    "Developer error: This state shouldn't happen. Trashed post is in " +
+                            "UploadWaitingForConnection state."
+                )
+                return null
+            }
+        }
+    }
+
+    private fun getStatuses(
+        postStatus: PostStatus,
+        post: PostModel,
+        uploadUiState: PostUploadUiState,
+        hasUnhandledConflicts: Boolean,
+        hasAutoSave: Boolean
+    ): List<UiString> {
+        val labels = getErrorAndProgressStatuses(
+            uploadUiState,
+            postStatus,
+            hasUnhandledConflicts,
+            hasAutoSave
+        )
+
+        // we want to show either single error/progress label or 0-n info labels.
+        if (labels.isEmpty()) {
+            if (post.isLocalDraft) {
+                labels.add(UiStringRes(R.string.local_draft))
+            } else if (post.isLocallyChanged) {
+                labels.add(UiStringRes(R.string.local_changes))
+            }
+            if (postStatus == PRIVATE) {
+                labels.add(UiStringRes(R.string.post_status_post_private))
+            }
+            if (postStatus == PENDING) {
+                labels.add(UiStringRes(R.string.post_status_pending_review))
+            }
+            if (post.sticky) {
+                labels.add(UiStringRes(R.string.post_status_sticky))
+            }
+        }
+        return labels
+    }
+
+    private fun getErrorLabel(uploadUiState: UploadFailed, postStatus: PostStatus): UiString {
+        return when {
+            uploadUiState.error.mediaError != null -> getMediaUploadErrorMessage(uploadUiState, postStatus)
+            uploadUiState.error.postError != null -> UploadUtils.getErrorMessageResIdFromPostError(
+                postStatus,
+                false,
+                uploadUiState.error.postError,
+                uploadUiState.isEligibleForAutoUpload
+            )
+
+            else -> {
+                val errorMsg = "MediaError and postError are both null."
+                if (BuildConfig.DEBUG) {
+                    throw IllegalStateException(errorMsg)
+                } else {
+                    AppLog.e(POSTS, errorMsg)
+                }
+                UiStringRes(R.string.error_generic)
+            }
+        }
+    }
+
+    private fun getMediaUploadErrorMessage(uploadUiState: UploadFailed, postStatus: PostStatus): UiStringRes {
+        return when {
+            uploadUiState.isEligibleForAutoUpload -> when (postStatus) {
+                PUBLISHED -> UiStringRes(R.string.error_media_recover_post_not_published_retrying)
+                PRIVATE -> UiStringRes(R.string.error_media_recover_post_not_published_retrying_private)
+                SCHEDULED -> UiStringRes(R.string.error_media_recover_post_not_scheduled_retrying)
+                PENDING -> UiStringRes(R.string.error_media_recover_post_not_submitted_retrying)
+                DRAFT, TRASHED, UNKNOWN -> UiStringRes(R.string.error_generic_error_retrying)
+            }
+
+            uploadUiState.retryWillPushChanges -> when (postStatus) {
+                PUBLISHED -> UiStringRes(R.string.error_media_recover_post_not_published)
+                PRIVATE -> UiStringRes(R.string.error_media_recover_post_not_published_private)
+                SCHEDULED -> UiStringRes(R.string.error_media_recover_post_not_scheduled)
+                PENDING -> UiStringRes(R.string.error_media_recover_post_not_submitted)
+                DRAFT, TRASHED, UNKNOWN -> UiStringRes(R.string.error_media_recover_post)
+            }
+
+            else -> UiStringRes(R.string.error_media_recover_post)
+        }
+    }
+
+    private fun shouldShowOverlay(uploadUiState: PostUploadUiState, performingCriticalAction: Boolean): Boolean {
+        // show overlay when post upload is in progress or (media upload is in progress and the user is not using Aztec)
+        return performingCriticalAction ||
+                (uploadUiState is UploadingPost ||
+                        (!appPrefsWrapper.isAztecEditorEnabled && uploadUiState is UploadingMedia))
+    }
+
+    @Suppress("LongParameterList", "ComplexMethod")
+    private fun createButtonTypes(
+        postStatus: PostStatus,
+        isLocalDraft: Boolean,
+        isLocallyChanged: Boolean,
+        uploadUiState: PostUploadUiState,
+        siteHasCapabilitiesToPublish: Boolean,
+        statsSupported: Boolean,
+        shouldShowStatsInJetpackRemovalPhase: Boolean,
+        shouldShowPromoteWithBlaze: Boolean
+    ): List<PostListButtonType> {
+        val canRetryUpload = uploadUiState is UploadFailed
+        val canCancelPendingAutoUpload = (uploadUiState is UploadWaitingForConnection ||
+                (uploadUiState is UploadFailed && uploadUiState.isEligibleForAutoUpload))
+        val canPublishPost = (canRetryUpload || uploadUiState is NothingToUpload || !canCancelPendingAutoUpload) &&
+                (isLocallyChanged || isLocalDraft || postStatus == DRAFT ||
+                        (siteHasCapabilitiesToPublish && postStatus == PENDING))
+
+        val canShowStats = statsSupported &&
+                postStatus == PUBLISHED &&
+                !isLocalDraft &&
+                !isLocallyChanged &&
+                shouldShowStatsInJetpackRemovalPhase
+        val canShowCopy = postStatus == PUBLISHED || postStatus == DRAFT
+        val canShowCopyUrlButton = !isLocalDraft && postStatus != TRASHED
+        val canShowViewButton = !canRetryUpload && postStatus != TRASHED
+        val canShowPublishButton = canRetryUpload || canPublishPost
+        val buttonTypes = ArrayList<PostListButtonType>()
+
+        if (postStatus != TRASHED) {
+            buttonTypes.add(BUTTON_EDIT)
+        }
+
+        if (canCancelPendingAutoUpload) {
+            buttonTypes.add(BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+        }
+
+        if (canShowPublishButton) {
+            buttonTypes.add(
+                when {
+                    canRetryUpload -> BUTTON_RETRY
+                    !siteHasCapabilitiesToPublish -> BUTTON_SUBMIT
+                    postStatus == SCHEDULED && isLocallyChanged -> BUTTON_SYNC
+                    else -> BUTTON_PUBLISH
+                }
+            )
+        }
+
+        if (canShowViewButton) {
+            buttonTypes.addViewOrPreviewAction(isLocalDraft || isLocallyChanged)
+        }
+
+        if (canShowStats) {
+            buttonTypes.add(BUTTON_STATS)
+        }
+
+        if (canShowCopy) {
+            buttonTypes.add(BUTTON_COPY)
+        }
+
+        buttonTypes.addMoveToDraftActionIfAvailable(postStatus)
+
+        if (canShowCopyUrlButton) {
+            buttonTypes.add(BUTTON_COPY_URL)
+        }
+
+        if (shouldShowPromoteWithBlaze) {
+            buttonTypes.add(BUTTON_PROMOTE_WITH_BLAZE)
+        }
+
+        buttonTypes.addDeletingOrTrashAction(isLocalDraft, postStatus)
+
+        return buttonTypes
+    }
+
+    private fun MutableList<PostListButtonType>.addViewOrPreviewAction(shouldShowPreview: Boolean) {
+        add(if (shouldShowPreview) BUTTON_PREVIEW else BUTTON_VIEW)
+    }
+
+    private fun MutableList<PostListButtonType>.addDeletingOrTrashAction(
+        isLocalDraft: Boolean,
+        postStatus: PostStatus
+    ) {
+        when {
+            isLocalDraft -> add(BUTTON_DELETE)
+            postStatus == TRASHED -> add(BUTTON_DELETE_PERMANENTLY)
+            postStatus != TRASHED -> add(BUTTON_TRASH)
+        }
+    }
+
+    private fun MutableList<PostListButtonType>.addMoveToDraftActionIfAvailable(postStatus: PostStatus) {
+        val canMovePostToDraft = postStatus == PUBLISHED || postStatus == TRASHED
+
+        if (canMovePostToDraft) {
+            add(BUTTON_MOVE_TO_DRAFT)
+        }
+    }
+
+    private fun createMoreActions(
+        buttonTypes: List<PostListButtonType>,
+        onButtonClicked: (PostListButtonType) -> Unit
+    ): PostListItemAction.MoreItem {
+        val allItems = buttonTypes.map { buttonType: PostListButtonType ->
+            PostListItemAction.SingleItem(buttonType, onButtonClicked)
+        }
+        return PostListItemAction.MoreItem(allItems, onButtonClicked)
+    }
+
+    // New: Reorder menu items to match the updated UX grouping and ordering per tab/status
+    private fun reorderButtonTypes(
+        buttonTypes: List<PostListButtonType>,
+        postStatus: PostStatus
+    ): List<PostListButtonType> {
+        return buttonTypes.sortedWith(compareBy(
+            { getPriorityFor(postStatus, it) },
+            { it.value } // stable tie-breaker
+        ))
+    }
+
+    private fun getPriorityFor(status: PostStatus, type: PostListButtonType): Int {
+        return when (status) {
+            PUBLISHED -> publishedPriorities(type)
+            DRAFT -> draftPriorities(type)
+            SCHEDULED -> scheduledPriorities(type)
+            PENDING -> pendingPriorities(type)
+            PRIVATE -> privatePriorities(type)
+            TRASHED -> trashedPriorities(type)
+            UNKNOWN -> draftPriorities(type)
+        }
+    }
+
+    private fun publishedPriorities(type: PostListButtonType): Int = when (type) {
+        BUTTON_EDIT -> 10
+        BUTTON_VIEW, BUTTON_PREVIEW -> 20
+        BUTTON_STATS -> 30
+        BUTTON_PROMOTE_WITH_BLAZE -> 40
+        BUTTON_COPY_URL -> 50
+        BUTTON_COPY -> 60
+        BUTTON_MOVE_TO_DRAFT -> 70
+        BUTTON_RETRY, BUTTON_PUBLISH, BUTTON_SUBMIT, BUTTON_SYNC -> 80
+        BUTTON_CANCEL_PENDING_AUTO_UPLOAD -> 90
+        BUTTON_TRASH, BUTTON_DELETE, BUTTON_DELETE_PERMANENTLY -> 100
+        else -> 500
+    }
+
+    private fun draftPriorities(type: PostListButtonType): Int = when (type) {
+        BUTTON_EDIT -> 10
+        BUTTON_PREVIEW, BUTTON_VIEW -> 20
+        BUTTON_RETRY, BUTTON_PUBLISH, BUTTON_SUBMIT, BUTTON_SYNC -> 30
+        BUTTON_COPY_URL -> 45
+        BUTTON_COPY -> 60
+        BUTTON_PROMOTE_WITH_BLAZE -> 65
+        BUTTON_CANCEL_PENDING_AUTO_UPLOAD -> 90
+        BUTTON_TRASH, BUTTON_DELETE, BUTTON_DELETE_PERMANENTLY -> 100
+        BUTTON_MOVE_TO_DRAFT -> 110
+        else -> 500
+    }
+
+    private fun scheduledPriorities(type: PostListButtonType): Int = when (type) {
+        BUTTON_EDIT -> 10
+        BUTTON_VIEW, BUTTON_PREVIEW -> 20
+        BUTTON_SYNC, BUTTON_RETRY, BUTTON_PUBLISH, BUTTON_SUBMIT -> 30
+        BUTTON_COPY_URL -> 50
+        BUTTON_COPY -> 60
+        BUTTON_PROMOTE_WITH_BLAZE -> 65
+        BUTTON_CANCEL_PENDING_AUTO_UPLOAD -> 90
+        BUTTON_TRASH, BUTTON_DELETE, BUTTON_DELETE_PERMANENTLY -> 100
+        BUTTON_MOVE_TO_DRAFT -> 110
+        else -> 500
+    }
+
+    private fun pendingPriorities(type: PostListButtonType): Int = when (type) {
+        BUTTON_EDIT -> 10
+        BUTTON_VIEW, BUTTON_PREVIEW -> 20
+        BUTTON_SUBMIT, BUTTON_RETRY, BUTTON_PUBLISH -> 30
+        BUTTON_COPY_URL -> 50
+        BUTTON_COPY -> 60
+        BUTTON_PROMOTE_WITH_BLAZE -> 65
+        BUTTON_CANCEL_PENDING_AUTO_UPLOAD -> 90
+        BUTTON_TRASH, BUTTON_DELETE, BUTTON_DELETE_PERMANENTLY -> 100
+        BUTTON_MOVE_TO_DRAFT -> 110
+        else -> 500
+    }
+
+    private fun privatePriorities(type: PostListButtonType): Int = when (type) {
+        BUTTON_EDIT -> 10
+        BUTTON_VIEW, BUTTON_PREVIEW -> 20
+        BUTTON_STATS -> 30
+        BUTTON_PROMOTE_WITH_BLAZE -> 40
+        BUTTON_COPY_URL -> 50
+        BUTTON_COPY -> 60
+        BUTTON_MOVE_TO_DRAFT -> 70
+        BUTTON_RETRY, BUTTON_PUBLISH, BUTTON_SUBMIT, BUTTON_SYNC -> 80
+        BUTTON_CANCEL_PENDING_AUTO_UPLOAD -> 90
+        BUTTON_TRASH, BUTTON_DELETE, BUTTON_DELETE_PERMANENTLY -> 100
+        else -> 500
+    }
+
+    private fun trashedPriorities(type: PostListButtonType): Int = when (type) {
+        BUTTON_MOVE_TO_DRAFT -> 10
+        BUTTON_DELETE_PERMANENTLY, BUTTON_DELETE, BUTTON_TRASH -> 100
+        else -> 999
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt]
+[start of WordPress/src/main/java/org/wordpress/android/widgets/PostListButtonType.kt]
+package org.wordpress.android.widgets
+
+import androidx.annotation.AttrRes
+import androidx.annotation.DrawableRes
+import androidx.annotation.StringRes
+import org.wordpress.android.R
+import com.google.android.material.R as MaterialR
+
+// PostListButton.java types - from attrs.xml
+enum class PostListButtonType constructor(
+    val value: Int,
+    @StringRes val textResId: Int,
+    @DrawableRes val iconResId: Int,
+    @AttrRes val colorAttrId: Int
+) {
+    BUTTON_EDIT(
+        1,
+        R.string.button_edit,
+        R.drawable.gb_ic_pencil,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_VIEW(
+        2,
+        R.string.button_view,
+        R.drawable.gb_ic_external,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_PREVIEW(
+        3,
+        R.string.button_preview,
+        R.drawable.gb_ic_globe,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_STATS(
+        4,
+        R.string.button_stats,
+        R.drawable.gb_ic_chart_bar,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_TRASH(
+        5,
+        R.string.button_trash,
+        R.drawable.gb_ic_trash,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_DELETE(
+        6,
+        R.string.button_delete,
+        R.drawable.gb_ic_trash,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_PUBLISH(
+        7,
+        R.string.button_publish,
+        R.drawable.gb_ic_globe,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_SYNC(
+        8,
+        R.string.button_sync,
+        R.drawable.gb_ic_update,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_MORE(
+        9,
+        R.string.button_more,
+        R.drawable.gb_ic_more_horizontal,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_SUBMIT(
+        10,
+        R.string.submit_for_review,
+        R.drawable.gb_ic_post_author,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_RETRY(
+        11,
+        R.string.button_retry,
+        R.drawable.gb_ic_redo,
+        MaterialR.attr.colorError
+    ),
+    BUTTON_MOVE_TO_DRAFT(
+        12,
+        R.string.button_move_to_draft,
+        R.drawable.gb_ic_move_to,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_DELETE_PERMANENTLY(
+        13,
+        R.string.button_delete_permanently,
+        R.drawable.gb_ic_trash,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_CANCEL_PENDING_AUTO_UPLOAD(
+        14,
+        R.string.pages_and_posts_cancel_auto_upload,
+        R.drawable.gb_ic_undo,
+        R.attr.wpColorWarningDark
+    ),
+    BUTTON_SHOW_MOVE_TRASHED_POST_TO_DRAFT_DIALOG(
+        15,
+        0,
+        0,
+        0
+    ),
+    BUTTON_COPY(
+        16,
+        R.string.button_copy,
+        R.drawable.gb_ic_copy,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_COPY_URL(
+        17,
+        R.string.button_copy_link,
+        R.drawable.gb_ic_link,
+        MaterialR.attr.colorOnSurface
+    ),
+    BUTTON_PROMOTE_WITH_BLAZE(
+        18,
+        R.string.button_promote_with_blaze,
+        R.drawable.ic_promote_with_blaze,
+        MaterialR.attr.colorOnSurface
+    );
+
+    companion object {
+        fun fromInt(value: Int): PostListButtonType? = values().firstOrNull { it.value == value }
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/widgets/PostListButtonType.kt]
+[start of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt]
+package org.wordpress.android.ui.posts
+
+import android.content.Context
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
+import android.text.SpannableStringBuilder
+import android.text.style.ImageSpan
+import android.view.LayoutInflater
+import android.view.Menu
+import android.view.View
+import android.view.ViewGroup
+import android.view.ViewTreeObserver
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.PopupMenu
+import android.widget.ProgressBar
+import android.widget.TextView
+import androidx.annotation.ColorRes
+import androidx.annotation.LayoutRes
+import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.DrawableCompat
+import androidx.recyclerview.widget.RecyclerView
+import org.wordpress.android.R
+import org.wordpress.android.WordPress
+import org.wordpress.android.ui.utils.UiDimen
+import org.wordpress.android.ui.utils.UiHelpers
+import org.wordpress.android.ui.utils.UiString
+import org.wordpress.android.util.extensions.expandTouchTargetArea
+import org.wordpress.android.util.extensions.getColorFromAttribute
+import org.wordpress.android.util.extensions.getDrawableFromAttribute
+import org.wordpress.android.util.image.ImageManager
+import org.wordpress.android.util.image.ImageType
+import org.wordpress.android.viewmodel.posts.PostListItemAction
+import org.wordpress.android.viewmodel.posts.PostListItemType.PostListItemUiState
+import org.wordpress.android.viewmodel.posts.PostListItemUiStateData
+import org.wordpress.android.viewmodel.uistate.ProgressBarUiState
+import java.util.concurrent.atomic.AtomicBoolean
+import android.R as AndroidR
+
+const val POST_LIST_ICON_PADDING = 8
+const val MAX_TITLE_EXCERPT_LINES = 2
+
+sealed class PostListItemViewHolder(
+    @LayoutRes layout: Int,
+    parent: ViewGroup,
+    private val imageManager: ImageManager,
+    private val uiHelpers: UiHelpers
+) : RecyclerView.ViewHolder(LayoutInflater.from(parent.context).inflate(layout, parent, false)) {
+    private val featuredImageView: ImageView = itemView.findViewById(R.id.image_featured)
+    private val titleTextView: TextView = itemView.findViewById(R.id.title)
+    private val postInfoTextView: TextView = itemView.findViewById(R.id.post_info)
+    private val statusesTextView: TextView = itemView.findViewById(R.id.statuses_label)
+    private val uploadProgressBar: ProgressBar = itemView.findViewById(R.id.upload_progress)
+    private val disabledOverlay: FrameLayout = itemView.findViewById(R.id.disabled_overlay)
+    private val container: ConstraintLayout = itemView.findViewById(R.id.container)
+    private val excerptTextView: TextView = itemView.findViewById(R.id.excerpt)
+    private val moreButton: ImageView = itemView.findViewById(R.id.more)
+
+    private val selectableBackground: Drawable? = parent.context.getDrawableFromAttribute(
+        AndroidR.attr.selectableItemBackground
+    )
+
+    private val noTitle = UiString.UiStringRes(R.string.untitled_in_parentheses)
+    /**
+     * Url of an image loaded in the `featuredImageView`.
+     */
+    private var loadedFeaturedImgUrl: String? = null
+
+    companion object {
+        var isClickEnabled = AtomicBoolean(true)
+    }
+
+    abstract fun onBind(item: PostListItemUiState)
+
+    class Standard(
+        parent: ViewGroup,
+        imageManager: ImageManager,
+        uiHelpers: UiHelpers
+    ) : PostListItemViewHolder(R.layout.post_list_item, parent, imageManager, uiHelpers) {
+        override fun onBind(item: PostListItemUiState) {
+            setBasicValues(item.data)
+            setMoreActions(item.moreActions.actions)
+
+            itemView.setOnClickListener {
+                if (isSafeClick(it)) {
+                    item.onSelected.invoke()
+                }
+            }
+        }
+
+        // Purpose of this method is to prevent 2 Editors
+        // from being launched simultaneously and then producing a crash
+        private fun isSafeClick(view: View): Boolean {
+            if (isClickEnabled.getAndSet(false)) {
+                view.postDelayed({
+                    isClickEnabled.set(true)
+                }, 1000)
+                return true
+            }
+            return false
+        }
+    }
+
+    protected fun setBasicValues(data: PostListItemUiStateData) {
+        uiHelpers.setTextOrHide(titleTextView, data.title)
+        uiHelpers.setTextOrHide(excerptTextView, data.excerpt)
+        updatePostInfoLabel(postInfoTextView, data.postInfo)
+        uiHelpers.updateVisibility(statusesTextView, data.statuses.isNotEmpty())
+        updateStatusesLabel(statusesTextView, data.statuses, data.statusesDelimiter, data.statusesColor)
+        showFeaturedImage(data.imageUrl)
+        updateProgressBarState(data.progressBarUiState)
+        uiHelpers.updateVisibility(disabledOverlay, data.showOverlay)
+        if (data.disableRippleEffect) {
+            container.background = null
+        } else {
+            container.background = selectableBackground
+        }
+
+        if ((data.title != null && data.title != noTitle) && data.excerpt != null) {
+            titleTextView.maxLines = MAX_TITLE_EXCERPT_LINES
+            excerptTextView.maxLines = MAX_TITLE_EXCERPT_LINES
+            titleTextView.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    // Remove the listener to avoid multiple callbacks
+                    titleTextView.viewTreeObserver.removeOnPreDrawListener(this)
+
+                    // Get the layout of the title text
+                    val titleLayout = titleTextView.layout
+
+                    // Check if the title occupies more than 2 lines
+                    when (titleLayout.lineCount) {
+                        1 -> {
+                            excerptTextView.maxLines = 2
+                        }
+                        else -> {
+                            excerptTextView.maxLines = 1
+                            titleTextView.maxLines = 2
+                        }
+                    }
+                    return true
+                }
+            })
+        }
+    }
+
+    protected fun setMoreActions(actions: List<PostListItemAction>) {
+        moreButton.expandTouchTargetArea(R.dimen.post_list_more_button_extra_padding)
+        moreButton.contentDescription = itemView.context.getString(R.string.content_description_more)
+        moreButton.setOnClickListener { onMoreClicked(actions, moreButton) }
+    }
+
+    private fun updatePostInfoLabel(view: TextView, uiStrings: List<UiString>?) {
+        val concatenatedText = uiStrings?.joinToString(separator = "  ·  ") {
+            uiHelpers.getTextOfUiString(view.context, it)
+        }
+        uiHelpers.setTextOrHide(view, concatenatedText)
+    }
+
+    protected fun onMoreClicked(actions: List<PostListItemAction>, v: View) {
+        val menu = PopupMenu(v.context, v)
+        actions.forEach { singleItemAction ->
+            val menuItem = menu.menu.add(
+                Menu.NONE,
+                singleItemAction.buttonType.value,
+                Menu.NONE,
+                getMenuItemTitleWithIcon(v.context, singleItemAction)
+            )
+            menuItem.setOnMenuItemClickListener {
+                singleItemAction.onButtonClicked.invoke(singleItemAction.buttonType)
+                true
+            }
+        }
+        menu.show()
+    }
+
+    private fun updateProgressBarState(progressBarUiState: ProgressBarUiState) {
+        uiHelpers.updateVisibility(uploadProgressBar, progressBarUiState.visibility)
+        when (progressBarUiState) {
+            is ProgressBarUiState.Indeterminate -> uploadProgressBar.isIndeterminate = true
+            is ProgressBarUiState.Determinate -> {
+                uploadProgressBar.isIndeterminate = false
+                uploadProgressBar.progress = progressBarUiState.progress
+            }
+            is ProgressBarUiState.Hidden -> Unit // Do nothing
+        }
+    }
+
+    private fun updateStatusesLabel(
+        view: TextView,
+        statuses: List<UiString>,
+        delimiter: UiString,
+        @ColorRes color: Int?
+    ) {
+        val separator = uiHelpers.getTextOfUiString(view.context, delimiter)
+        view.text = statuses.joinToString(separator) { uiHelpers.getTextOfUiString(view.context, it) }
+        color?.let { statusColor ->
+            view.setTextColor(
+                ContextCompat.getColor(
+                    itemView.context,
+                    statusColor
+                )
+            )
+        }
+    }
+
+    private fun showFeaturedImage(imageUrl: String?) {
+        if (!imageUrl.isNullOrBlank() && imageUrl == loadedFeaturedImgUrl) {
+            // Suppress blinking as the media upload progresses
+            return
+        }
+        if (imageUrl.isNullOrBlank()) {
+            featuredImageView.visibility = View.GONE
+            imageManager.cancelRequestAndClearImageView(featuredImageView)
+        } else {
+            featuredImageView.visibility = View.VISIBLE
+            imageManager.loadImageWithCorners(
+                featuredImageView,
+                ImageType.PHOTO_ROUNDED_CORNERS,
+                imageUrl,
+                uiHelpers.getPxOfUiDimen(
+                    WordPress.getContext(),
+                    UiDimen.UIDimenRes(R.dimen.my_site_post_item_image_corner_radius)
+                )
+            )
+        }
+        loadedFeaturedImgUrl = imageUrl
+    }
+
+    private fun setTint(context: Context, drawable: Drawable, color: Int): Drawable {
+        val wrappedDrawable: Drawable = DrawableCompat.wrap(drawable)
+        if (color != 0) {
+            val iconColor = context.getColorFromAttribute(color)
+            DrawableCompat.setTint(wrappedDrawable, iconColor)
+        }
+        return wrappedDrawable
+    }
+
+    @Suppress("ComplexMethod")
+    private fun getMenuItemTitleWithIcon(context: Context, item: PostListItemAction): SpannableStringBuilder {
+        var icon: Drawable? = setTint(
+            context,
+            ContextCompat.getDrawable(context, item.buttonType.iconResId)!!, item.buttonType.colorAttrId
+        )
+        // If there's no icon, we insert a transparent one to keep the title aligned with the items which have icons.
+        if (icon == null) icon = ColorDrawable(Color.TRANSPARENT)
+        val iconSize: Int = context.resources.getDimensionPixelSize(R.dimen.menu_item_icon_size)
+        icon.setBounds(0, 0, iconSize, iconSize)
+        val imageSpan = ImageSpan(icon)
+
+        // Add a space placeholder for the icon, before the title.
+        val menuTitle = context.getText(item.buttonType.textResId)
+        val ssb = SpannableStringBuilder(
+            menuTitle.padStart(menuTitle.length + POST_LIST_ICON_PADDING)
+        )
+
+        // Replace the space placeholder with the icon.
+        ssb.setSpan(imageSpan, 1, 2, 0)
+        return ssb
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt]

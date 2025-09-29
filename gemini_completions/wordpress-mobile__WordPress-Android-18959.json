@@ -1,0 +1,76 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "An `IllegalStateException: This mutex is not locked` is being thrown, wrapped in a `CompletionHandlerException`. This happens when `mutex.unlock()` is called on a `Mutex` that is not currently locked by the calling coroutine.\n\nLooking at `UploadStarter.kt`, the `upload` function uses `mutex.withLock { ... }` to protect a critical section. The `withLock` function ensures the mutex is locked before executing the block and unlocked afterwards, even if an exception occurs.\n\nThe issue is in the `catch (e: CancellationException)` block that surrounds the `mutex.withLock` call. This block manually calls `mutex.unlock()`.\n\n```kotlin\n    private suspend fun upload(site: SiteModel) = coroutineScope {\n        try {\n            mutex.withLock {\n                // ...\n            }\n        } catch (e: CancellationException) {\n            AppLog.e(T.MEDIA, e)\n            // ...\n            mutex.unlock() // This is the problem\n            throw e\n        }\n    }\n```\n\nIf a `CancellationException` is thrown from within the `withLock` block (for example, from one of the `await()` calls), `withLock` will catch it, unlock the mutex in its `finally` block, and then rethrow the exception. The outer `catch` block then catches this rethrown exception and incorrectly attempts to unlock the already-unlocked mutex, causing the crash.\n\nA similar issue occurs if the coroutine is cancelled while suspended on `mutex.withLock` itself (while waiting to acquire the lock). In this case, `withLock` throws a `CancellationException` without ever having locked the mutex. The `catch` block then calls `unlock()` on a mutex that was never locked by this coroutine, again leading to the `IllegalStateException`.\n\nThe fix is to remove the `try-catch` block entirely from the `upload` function. The `withLock` function is sufficient to handle correct locking and unlocking. Any exceptions, including `CancellationException`, will be safely propagated up the call stack where they are already being handled and logged by the calling functions (`queueUploadFromAllSites` and `queueUploadFromSite`). This change makes the code cleaner, more idiomatic, and corrects the bug.\n\nHere are the changes for the file:\n\n[start of WordPress/src/main/java/org/wordpress/android/ui/uploads/UploadStarter.kt]\n```kotlin\npackage org.wordpress.android.ui.uploads\n\nimport android.content.Context\nimport androidx.lifecycle.DefaultLifecycleObserver\nimport androidx.lifecycle.LifecycleOwner\nimport androidx.lifecycle.LiveData\nimport androidx.lifecycle.Observer\nimport androidx.lifecycle.ProcessLifecycleOwner\nimport kotlinx.coroutines.CoroutineDispatcher\nimport kotlinx.coroutines.CoroutineScope\nimport kotlinx.coroutines.Job\nimport kotlinx.coroutines.async\nimport kotlinx.coroutines.coroutineScope\nimport kotlinx.coroutines.launch\nimport kotlinx.coroutines.sync.Mutex\nimport kotlinx.coroutines.sync.withLock\nimport org.wordpress.android.analytics.AnalyticsTracker.Stat\nimport org.wordpress.android.fluxc.Dispatcher\nimport org.wordpress.android.fluxc.generated.UploadActionBuilder\nimport org.wordpress.android.fluxc.model.SiteModel\nimport org.wordpress.android.fluxc.store.PageStore\nimport org.wordpress.android.fluxc.store.PostStore\nimport org.wordpress.android.fluxc.store.SiteStore\nimport org.wordpress.android.modules.BG_THREAD\nimport org.wordpress.android.modules.IO_THREAD\nimport org.wordpress.android.testing.OpenForTesting\nimport org.wordpress.android.ui.uploads.UploadActionUseCase.UploadAction\nimport org.wordpress.android.ui.uploads.UploadActionUseCase.UploadAction.DO_NOTHING\nimport org.wordpress.android.util.AppLog\nimport org.wordpress.android.util.AppLog.T\nimport org.wordpress.android.util.NetworkUtilsWrapper\nimport org.wordpress.android.util.analytics.AnalyticsTrackerWrapper\nimport org.wordpress.android.util.skip\nimport org.wordpress.android.viewmodel.helpers.ConnectionStatus\nimport javax.inject.Inject\nimport javax.inject.Named\nimport javax.inject.Singleton\nimport kotlin.coroutines.CoroutineContext\n\n/**\n * Automatically remote-auto-save or upload all local modifications to posts.\n *\n * Auto-uploads happen when the app is placed in the foreground or when the internet connection is restored. In\n * addition to this, call sites can also request an immediate execution by calling [checkConnectionAndUpload].\n *\n * The method [activateAutoUploading] must be called once, preferably during app creation, for the auto-uploads to work.\n */\n@Singleton\n@OpenForTesting\nclass UploadStarter @Inject constructor(\n    /**\n     * The Application context\n     */\n    private val context: Context,\n    private val dispatcher: Dispatcher,\n    private val postStore: PostStore,\n    private val pageStore: PageStore,\n    private val siteStore: SiteStore,\n    private val uploadActionUseCase: UploadActionUseCase,\n    private val tracker: AnalyticsTrackerWrapper,\n    @Named(BG_THREAD) private val bgDispatcher: CoroutineDispatcher,\n    @Named(IO_THREAD) private val ioDispatcher: CoroutineDispatcher,\n    private val uploadServiceFacade: UploadServiceFacade,\n    private val networkUtilsWrapper: NetworkUtilsWrapper,\n    private val connectionStatus: LiveData<ConnectionStatus>\n) : CoroutineScope {\n    private val job = Job()\n\n    /**\n     * When the app comes to foreground both `queueUploadFromAllSites` and `queueUploadFromSite` are invoked.\n     * The problem is that they can run in parallel and `uploadServiceFacade.isPostUploadingOrQueued(it)` might return\n     * out-of-date result and a same post is added twice.\n     */\n    private val mutex = Mutex()\n\n    override val coroutineContext: CoroutineContext get() = job + bgDispatcher\n\n    /**\n     * The hook for making this class automatically launch uploads whenever the app is placed in the foreground.\n     */\n    private val processLifecycleObserver = object : DefaultLifecycleObserver {\n        override fun onStart(owner: LifecycleOwner) {\n            queueUploadFromAllSites()\n        }\n    }\n\n    /**\n     * Activates the necessary observers for this class to start auto-uploading.\n     *\n     * This must be called during [org.wordpress.android.WordPress]' creation like so:\n     *\n     * ```\n     * mUploadStarter.activateAutoUploading(ProcessLifecycleOwner.get())\n     * ```\n     */\n    fun activateAutoUploading(processLifecycleOwner: ProcessLifecycleOwner) {\n        // We're skipping the first emitted value because the processLifecycleObserver below will also trigger an\n        // immediate upload.\n        connectionStatus.skip(1).observe(processLifecycleOwner, Observer {\n            queueUploadFromAllSites()\n        })\n\n        processLifecycleOwner.lifecycle.addObserver(processLifecycleObserver)\n    }\n\n    fun queueUploadFromAllSites() = launch {\n        val sites = siteStore.sites\n        try {\n            checkConnectionAndUpload(sites = sites)\n        } catch (e: Exception) {\n            AppLog.e(T.MEDIA, e)\n        }\n    }\n\n    /**\n     * Upload all local drafts from the given [site].\n     */\n    fun queueUploadFromSite(site: SiteModel) = launch {\n        try {\n            checkConnectionAndUpload(sites = listOf(site))\n        } catch (e: Exception) {\n            AppLog.e(T.MEDIA, e)\n        }\n    }\n\n    /**\n     * If there is an internet connection, uploads all posts with local changes belonging to [sites].\n     *\n     * This coroutine will suspend until all the [upload] operations have completed. If one of them fails, all query\n     * and queuing attempts ([upload]) will be canceled. The exception will be thrown by this method.\n     */\n    private suspend fun checkConnectionAndUpload(sites: List<SiteModel>) = coroutineScope {\n        if (!networkUtilsWrapper.isNetworkAvailable()) {\n            return@coroutineScope\n        }\n\n        sites.forEach {\n            launch(ioDispatcher) {\n                upload(site = it)\n            }\n        }\n    }\n\n    /**\n     * This is meant to be used by [checkConnectionAndUpload] only.\n     */\n    private suspend fun upload(site: SiteModel) = coroutineScope {\n        mutex.withLock {\n            val posts = async { postStore.getPostsWithLocalChanges(site) }\n            val pages = async { pageStore.getPagesWithLocalChanges(site) }\n            val list = posts.await() + pages.await()\n\n            list.asSequence()\n                .map { post ->\n                    val action = uploadActionUseCase.getAutoUploadAction(post, site)\n                    Pair(post, action)\n                }\n                .filter { (_, action) ->\n                    action != DO_NOTHING\n                }\n                .toList()\n                .forEach { (post, action) ->\n                    trackAutoUploadAction(action, post.status, post.isPage)\n                    AppLog.d(\n                        AppLog.T.POSTS,\n                        \"UploadStarter for post (isPage: ${post.isPage}) title: ${post.title}, action: $action\"\n                    )\n                    dispatcher.dispatch(\n                        UploadActionBuilder.newIncrementNumberOfAutoUploadAttemptsAction(\n                            post\n                        )\n                    )\n                    uploadServiceFacade.uploadPost(\n                        context = context,\n                        post = post,\n                        trackAnalytics = false\n                    )\n                }\n        }\n    }\n\n    private fun trackAutoUploadAction(\n        action: UploadAction,\n        status: String,\n        isPage: Boolean\n    ) {\n        tracker.track(\n            if (isPage) Stat.AUTO_UPLOAD_PAGE_INVOKED else Stat.AUTO_UPLOAD_POST_INVOKED,\n            mapOf(\n                \"upload_action\" to action.toString(),\n                \"post_status\" to status\n            )\n        )\n    }\n}\n```\n[end of WordPress/src/main/java/org/wordpress/android/ui/uploads/UploadStarter.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 368,
+            "endIndex": 589,
+            "uri": "https://github.com/JetBrains/compose-multiplatform/issues/3399",
+            "license": ""
+          },
+          {
+            "startIndex": 28667,
+            "endIndex": 28787,
+            "uri": "https://github.com/rafaco/InAppDevTools",
+            "license": ""
+          },
+          {
+            "startIndex": 29133,
+            "endIndex": 29282,
+            "uri": "https://github.com/DiegoRBaquero/taller7-pruebas-automaticas",
+            "license": ""
+          },
+          {
+            "startIndex": 29407,
+            "endIndex": 29538,
+            "uri": "https://github.com/wordpress-mobile/Pioupiou",
+            "license": ""
+          },
+          {
+            "startIndex": 41888,
+            "endIndex": 42008,
+            "uri": "https://github.com/rafaco/InAppDevTools",
+            "license": ""
+          },
+          {
+            "startIndex": 42306,
+            "endIndex": 42455,
+            "uri": "https://github.com/DiegoRBaquero/taller7-pruebas-automaticas",
+            "license": ""
+          },
+          {
+            "startIndex": 42580,
+            "endIndex": 42711,
+            "uri": "https://github.com/wordpress-mobile/Pioupiou",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 4522,
+    "candidatesTokenCount": 2308,
+    "totalTokenCount": 16129,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 4522
+      }
+    ],
+    "thoughtsTokenCount": 9299
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "loFDaKihA-66_uMP_oyquAk"
+}

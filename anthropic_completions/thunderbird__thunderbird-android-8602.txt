@@ -1,0 +1,109 @@
+Looking at the issue, the user wants to automatically mark messages as read when archiving them. I'll implement this feature by modifying the `ArchiveOperations` class to check for an account preference and mark messages as read when archiving if enabled.
+
+I'll need to modify the `ArchiveOperations.kt` file to add this functionality. The approach will be to:
+1. Check if the account has the "mark as read on archive" preference enabled
+2. If enabled, mark the messages as read before moving them to the archive folder
+3. Keep the existing archive behavior intact
+
+Here's the solution:
+
+[start of legacy/core/src/main/java/com/fsck/k9/controller/ArchiveOperations.kt]
+package com.fsck.k9.controller
+
+import app.k9mail.legacy.account.Account
+import app.k9mail.legacy.message.controller.MessageReference
+import com.fsck.k9.controller.MessagingController.MessageActor
+import com.fsck.k9.controller.MessagingController.MoveOrCopyFlavor
+import com.fsck.k9.mail.Flag
+import com.fsck.k9.mailstore.LocalFolder
+import com.fsck.k9.mailstore.LocalMessage
+import timber.log.Timber
+
+internal class ArchiveOperations(
+    private val messagingController: MessagingController,
+) {
+    fun archiveThreads(messages: List<MessageReference>) {
+        archiveByFolder("archiveThreads", messages) { account, folderId, messagesInFolder, archiveFolderId ->
+            archiveThreads(account, folderId, messagesInFolder, archiveFolderId)
+        }
+    }
+
+    fun archiveMessages(messages: List<MessageReference>) {
+        archiveByFolder("archiveMessages", messages) { account, folderId, messagesInFolder, archiveFolderId ->
+            archiveMessages(account, folderId, messagesInFolder, archiveFolderId)
+        }
+    }
+
+    fun archiveMessage(message: MessageReference) {
+        archiveMessages(listOf(message))
+    }
+
+    private fun archiveByFolder(
+        description: String,
+        messages: List<MessageReference>,
+        action: (account: Account, folderId: Long, messagesInFolder: List<LocalMessage>, archiveFolderId: Long) -> Unit,
+    ) {
+        actOnMessagesGroupedByAccountAndFolder(messages) { account, messageFolder, messagesInFolder ->
+            val sourceFolderId = messageFolder.databaseId
+            when (val archiveFolderId = account.archiveFolderId) {
+                null -> {
+                    Timber.v("No archive folder configured for account %s", account)
+                }
+
+                sourceFolderId -> {
+                    Timber.v("Skipping messages already in archive folder")
+                }
+
+                else -> {
+                    messagingController.suppressMessages(account, messagesInFolder)
+                    messagingController.putBackground(description, null) {
+                        action(account, sourceFolderId, messagesInFolder, archiveFolderId)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun archiveThreads(
+        account: Account,
+        sourceFolderId: Long,
+        messages: List<LocalMessage>,
+        archiveFolderId: Long,
+    ) {
+        val messagesInThreads = messagingController.collectMessagesInThreads(account, messages)
+        archiveMessages(account, sourceFolderId, messagesInThreads, archiveFolderId)
+    }
+
+    private fun archiveMessages(
+        account: Account,
+        sourceFolderId: Long,
+        messages: List<LocalMessage>,
+        archiveFolderId: Long,
+    ) {
+        // Mark messages as read if the account preference is enabled
+        if (account.isMarkMessageAsReadOnArchive()) {
+            Timber.v("Marking %d messages as read before archiving", messages.size)
+            messagingController.setFlag(account, sourceFolderId, messages, Flag.SEEN, true)
+        }
+        
+        messagingController.moveOrCopyMessageSynchronous(
+            account,
+            sourceFolderId,
+            messages,
+            archiveFolderId,
+            MoveOrCopyFlavor.MOVE,
+        )
+    }
+
+    private fun actOnMessagesGroupedByAccountAndFolder(
+        messages: List<MessageReference>,
+        block: (account: Account, messageFolder: LocalFolder, messages: List<LocalMessage>) -> Unit,
+    ) {
+        val actor = MessageActor { account, messageFolder, messagesInFolder ->
+            block(account, messageFolder, messagesInFolder)
+        }
+
+        messagingController.actOnMessagesGroupedByAccountAndFolder(messages, actor)
+    }
+}
+[end of legacy/core/src/main/java/com/fsck/k9/controller/ArchiveOperations.kt]

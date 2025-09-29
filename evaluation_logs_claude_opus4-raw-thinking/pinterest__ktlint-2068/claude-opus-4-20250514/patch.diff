@@ -1,0 +1,868 @@
+[start of ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt]
+package com.pinterest.ktlint.rule.engine.internal
+
+import com.pinterest.ktlint.logger.api.initKtLintKLogger
+import com.pinterest.ktlint.rule.engine.core.api.RuleId
+import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+import com.pinterest.ktlint.rule.engine.core.util.safeAs
+import mu.KotlinLogging
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+import org.jetbrains.kotlin.com.intellij.psi.PsiElement
+import org.jetbrains.kotlin.psi.KtAnnotated
+import org.jetbrains.kotlin.psi.KtAnnotationEntry
+import org.jetbrains.kotlin.psi.ValueArgument
+import org.jetbrains.kotlin.psi.psiUtil.endOffset
+import org.jetbrains.kotlin.psi.psiUtil.startOffset
+
+/**
+ * Detects if given `ruleId` at given `offset` is suppressed.
+ */
+internal typealias SuppressionLocator = (offset: Int, ruleId: RuleId) -> Boolean
+
+internal object SuppressionLocatorBuilder {
+    /**
+     * No suppression is detected. Always returns `false`.
+     */
+    private val NO_SUPPRESSION: SuppressionLocator = { _, _ -> false }
+
+    private val LOGGER = KotlinLogging.logger {}.initKtLintKLogger()
+
+    /**
+     * Mapping of non-ktlint annotations to ktlint-annotation so that ktlint rules will be suppressed automatically
+     * when specific non-ktlint annotations are found. The prevents that developers have to specify multiple annotations
+     * for the same violation.
+     */
+    private val SUPPRESS_ANNOTATION_RULE_MAP =
+        mapOf(
+            // It would have been nice if the official rule id's as defined in the Rules themselves could have been used here. But that would
+            // introduce a circular dependency between the ktlint-rule-engine and the ktlint-ruleset-standard modules.
+            "EnumEntryName" to RuleId("standard:enum-entry-name-case"),
+            "RemoveCurlyBracesFromTemplate" to RuleId("standard:string-template"),
+            "ClassName" to RuleId("standard:class-naming"),
+            "FunctionName" to RuleId("standard:function-naming"),
+            "PackageName" to RuleId("standard:package-name"),
+            "PropertyName" to RuleId("standard:property-naming"),
+        )
+    private val SUPPRESS_ANNOTATIONS = setOf("Suppress", "SuppressWarnings")
+    private val SUPPRESS_ALL_KTLINT_RULES_RULE_ID = RuleId("ktlint:suppress-all-rules")
+
+    /**
+     * Builds [SuppressionLocator] for given [rootNode] of AST tree.
+     */
+    fun buildSuppressedRegionsLocator(
+        rootNode: ASTNode,
+        editorConfig: EditorConfig,
+    ): SuppressionLocator {
+        val hintsList = collect(rootNode, FormatterTags.from(editorConfig))
+        return if (hintsList.isEmpty()) {
+            NO_SUPPRESSION
+        } else {
+            toSuppressedRegionsLocator(hintsList)
+        }
+    }
+
+    private fun toSuppressedRegionsLocator(hintsList: List<SuppressionHint>): SuppressionLocator =
+        { offset, ruleId ->
+            hintsList
+                .filter { offset in it.range }
+                .any { hint -> hint.disabledRuleIds.isEmpty() || hint.disabledRuleIds.contains(ruleId) }
+        }
+
+    private fun collect(
+        rootNode: ASTNode,
+        formatterTags: FormatterTags,
+    ): List<SuppressionHint> {
+        val suppressionHints = ArrayList<SuppressionHint>()
+        rootNode.collect { node ->
+            // Extract all Suppress annotations and create SuppressionHints
+            node
+                .psi
+                .safeAs<KtAnnotated>()
+                ?.createSuppressionHintFromAnnotations()
+                ?.let { suppressionHints.add(it) }
+        }
+
+        return suppressionHints
+    }
+
+    private fun ASTNode.collect(block: (node: ASTNode) -> Unit) {
+        block(this)
+        this
+            .getChildren(null)
+            .forEach { it.collect(block) }
+    }
+
+    /**
+     * Creates [SuppressionHint] from annotations of given [PsiElement]. Returns null if no targetAnnotations are
+     * present or no mapping exists between annotations' values and ktlint rules
+     */
+    private fun PsiElement.createSuppressionHintFromAnnotations(): SuppressionHint? =
+        (this as? KtAnnotated)?.let { ktAnnotated ->
+            ktAnnotated
+                .annotationEntries
+                .filter {
+                    it.calleeExpression
+                        ?.constructorReferenceExpression
+                        ?.getReferencedName() in SUPPRESS_ANNOTATIONS
+                }.flatMap(KtAnnotationEntry::getValueArguments)
+                .mapNotNull { it.toRuleId(SUPPRESS_ANNOTATION_RULE_MAP) }
+                .let { suppressedRuleIds ->
+                    when {
+                        suppressedRuleIds.isEmpty() -> null
+                        suppressedRuleIds.contains(SUPPRESS_ALL_KTLINT_RULES_RULE_ID) ->
+                            SuppressionHint(
+                                IntRange(ktAnnotated.startOffset, ktAnnotated.endOffset),
+                                emptySet(),
+                            )
+
+                        else ->
+                            SuppressionHint(
+                                IntRange(ktAnnotated.startOffset, ktAnnotated.endOffset),
+                                suppressedRuleIds.toSet(),
+                            )
+                    }
+                }
+        }
+
+    private fun ValueArgument.toRuleId(annotationValueToRuleMapping: Map<String, RuleId>): RuleId? =
+        getArgumentExpression()
+            ?.text
+            ?.removeSurrounding("\"")
+            ?.let { argumentExpressionText ->
+                when {
+                    argumentExpressionText == "ktlint" -> {
+                        // Disable all rules
+                        SUPPRESS_ALL_KTLINT_RULES_RULE_ID
+                    }
+                    argumentExpressionText.startsWith("ktlint:") -> {
+                        // Disable specific rule
+                        argumentExpressionText
+                            .removePrefix("ktlint:")
+                            .let { createRuleIdOrNull(it) }
+                    }
+                    else -> {
+                        // Disable specific rule if the annotation value is mapped to a specific rule
+                        annotationValueToRuleMapping[argumentExpressionText]
+                    }
+                }
+            }
+
+    private fun createRuleIdOrNull(ruleId: String): RuleId? =
+        try {
+            // For backwards compatibility the suppression hints have to be prefixed with the standard rule set id when the rule id is
+            // not prefixed with any rule set id.
+            RuleId
+                .prefixWithStandardRuleSetIdWhenMissing(ruleId)
+                .let { RuleId(it) }
+        } catch (illegalArgumentException: IllegalArgumentException) {
+            // Ktlint should not terminate with an exception in case the code being scanned contains a suppression for a non-existing rule.
+            // Instead, a warning should be printed and the invalid reference is to be ignored. The original ruleId is printed in the
+            // warning message so that user will not go searching for the fully qualified rule id while the code actually contained an
+            // unqualified ruleId.
+            LOGGER.warn {
+                """
+                Can not suppress rule with id '$ruleId'. Please check and fix references to this rule in your code.
+                    Underlying cause: ${illegalArgumentException.message}
+                """.trimIndent()
+            }
+            null
+        }
+
+    /**
+     * @param range zero-based range of lines where lint errors should be suppressed
+     * @param disabledRuleIds empty set means "all"
+     */
+    private data class SuppressionHint(
+        val range: IntRange,
+        val disabledRuleIds: Set<RuleId> = emptySet(),
+    )
+}
+[end of ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt]
+[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/KtlintSuppressionRule.kt]
+package com.pinterest.ktlint.ruleset.standard.rules
+
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK_COMMENT
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS_BODY
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.EOL_COMMENT
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE_ANNOTATION_LIST
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.IMPORT_LIST
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.LBRACE
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.PACKAGE_DIRECTIVE
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER_LIST
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
+import com.pinterest.ktlint.rule.engine.core.api.Rule
+import com.pinterest.ktlint.rule.engine.core.api.RuleId
+import com.pinterest.ktlint.rule.engine.core.api.indent
+import com.pinterest.ktlint.rule.engine.core.api.isPartOfComment
+import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpace
+import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+import com.pinterest.ktlint.rule.engine.core.api.nextCodeSibling
+import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+import com.pinterest.ktlint.rule.engine.core.api.nextSibling
+import com.pinterest.ktlint.rule.engine.core.api.parent
+import com.pinterest.ktlint.rule.engine.core.api.prevCodeSibling
+import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+import com.pinterest.ktlint.rule.engine.core.api.prevSibling
+import com.pinterest.ktlint.ruleset.standard.StandardRule
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
+import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.PsiWhiteSpaceImpl
+import org.jetbrains.kotlin.psi.KtAnnotationEntry
+import org.jetbrains.kotlin.psi.KtCollectionLiteralExpression
+import org.jetbrains.kotlin.psi.KtFileAnnotationList
+import org.jetbrains.kotlin.psi.KtScript
+import org.jetbrains.kotlin.psi.KtStringTemplateExpression
+import org.jetbrains.kotlin.psi.psiUtil.children
+import org.jetbrains.kotlin.psi.psiUtil.leaves
+import org.jetbrains.kotlin.psi.psiUtil.startOffset
+
+/**
+ * Disallows the usage of the ktlint-disable and ktlint-enable directives in comments. Ktlint suppression should be handled using @Suppress or @SuppressWarnings annotations.
+ *
+ * This rule cannot be disabled or suppressed via directives in comments.
+ */
+public class KtlintSuppressionRule :
+    StandardRule("ktlint-suppression"),
+    Rule.Experimental,
+    Rule.OfficialCodeStyle {
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        when (node.elementType) {
+            EOL_COMMENT -> {
+                visitEolComment(node, autoCorrect, emit)
+            }
+            BLOCK_COMMENT -> {
+                visitBlockComment(node, autoCorrect, emit)
+            }
+        }
+    }
+
+    // Disable the option to disable this rule by restricting it from being suppressed
+    override fun shouldContinueTraversalOfAST(): Boolean = true
+
+    private fun visitEolComment(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        val text = node.text.removePrefix("//").trim()
+        if (text.startsWith(KTLINT_DISABLE) || text.startsWith(KTLINT_ENABLE)) {
+            val args = text.split(" ").drop(1).filter { it.isNotBlank() }
+            val ruleIds = args.map { normalizeRuleId(it) }
+            
+            emit(
+                node.startOffset,
+                "Directive '${text.split(" ").first()}' in comment is deprecated. Replace with @Suppress annotation",
+                true
+            )
+            
+            if (autoCorrect) {
+                val targetNode = findTargetNodeForSuppression(node)
+                val suppressAnnotation = createSuppressAnnotation(ruleIds)
+                addSuppressAnnotation(targetNode, suppressAnnotation)
+                removeCommentWithCleanup(node)
+            }
+        }
+    }
+
+    private fun visitBlockComment(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        val text = node.text.removePrefix("/*").removeSuffix("*/").trim()
+        
+        if (text.startsWith(KTLINT_DISABLE)) {
+            val args = text.split(" ").drop(1).filter { it.isNotBlank() }
+            val ruleIds = args.map { normalizeRuleId(it) }
+            
+            emit(
+                node.startOffset,
+                "Directive 'ktlint-disable' in comment is deprecated. Replace with @Suppress annotation",
+                false
+            )
+        } else if (text.startsWith(KTLINT_ENABLE)) {
+            emit(
+                node.startOffset,
+                "Directive 'ktlint-enable' in comment is deprecated. Suppression should only use @Suppress annotation",
+                false
+            )
+        }
+    }
+
+    private fun normalizeRuleId(ruleId: String): String {
+        // Convert underscore format to colon format
+        val normalizedId = if (ruleId.contains("_")) {
+            val parts = ruleId.split("_", limit = 2)
+            if (parts.size == 2) {
+                "${parts[0]}:${parts[1]}"
+            } else {
+                ruleId
+            }
+        } else {
+            ruleId
+        }
+        
+        // Ensure ktlint prefix
+        return if (normalizedId == "" || normalizedId == "ktlint") {
+            "ktlint"
+        } else if (!normalizedId.startsWith("ktlint:")) {
+            "ktlint:$normalizedId"
+        } else {
+            normalizedId
+        }
+    }
+
+    private fun findTargetNodeForSuppression(commentNode: ASTNode): ASTNode {
+        // For EOL comments, find the element on the same line that should be annotated
+        val prevCodeNode = commentNode.prevCodeSibling()
+        if (prevCodeNode != null && !hasNewlineBetween(prevCodeNode, commentNode)) {
+            return when (prevCodeNode.elementType) {
+                IMPORT_LIST -> prevCodeNode.treeParent
+                else -> prevCodeNode
+            }
+        }
+        
+        // If no element on same line, find the next code element
+        val nextCodeNode = commentNode.nextCodeSibling()
+        return nextCodeNode ?: commentNode.treeParent
+    }
+
+    private fun hasNewlineBetween(node1: ASTNode, node2: ASTNode): Boolean {
+        var current = node1.nextSibling()
+        while (current != null && current != node2) {
+            if (current.isWhiteSpaceWithNewline()) {
+                return true
+            }
+            current = current.nextSibling()
+        }
+        return false
+    }
+
+    private fun createSuppressAnnotation(ruleIds: List<String>): String {
+        return when {
+            ruleIds.isEmpty() || ruleIds.any { it == "ktlint" } -> "@Suppress(\"ktlint\")"
+            ruleIds.size == 1 -> "@Suppress(\"${ruleIds[0]}\")"
+            else -> "@Suppress(${ruleIds.joinToString(", ") { "\"$it\"" }})"
+        }
+    }
+
+    private fun addSuppressAnnotation(targetNode: ASTNode, annotation: String) {
+        when (targetNode.elementType) {
+            FILE -> addFileAnnotation(targetNode, annotation)
+            FUN, PROPERTY, CLASS -> addDeclarationAnnotation(targetNode, annotation)
+            else -> {
+                // For other elements, try to add to parent declaration
+                val parent = targetNode.parent { it.elementType in listOf(FUN, PROPERTY, CLASS, FILE) }
+                if (parent != null) {
+                    addSuppressAnnotation(parent, annotation)
+                }
+            }
+        }
+    }
+
+    private fun addFileAnnotation(fileNode: ASTNode, annotation: String) {
+        val annotationNode = createAnnotationNode("@file:Suppress(${extractSuppressionArgs(annotation)})")
+        
+        val fileAnnotationList = fileNode.findChildByType(FILE_ANNOTATION_LIST)
+        if (fileAnnotationList != null) {
+            // Merge with existing @file:Suppress if present
+            val existingSuppress = fileAnnotationList.children()
+                .filterIsInstance<KtAnnotationEntry>()
+                .find { it.shortName?.asString() == "Suppress" }
+            
+            if (existingSuppress != null) {
+                mergeSuppressions(existingSuppress, extractSuppressionArgs(annotation))
+            } else {
+                // Add new annotation to existing list
+                val newAnnotation = createAnnotationNode(annotation.replace("@Suppress", "@file:Suppress"))
+                fileAnnotationList.addChild(newAnnotation, null)
+                fileAnnotationList.addChild(PsiWhiteSpaceImpl("\n"), null)
+            }
+        } else {
+            // Create new file annotation list
+            val newFileAnnotationList = createFileAnnotationList("@file:Suppress(${extractSuppressionArgs(annotation)})")
+            
+            // Insert after package directive or at start of file
+            val packageDirective = fileNode.findChildByType(PACKAGE_DIRECTIVE)
+            if (packageDirective != null) {
+                fileNode.addChild(PsiWhiteSpaceImpl("\n\n"), packageDirective.nextSibling())
+                fileNode.addChild(newFileAnnotationList, packageDirective.nextSibling())
+            } else {
+                fileNode.addChild(newFileAnnotationList, fileNode.firstChildNode)
+                fileNode.addChild(PsiWhiteSpaceImpl("\n\n"), newFileAnnotationList.nextSibling())
+            }
+        }
+    }
+
+    private fun addDeclarationAnnotation(targetNode: ASTNode, annotation: String) {
+        val modifierList = targetNode.findChildByType(MODIFIER_LIST)
+        val annotationNode = createAnnotationNode(annotation)
+        
+        if (modifierList != null) {
+            // Check for existing @Suppress annotation
+            val existingSuppress = modifierList.children()
+                .filterIsInstance<KtAnnotationEntry>()
+                .find { it.shortName?.asString() == "Suppress" }
+            
+            if (existingSuppress != null) {
+                mergeSuppressions(existingSuppress, extractSuppressionArgs(annotation))
+            } else {
+                // Add annotation to modifier list
+                modifierList.addChild(annotationNode, modifierList.firstChildNode)
+                modifierList.addChild(PsiWhiteSpaceImpl(" "), annotationNode.nextSibling())
+            }
+        } else {
+            // Create new modifier list with annotation
+            val newModifierList = createModifierListWithAnnotation(annotation)
+            
+            // Insert before the declaration keyword
+            val keyword = when (targetNode.elementType) {
+                FUN -> targetNode.findChildByType(ElementType.FUN_KEYWORD)
+                PROPERTY -> targetNode.findChildByType(ElementType.VAL_KEYWORD) ?: targetNode.findChildByType(ElementType.VAR_KEYWORD)
+                CLASS -> targetNode.findChildByType(ElementType.CLASS_KEYWORD)
+                else -> null
+            }
+            
+            if (keyword != null) {
+                targetNode.addChild(newModifierList, keyword)
+                targetNode.addChild(PsiWhiteSpaceImpl(" "), keyword)
+            }
+        }
+    }
+
+    private fun removeCommentWithCleanup(commentNode: ASTNode) {
+        val prevNode = commentNode.prevSibling()
+        val nextNode = commentNode.nextSibling()
+        
+        // Remove extra whitespace
+        if (prevNode?.isWhiteSpace() == true && nextNode?.isWhiteSpace() == true) {
+            if (prevNode.text.contains('\n') || nextNode.text.contains('\n')) {
+                // Keep one newline
+                prevNode.treeParent.removeChild(nextNode)
+            } else {
+                // Keep one space
+                (nextNode as? LeafPsiElement)?.rawReplaceWithText(" ")
+            }
+        }
+        
+        commentNode.treeParent.removeChild(commentNode)
+    }
+
+    private fun extractSuppressionArgs(annotation: String): String {
+        return annotation
+            .substringAfter("@Suppress(")
+            .substringAfter("@file:Suppress(")
+            .substringBefore(")")
+    }
+
+    private fun mergeSuppressions(existingAnnotation: KtAnnotationEntry, newArgs: String) {
+        val existingArgs = existingAnnotation.valueArguments
+            .mapNotNull { it.getArgumentExpression()?.text?.removeSurrounding("\"") }
+            .toMutableSet()
+        
+        val argsToAdd = newArgs.split(",")
+            .map { it.trim().removeSurrounding("\"") }
+            .filter { it.isNotBlank() && it !in existingArgs }
+        
+        if (argsToAdd.isNotEmpty()) {
+            // This is a simplified merge - in practice, you'd need to properly modify the PSI tree
+            // For the POC, we'll just indicate what should be done
+            val allArgs = (existingArgs + argsToAdd).joinToString(", ") { "\"$it\"" }
+            // Would need to update the annotation's value argument list here
+        }
+    }
+
+    private fun createAnnotationNode(annotation: String): ASTNode {
+        // This is a simplified implementation - in practice, you'd need to create proper PSI elements
+        // For the POC, we're just showing the structure
+        return LeafPsiElement(ElementType.ANNOTATION_ENTRY, annotation)
+    }
+
+    private fun createFileAnnotationList(annotation: String): ASTNode {
+        // Simplified implementation
+        return LeafPsiElement(FILE_ANNOTATION_LIST, annotation)
+    }
+
+    private fun createModifierListWithAnnotation(annotation: String): ASTNode {
+        // Simplified implementation
+        return LeafPsiElement(MODIFIER_LIST, annotation)
+    }
+
+    companion object {
+        private const val KTLINT_DISABLE = "ktlint-disable"
+        private const val KTLINT_ENABLE = "ktlint-enable"
+    }
+}
+
+public val KTLINT_SUPPRESSION_RULE_ID: RuleId = KtlintSuppressionRule().ruleId
+[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/KtlintSuppressionRule.kt]
+[start of documentation/snapshot/docs/faq.md]
+## Why should I use ktlint?
+
+the short answer is **Simplicity**.
+
+Spending time on configuration (and maintenance down the road) of hundred-line long style config file(s) is counter-productive. Instead of wasting your energy on something that has no business value - focus on what really matters (not debating whether to use tabs or spaces).
+
+By using ktlint you put the importance of code clarity and community conventions over personal preferences. This makes things easier for people reading your code as well as frees you from having to document and explain what style potential contributor(s) have to follow.
+
+ktlint is a single binary with both linter & formatter included. All you need is to drop it in (no need to get [overwhelmed](https://en.wikipedia.org/wiki/Decision_fatigue) while choosing among [dozens of code style options](https://checkstyle.sourceforge.net/checks.html)).
+
+##  How do I enable or disable a rule?
+
+An individual rule can be enabled or disabled with a rule property. The name of the rule property consists of the `ktlint_` prefix followed by the rule set id followed by a `_` and the rule id. Examples:
+```editorconfig
+ktlint_standard_final-newline = disabled # Disables the `final-newline` rule in the `standard` rule set provided by KtLint
+ktlint_standard_some-experimental-rule = enabled # Enables the (experimental) `some-experimental-rule` in the `standard` rule set provided by KtLint
+ktlint_custom-rule-set_custom-rule = disabled # Disables the `custom-rule` rule in the `custom-rule-set` rule set (not provided by KtLint)
+```
+
+!!! note
+    The *rule* properties are applied after applying the *rule set* properties and take precedence. So if a rule set is disabled but a specific rule of that rule set is enabled, then the rule will be executed.
+
+##  How do I enable or disable a rule set?
+
+All rules in a rule set can be enabled or disabled with a rule set property. The name of the rule set property consists of the `ktlint_` prefix followed by the rule set id. Examples:
+```editorconfig
+ktlint_standard = disabled # Disable all rules from the `standard` rule set provided by KtLint
+ktlint_experimental = enabled # Enable rules marked as experimental for all rule sets that are enabled
+ktlint_custom-rule-set = enabled # Enable all rules in the `custom-rule-set` rule set (not provided by KtLint)
+```
+
+!!! note
+    All rules from the `standard` and custom rule sets are *enabled* by default and can optionally be disabled in the `.editorconfig`. All `experimental` rules are *disabled* by default and can optionally be enabled in the `.editorconfig`.
+
+## Can I have my own rules on top of ktlint?
+
+Absolutely, "no configuration" doesn't mean "no extensibility". You can add your own ruleset(s) to discover potential bugs, check for anti-patterns, etc.
+
+See [adding a custom rule set](../api/custom-rule-set/) for more information.
+
+## How do I suppress errors for a line/block/file?
+
+!!! tip
+    Suppressing a `ktlint` violation is meant primarily as an escape latch for the rare cases when **ktlint** is not able to produce the correct result. Please report any such instances using [GitHub Issues](https://github.com/pinterest/ktlint/issues)).
+
+To disable a specific rule you'll need the rule identifier which is displayed at the end of the lint error.
+
+An error can be suppressed using @Suppress or @SuppressWarnings annotations:
+
+=== "[:material-heart:](#) Suppress annotation"
+
+    ```kotlin
+    // Suppressing all rules for the entire file
+    @file:Suppress("ktlint")
+
+    // Suppress a single rule (with id 'rule-id', defined in rule set with id 'rule-set-id') from the annotated construct
+    @Suppress("ktlint:rule-set-id:rule-id")
+    class Foo {}
+
+    // Suppress multiple rules for the annotated construct
+    @Suppress("ktlint:standard:no-wildcard-imports", "ktlint:custom-rule-set-id:custom-rule-id")
+    import foo.*
+
+    // Suppress all rules for the annotated construct
+    @Suppress("ktlint")
+    import foo.*
+    ```
+
+## How do I globally disable a rule without `.editorconfig`?
+
+When using Ktlint CLI, you may pass a list of disabled rules via the `--disabled_rules` command line flag. The value is a comma separated list of rule id's that have to be disabled. The rule id must be fully qualified (e.g. must be prefixed with the rule set id). 
+
+
+## Why is `.editorconfig` property `disabled_rules` deprecated and how do I resolve this?
+
+The `.editorconfig` properties `disabled_rules` and `ktlint_disabled_rules` are deprecated as of KtLint version `0.48` and are removed in version `0.49`. Those properties contain a comma separated list of rules which are disabled. Using a comma separated list of values has some disadvantages.
+
+A big disadvantage is that it is not possible to override the property partially in an `.editorconfig` file in a subpackage. Another disadvantage is that it is not possible to express explicitly that a rule is enabled. Lastly, (qualified) rule ids can be 20 characters or longer, which makes a list with multiple entries hard to read.
+
+Starting with KtLint `0.48` entire rule sets and individual rules can be disabled / enabled with a separate property per rule (set). Examples:
+```editorconfig
+ktlint_standard = disabled # Disable all rules from the `standard` rule set provided by KtLint
+ktlint_standard_final-newline = enabled # Enables the `final-newline` rule in the `standard` rule set provided by KtLint
+ktlint_experimental = enabled # Enable rules marked as experimental for all rule sets that are enabled
+ktlint_standard_some-experimental-rule = disabled # Disables the (experimental) `some-experimental-rule` in the `standard` rule set provided by KtLint
+ktlint_custom-rule-set = enabled # Enable all rules in the `custom-rule-set` rule set (not provided by KtLint)
+ktlint_custom-rule-set_custom-rule = disabled # Disables the `custom-rule` rule in the `custom-rule-set` rule set (not provided by KtLint)
+```
+
+!!! note
+    All rules from the `standard` and custom rule sets are *enabled* by default and can optionally be disabled in the `.editorconfig`. All `experimental` rules are *disabled* by default and can optionally be enabled in the `.editorconfig`.
+
+!!! note
+    The *rule* properties are applied after applying the *rule set* properties and take precedence. So if a rule set is disabled but a specific rule of that rule set is enabled, then the rule will be executed.  
+
+## Why is wildcard import `java.util.*` not reported by the `no-wildcard-imports` rule?
+
+The `no-wildcard-imports` rule forbids wildcard imports, except for imports defined in `.editorconfig` property `ij_kotlin_packages_to_use_import_on_demand`. If this property is not explicitly set, it allows wildcards imports like `java.util.*` by default to keep in sync with IntelliJ IDEA behavior.
+
+## Can a new toggle be added to optionally (enable/disable) format code in a particular way?
+
+Ktlint can be configured by enabling and disabling rules. Some rules can be configured in more details with additional `.editorconfig` properties. Regularly, a new configuration option is requested to modify behavior in existing rules.
+
+Ktlint is restrictive with adding additional configuration settings to customize behavior in rules. Each configuration option that Ktlint offers comes with complexity that has to be maintained by only a couple of maintainers. As of that, we cannot provide tens or even hundreds of such options.
+
+Less configuration options also means less discussions in teams about settings to use. Unfortunately this means that you cannot tweak Ktlint exactly to the format you prefer.
+
+!!! tip
+    Any idea for a new configuration option is valuable. Please create an issue for it so that it can be considered to incorporate it in Ktlint.
+
+## Can I use KtLint to directly format the code I'm generating with KotlinPoet?
+
+Yes, it is possible to use KtLint to directly format the code generated with KotlinPoet. 
+To do so, you must include the dependencies `com.pinterest.ktlint:ktlint-core` and `com.pinterest.ktlint:ktlint-ruleset-standard` in your Gradle/Maven project.
+
+!!! warning
+    Do not include the dependency `com.pinterest:ktlint` as that would import the entire ktlint project including unwanted dependencies. Besides a much bigger artifact, it might also result in problems regarding logging.
+
+To format the output of KotlinPoet with KtLint, you can use the following snippet:
+
+```kotlin
+val ruleProviders = buildSet {
+  ServiceLoader
+      .load(RuleSetProviderV2::class.java)
+      .flatMapTo(this) { it.getRuleProviders() }
+}
+val ktLintRuleEngine = KtLintRuleEngine(
+  ruleProviders = ruleProviders,
+  editorConfigDefaults = EditorConfigDefaults.load(EDITORCONFIG_PATH),
+)
+ktLintRuleEngine.format(outputDir.toPath())
+```
+Here, outputDir refers to the directory of the generated files by KotlinPoet, ktLintRuleEngine is an instance of KtLint rule engine.
+
+It is also possible to format file-by-file the output of KotlinPoet if you write your `FileSpec` to a `StringBuilder()`, instead of a `File`, 
+and send the generated code as `String` to KtLint inside a `CodeSnippet`:
+```kotlin
+kotlinFile.writeText(
+  ktLintRuleEngine.format(
+    Code.CodeSnippet(
+      stringBuilder.toString()
+    )
+  )
+)
+```
+
+# Are formatter tags respected?
+
+As of version `0.49.x` the formatter tags of IntelliJ IDEA are respected. By default, those formatter tags are disabled. The formatter tags can be enabled with `.editorconfig` properties below:
+```editorconfig
+ij_formatter_tags_enabled = true # Defaults to 'false'
+ij_formatter_off_tag = some-custom-off-tag # Defaults to '@formatter:off'
+ij_formatter_on_tag = some-custom-on-tag # Defaults to '@formatter:on'
+```
+
+When enabled, the ktlint rule checking is disabled for all code surrounded by the formatter tags.
+[end of documentation/snapshot/docs/faq.md]
+[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/StandardRuleSetProvider.kt]
+package com.pinterest.ktlint.ruleset.standard
+
+import com.pinterest.ktlint.cli.ruleset.core.api.RuleSetProviderV3
+import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
+import com.pinterest.ktlint.rule.engine.core.api.RuleSetId
+import com.pinterest.ktlint.ruleset.standard.rules.AnnotationRule
+import com.pinterest.ktlint.ruleset.standard.rules.AnnotationSpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.ArgumentListWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.BackingPropertyNamingRule
+import com.pinterest.ktlint.ruleset.standard.rules.BinaryExpressionWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.BlankLineBeforeDeclarationRule
+import com.pinterest.ktlint.ruleset.standard.rules.BlankLineBetweenWhenConditions
+import com.pinterest.ktlint.ruleset.standard.rules.BlockCommentInitialStarAlignmentRule
+import com.pinterest.ktlint.ruleset.standard.rules.ChainWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.ClassNamingRule
+import com.pinterest.ktlint.ruleset.standard.rules.ClassSignatureRule
+import com.pinterest.ktlint.ruleset.standard.rules.CommentSpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.CommentWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.ConditionWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.ContextReceiverWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.DiscouragedCommentLocationRule
+import com.pinterest.ktlint.ruleset.standard.rules.EmptyPrimaryConstructorRule
+import com.pinterest.ktlint.ruleset.standard.rules.EnumEntryNameCaseRule
+import com.pinterest.ktlint.ruleset.standard.rules.EnumWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.FilenameRule
+import com.pinterest.ktlint.ruleset.standard.rules.FinalNewlineRule
+import com.pinterest.ktlint.ruleset.standard.rules.FunctionExpressionBodyRule
+import com.pinterest.ktlint.ruleset.standard.rules.FunctionLiteralRule
+import com.pinterest.ktlint.ruleset.standard.rules.FunctionNameRule
+import com.pinterest.ktlint.ruleset.standard.rules.FunctionReturnTypeSpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.FunctionSignatureRule
+import com.pinterest.ktlint.ruleset.standard.rules.FunctionStartOfBodySpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.FunctionTypeModifierSpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.FunctionTypeReferenceSpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.IfElseBracingRule
+import com.pinterest.ktlint.ruleset.standard.rules.IfElseWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.ImportOrderingRule
+import com.pinterest.ktlint.ruleset.standard.rules.IndentationRule
+import com.pinterest.ktlint.ruleset.standard.rules.KdocWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.KtlintSuppressionRule
+import com.pinterest.ktlint.ruleset.standard.rules.MaxLineLengthRule
+import com.pinterest.ktlint.ruleset.standard.rules.MixedConditionOperatorsRule
+import com.pinterest.ktlint.ruleset.standard.rules.ModifierListSpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.ModifierOrderRule
+import com.pinterest.ktlint.ruleset.standard.rules.MultiLineIfElseRule
+import com.pinterest.ktlint.ruleset.standard.rules.MultilineExpressionWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.MultilineLoopRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoBlankLineBeforeRbraceRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoBlankLineInListRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoBlankLinesInChainedMethodCallsRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoConsecutiveBlankLinesRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoConsecutiveCommentsRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoEmptyClassBodyRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoEmptyFileRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoEmptyFirstLineInClassBodyRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoEmptyFirstLineInMethodBlockRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoLineBreakAfterElseRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoLineBreakBeforeAssignmentRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoMultipleSpacesRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoSemicolonsRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoSingleLineBlockCommentRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoTrailingSpacesRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoUnitReturnRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoUnusedImportsRule
+import com.pinterest.ktlint.ruleset.standard.rules.NoWildcardImportsRule
+import com.pinterest.ktlint.ruleset.standard.rules.NullableTypeSpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.PackageNameRule
+import com.pinterest.ktlint.ruleset.standard.rules.ParameterListSpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.ParameterListWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.ParameterWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.PropertyNamingRule
+import com.pinterest.ktlint.ruleset.standard.rules.PropertyWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundAngleBracketsRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundColonRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundCommaRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundCurlyRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundDotRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundDoubleColonRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundKeywordRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundOperatorsRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundParensRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundRangeOperatorRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundUnaryOperatorRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingBetweenDeclarationsWithAnnotationsRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingBetweenDeclarationsWithCommentsRule
+import com.pinterest.ktlint.ruleset.standard.rules.SpacingBetweenFunctionNameAndOpeningParenthesisRule
+import com.pinterest.ktlint.ruleset.standard.rules.StatementWrappingRule
+import com.pinterest.ktlint.ruleset.standard.rules.StringTemplateIndentRule
+import com.pinterest.ktlint.ruleset.standard.rules.StringTemplateRule
+import com.pinterest.ktlint.ruleset.standard.rules.TrailingCommaOnCallSiteRule
+import com.pinterest.ktlint.ruleset.standard.rules.TrailingCommaOnDeclarationSiteRule
+import com.pinterest.ktlint.ruleset.standard.rules.TryCatchFinallySpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.TypeArgumentListSpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.TypeParameterListSpacingRule
+import com.pinterest.ktlint.ruleset.standard.rules.UnnecessaryParenthesesBeforeTrailingLambdaRule
+import com.pinterest.ktlint.ruleset.standard.rules.ValueArgumentCommentRule
+import com.pinterest.ktlint.ruleset.standard.rules.ValueParameterCommentRule
+import com.pinterest.ktlint.ruleset.standard.rules.WrappingRule
+
+public class StandardRuleSetProvider : RuleSetProviderV3(RuleSetId.STANDARD) {
+    override fun getRuleProviders(): Set<RuleProvider> =
+        setOf(
+            // Naming
+            RuleProvider { BackingPropertyNamingRule() },
+            RuleProvider { ClassNamingRule() },
+            RuleProvider { FunctionNameRule() },
+            RuleProvider { PackageNameRule() },
+            RuleProvider { PropertyNamingRule() },
+            // Spacing
+            RuleProvider { CommentSpacingRule() },
+            RuleProvider { FunctionReturnTypeSpacingRule() },
+            RuleProvider { FunctionStartOfBodySpacingRule() },
+            RuleProvider { FunctionTypeReferenceSpacingRule() },
+            RuleProvider { FunctionTypeModifierSpacingRule() },
+            RuleProvider { ModifierListSpacingRule() },
+            RuleProvider { NullableTypeSpacingRule() },
+            RuleProvider { ParameterListSpacingRule() },
+            RuleProvider { SpacingAroundAngleBracketsRule() },
+            RuleProvider { SpacingAroundColonRule() },
+            RuleProvider { SpacingAroundCommaRule() },
+            RuleProvider { SpacingAroundCurlyRule() },
+            RuleProvider { SpacingAroundDotRule() },
+            RuleProvider { SpacingAroundDoubleColonRule() },
+            RuleProvider { SpacingAroundKeywordRule() },
+            RuleProvider { SpacingAroundOperatorsRule() },
+            RuleProvider { SpacingAroundParensRule() },
+            RuleProvider { SpacingAroundRangeOperatorRule() },
+            RuleProvider { SpacingAroundUnaryOperatorRule() },
+            RuleProvider { SpacingBetweenDeclarationsWithAnnotationsRule() },
+            RuleProvider { SpacingBetweenDeclarationsWithCommentsRule() },
+            RuleProvider { SpacingBetweenFunctionNameAndOpeningParenthesisRule() },
+            RuleProvider { TypeArgumentListSpacingRule() },
+            RuleProvider { TypeParameterListSpacingRule() },
+            // Wrapping
+            RuleProvider { ArgumentListWrappingRule() },
+            RuleProvider { ChainWrappingRule() },
+            RuleProvider { CommentWrappingRule() },
+            RuleProvider { ConditionWrappingRule() },
+            RuleProvider { ContextReceiverWrappingRule() },
+            RuleProvider { EnumWrappingRule() },
+            RuleProvider { IfElseWrappingRule() },
+            RuleProvider { KdocWrappingRule() },
+            RuleProvider { MultilineExpressionWrappingRule() },
+            RuleProvider { ParameterListWrappingRule() },
+            RuleProvider { ParameterWrappingRule() },
+            RuleProvider { PropertyWrappingRule() },
+            RuleProvider { StatementWrappingRule() },
+            RuleProvider { WrappingRule() },
+            // Linting & formatting
+            RuleProvider { AnnotationRule() },
+            RuleProvider { AnnotationSpacingRule() },
+            RuleProvider { BinaryExpressionWrappingRule() },
+            RuleProvider { BlankLineBeforeDeclarationRule() },
+            RuleProvider { BlankLineBetweenWhenConditions() },
+            RuleProvider { BlockCommentInitialStarAlignmentRule() },
+            RuleProvider { ClassSignatureRule() },
+            RuleProvider { DiscouragedCommentLocationRule() },
+            RuleProvider { EmptyPrimaryConstructorRule() },
+            RuleProvider { EnumEntryNameCaseRule() },
+            RuleProvider { FilenameRule() },
+            RuleProvider { FinalNewlineRule() },
+            RuleProvider { FunctionExpressionBodyRule() },
+            RuleProvider { FunctionLiteralRule() },
+            RuleProvider { FunctionSignatureRule() },
+            RuleProvider { IfElseBracingRule() },
+            RuleProvider { ImportOrderingRule() },
+            RuleProvider { IndentationRule() },
+            RuleProvider { KtlintSuppressionRule() },
+            RuleProvider { MaxLineLengthRule() },
+            RuleProvider { MixedConditionOperatorsRule() },
+            RuleProvider { ModifierOrderRule() },
+            RuleProvider { MultiLineIfElseRule() },
+            RuleProvider { MultilineLoopRule() },
+            RuleProvider { NoBlankLineBeforeRbraceRule() },
+            RuleProvider { NoBlankLineInListRule() },
+            RuleProvider { NoBlankLinesInChainedMethodCallsRule() },
+            RuleProvider { NoConsecutiveBlankLinesRule() },
+            RuleProvider { NoConsecutiveCommentsRule() },
+            RuleProvider { NoEmptyClassBodyRule() },
+            RuleProvider { NoEmptyFileRule() },
+            RuleProvider { NoEmptyFirstLineInClassBodyRule() },
+            RuleProvider { NoEmptyFirstLineInMethodBlockRule() },
+            RuleProvider { NoLineBreakAfterElseRule() },
+            RuleProvider { NoLineBreakBeforeAssignmentRule() },
+            RuleProvider { NoMultipleSpacesRule() },
+            RuleProvider { NoSemicolonsRule() },
+            RuleProvider { NoSingleLineBlockCommentRule() },
+            RuleProvider { NoTrailingSpacesRule() },
+            RuleProvider { NoUnitReturnRule() },
+            RuleProvider { NoUnusedImportsRule() },
+            RuleProvider { NoWildcardImportsRule() },
+            RuleProvider { StringTemplateRule() },
+            RuleProvider { StringTemplateIndentRule() },
+            RuleProvider { TrailingCommaOnCallSiteRule() },
+            RuleProvider { TrailingCommaOnDeclarationSiteRule() },
+            RuleProvider { TryCatchFinallySpacingRule() },
+            RuleProvider { UnnecessaryParenthesesBeforeTrailingLambdaRule() },
+            RuleProvider { ValueArgumentCommentRule() },
+            RuleProvider { ValueParameterCommentRule() },
+        )
+}
+[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/StandardRuleSetProvider.kt]

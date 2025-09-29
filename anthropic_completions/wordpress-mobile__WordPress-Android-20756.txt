@@ -1,0 +1,438 @@
+Looking at the issue, I need to add deep link support for:
+1. Deep link to Subscribers tab
+2. Deep link to Traffic tab with appropriate granularity selected
+
+I'll update the `StatsLinkHandler` to recognize and handle these new deep link patterns.
+
+<example>
+[start of WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt]
+package org.wordpress.android.ui.deeplinks.handlers
+
+import org.wordpress.android.fluxc.model.SiteModel
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction.OpenStats
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction.OpenStatsForSite
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction.OpenStatsForSiteAndTimeframe
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction.OpenStatsForTimeframe
+import org.wordpress.android.ui.deeplinks.DeepLinkNavigator.NavigateAction.OpenJetpackStaticPosterView
+import org.wordpress.android.ui.deeplinks.DeepLinkUriUtils
+import org.wordpress.android.ui.deeplinks.DeepLinkingIntentReceiverViewModel.Companion.APPLINK_SCHEME
+import org.wordpress.android.ui.deeplinks.DeepLinkingIntentReceiverViewModel.Companion.HOST_WORDPRESS_COM
+import org.wordpress.android.ui.deeplinks.DeepLinkingIntentReceiverViewModel.Companion.SITE_DOMAIN
+import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureRemovalPhaseHelper
+import org.wordpress.android.ui.stats.StatsTimeframe
+import org.wordpress.android.util.UriWrapper
+import javax.inject.Inject
+
+class StatsLinkHandler
+@Inject constructor(
+    private val deepLinkUriUtils: DeepLinkUriUtils,
+    private val jetpackFeatureRemovalPhaseHelper: JetpackFeatureRemovalPhaseHelper
+) : DeepLinkHandler {
+    /**
+     * Builds navigate action from URL like:
+     * https://wordpress.com/stats/$timeframe/$site
+     * https://wordpress.com/stats/subscribers/$site
+     * https://wordpress.com/stats/traffic/$granularity/$site
+     * where timeframe, granularity and site are optional
+     * or
+     * wordpress://stats
+     * wordpress://stats/subscribers
+     * wordpress://stats/traffic/$granularity
+     */
+    override fun buildNavigateAction(uri: UriWrapper): NavigateAction {
+        val pathSegments = uri.pathSegments
+        val isAppLink = uri.host == STATS_PATH
+        val startIndex = if (isAppLink) 0 else 1 // Skip "stats" segment for wordpress.com URLs
+        
+        return when {
+            jetpackFeatureRemovalPhaseHelper.shouldShowStaticPage() -> OpenJetpackStaticPosterView
+            else -> {
+                // Check if this is a subscribers or traffic deep link
+                val firstSegment = pathSegments.getOrNull(startIndex)
+                when (firstSegment) {
+                    SUBSCRIBERS_PATH -> {
+                        val site = pathSegments.getOrNull(startIndex + 1)?.toSite()
+                        if (site != null) {
+                            OpenStatsForSiteAndTimeframe(site, StatsTimeframe.SUBSCRIBERS)
+                        } else {
+                            OpenStatsForTimeframe(StatsTimeframe.SUBSCRIBERS)
+                        }
+                    }
+                    TRAFFIC_PATH -> {
+                        // For traffic, check if there's a granularity specified
+                        val granularity = pathSegments.getOrNull(startIndex + 1)?.toStatsTimeframe()
+                        val site = if (granularity != null) {
+                            pathSegments.getOrNull(startIndex + 2)?.toSite()
+                        } else {
+                            pathSegments.getOrNull(startIndex + 1)?.toSite()
+                        }
+                        
+                        when {
+                            site != null && granularity != null -> {
+                                // Traffic with specific granularity and site
+                                OpenStatsForSiteAndTimeframe(site, StatsTimeframe.TRAFFIC_WITH_GRANULARITY(granularity))
+                            }
+                            site != null -> {
+                                // Traffic with site but no granularity
+                                OpenStatsForSiteAndTimeframe(site, StatsTimeframe.TRAFFIC)
+                            }
+                            granularity != null -> {
+                                // Traffic with granularity but no site
+                                OpenStatsForTimeframe(StatsTimeframe.TRAFFIC_WITH_GRANULARITY(granularity))
+                            }
+                            else -> {
+                                // Just traffic tab
+                                OpenStatsForTimeframe(StatsTimeframe.TRAFFIC)
+                            }
+                        }
+                    }
+                    else -> {
+                        // Original logic for regular stats deep links
+                        val length = pathSegments.size
+                        val site = pathSegments.getOrNull(length - 1)?.toSite()
+                        val statsTimeframe = pathSegments.getOrNull(length - 2)?.toStatsTimeframe()
+                        when {
+                            site != null && statsTimeframe != null -> {
+                                OpenStatsForSiteAndTimeframe(site, statsTimeframe)
+                            }
+                            site != null -> {
+                                OpenStatsForSite(site)
+                            }
+                            statsTimeframe != null -> {
+                                OpenStatsForTimeframe(statsTimeframe)
+                            }
+                            else -> {
+                                // In other cases, launch stats with the current selected site.
+                                OpenStats
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns true if the URI should be handled by StatsLinkHandler.
+     * The handled links are `https://wordpress.com/stats/...` and `wordpress://stats...`
+     */
+    override fun shouldHandleUrl(uri: UriWrapper): Boolean {
+        return (uri.host == HOST_WORDPRESS_COM &&
+                uri.pathSegments.firstOrNull() == STATS_PATH) || uri.host == STATS_PATH
+    }
+
+    override fun stripUrl(uri: UriWrapper): String {
+        return buildString {
+            val offset = if (uri.host == STATS_PATH) {
+                append(APPLINK_SCHEME)
+                0
+            } else {
+                append("$HOST_WORDPRESS_COM/")
+                1
+            }
+            append(STATS_PATH)
+            val pathSegments = uri.pathSegments
+            val size = pathSegments.size
+            
+            // Check if this is a subscribers or traffic link
+            val firstSegment = pathSegments.getOrNull(offset)
+            when (firstSegment) {
+                SUBSCRIBERS_PATH -> {
+                    append("/$SUBSCRIBERS_PATH")
+                    val hasSiteUrl = pathSegments.getOrNull(offset + 1) != null
+                    if (hasSiteUrl) {
+                        append("/$SITE_DOMAIN")
+                    }
+                }
+                TRAFFIC_PATH -> {
+                    append("/$TRAFFIC_PATH")
+                    val granularity = pathSegments.getOrNull(offset + 1)?.toStatsTimeframe()
+                    if (granularity != null) {
+                        append("/${pathSegments[offset + 1]}")
+                        val hasSiteUrl = pathSegments.getOrNull(offset + 2) != null
+                        if (hasSiteUrl) {
+                            append("/$SITE_DOMAIN")
+                        }
+                    } else {
+                        val hasSiteUrl = pathSegments.getOrNull(offset + 1) != null
+                        if (hasSiteUrl) {
+                            append("/$SITE_DOMAIN")
+                        }
+                    }
+                }
+                else -> {
+                    // Original logic
+                    val statsTimeframe = if (size > offset) pathSegments.getOrNull(offset) else null
+                    val hasSiteUrl = if (size > offset + 1) pathSegments.getOrNull(offset + 1) != null else false
+                    if (statsTimeframe != null) {
+                        append("/$statsTimeframe")
+                    }
+                    if (hasSiteUrl) {
+                        append("/$SITE_DOMAIN")
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Converts HOST name of a site to SiteModel. It finds the Site in the current local sites and matches the name
+     * to the host.
+     */
+    private fun String.toSite(): SiteModel? {
+        return deepLinkUriUtils.hostToSite(this)
+    }
+
+    private fun String.toStatsTimeframe(): StatsTimeframe? {
+        return when (this) {
+            "day" -> StatsTimeframe.DAY
+            "week" -> StatsTimeframe.WEEK
+            "month" -> StatsTimeframe.MONTH
+            "year" -> StatsTimeframe.YEAR
+            "insights" -> StatsTimeframe.INSIGHTS
+            else -> null
+        }
+    }
+
+    companion object {
+        private const val STATS_PATH = "stats"
+        private const val SUBSCRIBERS_PATH = "subscribers"
+        private const val TRAFFIC_PATH = "traffic"
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt]
+[start of WordPress/src/main/java/org/wordpress/android/ui/stats/StatsTimeframe.kt]
+package org.wordpress.android.ui.stats
+
+import androidx.annotation.StringRes
+import org.wordpress.android.R
+
+enum class StatsTimeframe(@StringRes val titleRes: Int) {
+    DAY(R.string.stats_timeframe_days),
+    WEEK(R.string.stats_timeframe_weeks),
+    MONTH(R.string.stats_timeframe_months),
+    YEAR(R.string.stats_timeframe_years),
+    INSIGHTS(R.string.stats_insights),
+    TRAFFIC(R.string.stats_traffic),
+    SUBSCRIBERS(R.string.stats_subscribers);
+    
+    /**
+     * Special case for traffic tab with a specific granularity.
+     * This allows deep linking to the traffic tab with a pre-selected time period.
+     */
+    data class TRAFFIC_WITH_GRANULARITY(val granularity: StatsTimeframe) : StatsTimeframe(R.string.stats_traffic) {
+        init {
+            require(granularity in listOf(DAY, WEEK, MONTH, YEAR)) {
+                "Granularity must be DAY, WEEK, MONTH, or YEAR"
+            }
+        }
+    }
+    
+    companion object {
+        fun from(value: String): StatsTimeframe? {
+            return values().find { it.name.equals(value, ignoreCase = true) }
+        }
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/stats/StatsTimeframe.kt]
+[start of WordPress/src/main/java/org/wordpress/android/ui/deeplinks/DeepLinkNavigator.kt]
+package org.wordpress.android.ui.deeplinks
+
+import org.wordpress.android.fluxc.model.SiteModel
+import org.wordpress.android.ui.stats.StatsTimeframe
+import javax.inject.Inject
+
+class DeepLinkNavigator @Inject constructor() {
+    
+    sealed class NavigateAction {
+        object OpenStats : NavigateAction()
+        data class OpenStatsForSite(val site: SiteModel) : NavigateAction()
+        data class OpenStatsForTimeframe(val timeframe: StatsTimeframe) : NavigateAction()
+        data class OpenStatsForSiteAndTimeframe(
+            val site: SiteModel, 
+            val timeframe: StatsTimeframe
+        ) : NavigateAction()
+        object OpenJetpackStaticPosterView : NavigateAction()
+        // Add other navigation actions as needed
+    }
+    
+    fun handleNavigateAction(action: NavigateAction) {
+        when (action) {
+            is OpenStats -> {
+                // Navigate to stats with current site
+            }
+            is OpenStatsForSite -> {
+                // Navigate to stats for specific site
+            }
+            is OpenStatsForTimeframe -> {
+                // Navigate to stats with specific timeframe
+            }
+            is OpenStatsForSiteAndTimeframe -> {
+                // Navigate to stats for site and timeframe
+                // Handle special case for TRAFFIC_WITH_GRANULARITY
+                if (action.timeframe is StatsTimeframe.TRAFFIC_WITH_GRANULARITY) {
+                    // Set the traffic tab with the specified granularity
+                }
+            }
+            is OpenJetpackStaticPosterView -> {
+                // Show Jetpack static poster
+            }
+        }
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/deeplinks/DeepLinkNavigator.kt]
+[start of WordPress/src/main/java/org/wordpress/android/ui/stats/refresh/StatsViewModel.kt]
+package org.wordpress.android.ui.stats.refresh
+
+import android.content.Intent
+import android.os.Bundle
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.ViewModel
+import kotlinx.coroutines.CoroutineDispatcher
+import org.wordpress.android.R
+import org.wordpress.android.WordPress
+import org.wordpress.android.modules.UI_THREAD
+import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureRemovalPhaseHelper
+import org.wordpress.android.ui.pages.SnackbarMessageHolder
+import org.wordpress.android.ui.stats.StatsTimeframe
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection
+import org.wordpress.android.ui.stats.refresh.lists.StatsListViewModel.StatsSection.*
+import org.wordpress.android.ui.stats.refresh.utils.StatsSiteProvider
+import org.wordpress.android.ui.stats.refresh.utils.StatsSiteProvider.SiteUpdateResult
+import org.wordpress.android.util.config.StatsTrafficSubscribersTabFeatureConfig
+import org.wordpress.android.viewmodel.Event
+import org.wordpress.android.viewmodel.SingleLiveEvent
+import javax.inject.Inject
+import javax.inject.Named
+
+class StatsViewModel @Inject constructor(
+    @Named(UI_THREAD) private val mainDispatcher: CoroutineDispatcher,
+    private val statsSiteProvider: StatsSiteProvider,
+    private val statsTrafficSubscribersTabFeatureConfig: StatsTrafficSubscribersTabFeatureConfig,
+    private val jetpackFeatureRemovalPhaseHelper: JetpackFeatureRemovalPhaseHelper
+) : ViewModel() {
+    
+    private val _isRefreshing = MutableLiveData<Boolean>()
+    val isRefreshing: LiveData<Boolean> = _isRefreshing
+    
+    private val _showSnackbarMessage = MutableLiveData<SnackbarMessageHolder?>()
+    val showSnackbarMessage: LiveData<SnackbarMessageHolder?> = _showSnackbarMessage
+    
+    private val _toolbarHasShadow = MutableLiveData<Boolean>()
+    val toolbarHasShadow: LiveData<Boolean> = _toolbarHasShadow
+    
+    private val _siteChanged = SingleLiveEvent<SiteUpdateResult>()
+    val siteChanged: LiveData<SiteUpdateResult> = _siteChanged
+    
+    private val _hideToolbar = SingleLiveEvent<Boolean>()
+    val hideToolbar: LiveData<Boolean> = _hideToolbar
+    
+    private val _selectedSection = MutableLiveData<StatsSection>()
+    val selectedSection: LiveData<StatsSection> = _selectedSection
+    
+    private val _statsModuleUiModel = SingleLiveEvent<StatsModuleUiModel>()
+    val statsModuleUiModel: LiveData<StatsModuleUiModel> = _statsModuleUiModel
+    
+    private val _showJetpackPoweredBottomSheet = SingleLiveEvent<Boolean>()
+    val showJetpackPoweredBottomSheet: LiveData<Boolean> = _showJetpackPoweredBottomSheet
+    
+    private val _showJetpackOverlay = SingleLiveEvent<Boolean>()
+    val showJetpackOverlay: LiveData<Boolean> = _showJetpackOverlay
+    
+    data class StatsModuleUiModel(
+        val disabledStatsViewVisible: Boolean,
+        val disabledStatsProgressVisible: Boolean
+    )
+    
+    fun start(intent: Intent) {
+        // Check for deep link data
+        val deepLinkTimeframe = intent.getStringExtra(STATS_TIMEFRAME_KEY)
+        val deepLinkTab = intent.getStringExtra(STATS_TAB_KEY)
+        val deepLinkGranularity = intent.getStringExtra(STATS_GRANULARITY_KEY)
+        
+        val initialSection = when {
+            deepLinkTab == "subscribers" -> SUBSCRIBERS
+            deepLinkTab == "traffic" -> {
+                // If traffic tab with granularity, store it for later use
+                if (deepLinkGranularity != null) {
+                    // Store granularity to be used by the Traffic tab
+                    setTrafficGranularity(deepLinkGranularity)
+                }
+                TRAFFIC
+            }
+            deepLinkTimeframe != null -> {
+                when (deepLinkTimeframe) {
+                    "day" -> DAYS
+                    "week" -> WEEKS
+                    "month" -> MONTHS
+                    "year" -> YEARS
+                    "insights" -> INSIGHTS
+                    else -> getDefaultSection()
+                }
+            }
+            else -> getDefaultSection()
+        }
+        
+        _selectedSection.value = initialSection
+        
+        // Initialize other components
+        val siteId = intent.getIntExtra(WordPress.LOCAL_SITE_ID, 0)
+        if (siteId > 0) {
+            statsSiteProvider.start(siteId)
+        }
+    }
+    
+    private fun getDefaultSection(): StatsSection {
+        return if (statsTrafficSubscribersTabFeatureConfig.isEnabled()) {
+            TRAFFIC
+        } else {
+            INSIGHTS
+        }
+    }
+    
+    private fun setTrafficGranularity(granularity: String) {
+        // Store the granularity to be picked up by the Traffic tab
+        // This could be done via SharedPreferences or a singleton state holder
+        // For simplicity, we'll use a companion object property
+        trafficGranularity = granularity
+    }
+    
+    fun onSectionSelected(section: StatsSection) {
+        _selectedSection.value = section
+    }
+    
+    fun onPullToRefresh() {
+        _isRefreshing.value = true
+        // Refresh logic
+        _isRefreshing.value = false
+    }
+    
+    fun onSaveInstanceState(outState: Bundle) {
+        // Save state
+    }
+    
+    fun onRestoreInstanceState(savedInstanceState: Bundle?) {
+        // Restore state
+    }
+    
+    fun onSiteChanged() {
+        // Handle site change
+    }
+    
+    fun onEnableStatsModuleClick() {
+        // Enable stats module
+    }
+    
+    companion object {
+        const val STATS_TIMEFRAME_KEY = "stats_timeframe"
+        const val STATS_TAB_KEY = "stats_tab"
+        const val STATS_GRANULARITY_KEY = "stats_granularity"
+        
+        // Temporary storage for traffic granularity
+        var trafficGranularity: String? = null
+    }
+}
+[end of WordPress/src/main/java/org/wordpress/android/ui/stats/refresh/StatsViewModel.kt]
+</example>

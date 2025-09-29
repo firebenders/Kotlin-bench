@@ -1,0 +1,736 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "An analysis of the issue reveals that `yield()` on an `EventLoop` dispatcher, such as the one used by `runBlocking`, uses an optimized path that places its continuation in an \"unconfined\" queue. The `EventLoop`'s processing logic gives priority to this unconfined queue over both the main task queue and the delayed task queue.\n\nWhen `yield()` is called in the provided example, its continuation is placed in the unconfined queue. The `runBlocking` event loop then calls `processNextEvent()`. The existing implementation of `processNextEvent()` checks the unconfined queue first, finds the continuation from `yield()`, and executes it immediately. This happens before it has a chance to check the delayed queue for tasks whose delays have expired. As a result, the `yield()` call fails to yield to the other coroutine.\n\nTo fix this, the priority of task processing within the `EventLoop` needs to be adjusted. The ready-to-run delayed tasks should be given a chance to execute before the unconfined tasks from `yield()`.\n\nThe solution is to reorder the operations within `EventLoopImplBase.processNextEvent`. The new order will be:\n1.  Move any ready tasks from the delayed queue to the main queue.\n2.  Process a task from the main queue if one is available.\n3.  Only if the main queue is empty, process tasks from the unconfined queue.\n\nThis change ensures that tasks that have completed their `delay` are executed before a coroutine that has called `yield()`, correcting the execution order to match the expected behavior.\n\nHere are the changes for `kotlinx-coroutines-core/common/src/EventLoop.common.kt`:\n\n[start of kotlinx-coroutines-core/common/src/EventLoop.common.kt]\n```kotlin\npackage kotlinx.coroutines\n\nimport kotlinx.atomicfu.*\nimport kotlinx.coroutines.internal.*\nimport kotlin.concurrent.Volatile\nimport kotlin.coroutines.*\nimport kotlin.jvm.*\n\n/**\n * Extended by [CoroutineDispatcher] implementations that have event loop inside and can\n * be asked to process next event from their event queue.\n *\n * It may optionally implement [Delay] interface and support time-scheduled tasks.\n * It is created or pigged back onto (see [ThreadLocalEventLoop])\n * by `runBlocking` and by [Dispatchers.Unconfined].\n *\n * @suppress **This an internal API and should not be used from general code.**\n */\ninternal abstract class EventLoop : CoroutineDispatcher() {\n    /**\n     * Counts the number of nested `runBlocking` and [Dispatchers.Unconfined] that use this event loop.\n     */\n    private var useCount = 0L\n\n    /**\n     * Set to true on any use by `runBlocking`, because it potentially leaks this loop to other threads, so\n     * this instance must be properly shutdown. We don't need to shutdown event loop that was used solely\n     * by [Dispatchers.Unconfined] -- it can be left as [ThreadLocalEventLoop] and reused next time.\n     */\n    private var shared = false\n\n    /**\n     * Queue used by [Dispatchers.Unconfined] tasks.\n     * These tasks are thread-local for performance and take precedence over the rest of the queue.\n     */\n    private var unconfinedQueue: ArrayDeque<DispatchedTask<*>>? = null\n\n    /**\n     * Processes next event in this event loop.\n     *\n     * The result of this function is to be interpreted like this:\n     * - `<= 0` -- there are potentially more events for immediate processing;\n     * - `> 0` -- a number of nanoseconds to wait for next scheduled event;\n     * - [Long.MAX_VALUE] -- no more events.\n     *\n     * **NOTE**: Must be invoked only from the event loop's thread\n     *          (no check for performance reasons, may be added in the future).\n     */\n    open fun processNextEvent(): Long {\n        if (!processUnconfinedEvent()) return Long.MAX_VALUE\n        return 0\n    }\n\n    protected open val isEmpty: Boolean get() = isUnconfinedQueueEmpty\n\n    protected open val nextTime: Long\n        get() {\n            val queue = unconfinedQueue ?: return Long.MAX_VALUE\n            return if (queue.isEmpty()) Long.MAX_VALUE else 0L\n        }\n\n    fun processUnconfinedEvent(): Boolean {\n        val queue = unconfinedQueue ?: return false\n        val task = queue.removeFirstOrNull() ?: return false\n        task.run()\n        return true\n    }\n    /**\n     * Returns `true` if the invoking `runBlocking(context) { ... }` that was passed this event loop in its context\n     * parameter should call [processNextEvent] for this event loop (otherwise, it will process thread-local one).\n     * By default, event loop implementation is thread-local and should not processed in the context\n     * (current thread's event loop should be processed instead).\n     */\n    open fun shouldBeProcessedFromContext(): Boolean = false\n\n    /**\n     * Dispatches task whose dispatcher returned `false` from [CoroutineDispatcher.isDispatchNeeded]\n     * into the current event loop.\n     */\n    fun dispatchUnconfined(task: DispatchedTask<*>) {\n        val queue = unconfinedQueue ?:\n            ArrayDeque<DispatchedTask<*>>().also { unconfinedQueue = it }\n        queue.addLast(task)\n    }\n\n    val isActive: Boolean\n        get() = useCount > 0\n\n    val isUnconfinedLoopActive: Boolean\n        get() = useCount >= delta(unconfined = true)\n\n    // May only be used from the event loop's thread\n    val isUnconfinedQueueEmpty: Boolean\n        get() = unconfinedQueue?.isEmpty() ?: true\n\n    private fun delta(unconfined: Boolean) =\n        if (unconfined) (1L shl 32) else 1L\n\n    fun incrementUseCount(unconfined: Boolean = false) {\n        useCount += delta(unconfined)\n        if (!unconfined) shared = true \n    }\n\n    fun decrementUseCount(unconfined: Boolean = false) {\n        useCount -= delta(unconfined)\n        if (useCount > 0) return\n        assert { useCount == 0L } // \"Extra decrementUseCount\"\n        if (shared) {\n            // shut it down and remove from ThreadLocalEventLoop\n            shutdown()\n        }\n    }\n\n    final override fun limitedParallelism(parallelism: Int, name: String?): CoroutineDispatcher {\n        parallelism.checkParallelism()\n        return namedOrThis(name) // Single-threaded, short-circuit\n    }\n\n    open fun shutdown() {}\n}\n\ninternal object ThreadLocalEventLoop {\n    private val ref = commonThreadLocal<EventLoop?>(Symbol(\"ThreadLocalEventLoop\"))\n\n    internal val eventLoop: EventLoop\n        get() = ref.get() ?: createEventLoop().also { ref.set(it) }\n\n    internal fun currentOrNull(): EventLoop? =\n        ref.get()\n\n    internal fun resetEventLoop() {\n        ref.set(null)\n    }\n\n    internal fun setEventLoop(eventLoop: EventLoop) {\n        ref.set(eventLoop)\n    }\n}\n\nprivate val DISPOSED_TASK = Symbol(\"REMOVED_TASK\")\n\n// results for scheduleImpl\nprivate const val SCHEDULE_OK = 0\nprivate const val SCHEDULE_COMPLETED = 1\nprivate const val SCHEDULE_DISPOSED = 2\n\nprivate const val MS_TO_NS = 1_000_000L\nprivate const val MAX_MS = Long.MAX_VALUE / MS_TO_NS\n\n/**\n * First-line overflow protection -- limit maximal delay.\n * Delays longer than this one (~146 years) are considered to be delayed \"forever\".\n */\nprivate const val MAX_DELAY_NS = Long.MAX_VALUE / 2\n\ninternal fun delayToNanos(timeMillis: Long): Long = when {\n    timeMillis <= 0 -> 0L\n    timeMillis >= MAX_MS -> Long.MAX_VALUE\n    else -> timeMillis * MS_TO_NS\n}\n\ninternal fun delayNanosToMillis(timeNanos: Long): Long =\n    timeNanos / MS_TO_NS\n\nprivate val CLOSED_EMPTY = Symbol(\"CLOSED_EMPTY\")\n\nprivate typealias Queue<T> = LockFreeTaskQueueCore<T>\n\ninternal expect abstract class EventLoopImplPlatform() : EventLoop {\n    // Called to unpark this event loop's thread\n    protected fun unpark()\n\n    // Called to reschedule to DefaultExecutor when this event loop is complete\n    protected fun reschedule(now: Long, delayedTask: EventLoopImplBase.DelayedTask)\n}\n\ninternal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {\n    // null | CLOSED_EMPTY | task | Queue<Runnable>\n    private val _queue = atomic<Any?>(null)\n\n    // Allocated only only once\n    private val _delayed = atomic<DelayedTaskQueue?>(null)\n\n    private val _isCompleted = atomic(false)\n    private var isCompleted\n        get() = _isCompleted.value\n        set(value) { _isCompleted.value = value }\n\n    override val isEmpty: Boolean get() {\n        if (!isUnconfinedQueueEmpty) return false\n        val delayed = _delayed.value\n        if (delayed != null && !delayed.isEmpty) return false\n        return when (val queue = _queue.value) {\n            null -> true\n            is Queue<*> -> queue.isEmpty\n            else -> queue === CLOSED_EMPTY\n        }\n    }\n\n    override val nextTime: Long\n        get() {\n            if (super.nextTime == 0L) return 0L\n            val queue = _queue.value\n            when {\n                queue === null -> {} // empty queue -- proceed\n                queue is Queue<*> -> if (!queue.isEmpty) return 0 // non-empty queue\n                queue === CLOSED_EMPTY -> return Long.MAX_VALUE // no more events -- closed\n                else -> return 0 // non-empty queue\n            }\n            val nextDelayedTask = _delayed.value?.peek() ?: return Long.MAX_VALUE\n            return (nextDelayedTask.nanoTime - nanoTime()).coerceAtLeast(0)\n        }\n\n    override fun shutdown() {\n        // Clean up thread-local reference here -- this event loop is shutting down\n        ThreadLocalEventLoop.resetEventLoop()\n        // We should signal that this event loop should not accept any more tasks\n        // and process queued events (that could have been added after last processNextEvent)\n        isCompleted = true\n        closeQueue()\n        // complete processing of all queued tasks\n        while (processNextEvent() <= 0) { /* spin */ }\n        // reschedule the rest of delayed tasks\n        rescheduleAllDelayed()\n    }\n\n    override fun scheduleResumeAfterDelay(timeMillis: Long, continuation: CancellableContinuation<Unit>) {\n        val timeNanos = delayToNanos(timeMillis)\n        if (timeNanos < MAX_DELAY_NS) {\n            val now = nanoTime()\n            DelayedResumeTask(now + timeNanos, continuation).also { task ->\n                /*\n                 * Order is important here: first we schedule the heap and only then\n                 * publish it to continuation. Otherwise, `DelayedResumeTask` would\n                 * have to know how to be disposed of even when it wasn't scheduled yet.\n                 */\n                schedule(now, task)\n                continuation.disposeOnCancellation(task)\n            }\n        }\n    }\n\n    protected fun scheduleInvokeOnTimeout(timeMillis: Long, block: Runnable): DisposableHandle {\n        val timeNanos = delayToNanos(timeMillis)\n        return if (timeNanos < MAX_DELAY_NS) {\n            val now = nanoTime()\n            DelayedRunnableTask(now + timeNanos, block).also { task ->\n                schedule(now, task)\n            }\n        } else {\n            NonDisposableHandle\n        }\n    }\n\n    override fun processNextEvent(): Long {\n        // queue all delayed tasks that are due to be executed\n        val delayed = _delayed.value\n        if (delayed != null && !delayed.isEmpty) {\n            val now = nanoTime()\n            while (true) {\n                // make sure that moving from delayed to queue removes from delayed only after it is added to queue\n                // to make sure that 'isEmpty' and `nextTime` that check both of them\n                // do not transiently report that both delayed and queue are empty during move\n                delayed.removeFirstIf {\n                    if (it.timeToExecute(now)) {\n                        enqueueImpl(it)\n                    } else\n                        false\n                } ?: break // quit loop when nothing more to remove or enqueueImpl returns false on \"isComplete\"\n            }\n        }\n        // then process one event from queue\n        val task = dequeue()\n        if (task != null) {\n            platformAutoreleasePool { task.run() }\n            return 0\n        }\n        // then process unconfined events\n        if (processUnconfinedEvent()) return 0\n        return nextTime\n    }\n\n    final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)\n\n    open fun enqueue(task: Runnable) {\n        if (enqueueImpl(task)) {\n            // todo: we should unpark only when this delayed task became first in the queue\n            unpark()\n        } else {\n            DefaultExecutor.enqueue(task)\n        }\n    }\n\n    @Suppress(\"UNCHECKED_CAST\")\n    private fun enqueueImpl(task: Runnable): Boolean {\n        _queue.loop { queue ->\n            if (isCompleted) return false // fail fast if already completed, may still add, but queues will close\n            when (queue) {\n                null -> if (_queue.compareAndSet(null, task)) return true\n                is Queue<*> -> {\n                    when ((queue as Queue<Runnable>).addLast(task)) {\n                        Queue.ADD_SUCCESS -> return true\n                        Queue.ADD_CLOSED -> return false\n                        Queue.ADD_FROZEN -> _queue.compareAndSet(queue, queue.next())\n                    }\n                }\n                else -> when {\n                    queue === CLOSED_EMPTY -> return false\n                    else -> {\n                        // update to full-blown queue to add one more\n                        val newQueue = Queue<Runnable>(Queue.INITIAL_CAPACITY, singleConsumer = true)\n                        newQueue.addLast(queue as Runnable)\n                        newQueue.addLast(task)\n                        if (_queue.compareAndSet(queue, newQueue)) return true\n                    }\n                }\n            }\n        }\n    }\n\n    @Suppress(\"UNCHECKED_CAST\")\n    private fun dequeue(): Runnable? {\n        _queue.loop { queue ->\n            when (queue) {\n                null -> return null\n                is Queue<*> -> {\n                    val result = (queue as Queue<Runnable>).removeFirstOrNull()\n                    if (result !== Queue.REMOVE_FROZEN) return result as Runnable?\n                    _queue.compareAndSet(queue, queue.next())\n                }\n                else -> when {\n                    queue === CLOSED_EMPTY -> return null\n                    else -> if (_queue.compareAndSet(queue, null)) return queue as Runnable\n                }\n            }\n        }\n    }\n\n    private fun closeQueue() {\n        assert { isCompleted }\n        _queue.loop { queue ->\n            when (queue) {\n                null -> if (_queue.compareAndSet(null, CLOSED_EMPTY)) return\n                is Queue<*> -> {\n                    queue.close()\n                    return\n                }\n                else -> when {\n                    queue === CLOSED_EMPTY -> return\n                    else -> {\n                        // update to full-blown queue to close\n                        val newQueue = Queue<Runnable>(Queue.INITIAL_CAPACITY, singleConsumer = true)\n                        newQueue.addLast(queue as Runnable)\n                        if (_queue.compareAndSet(queue, newQueue)) return\n                    }\n                }\n            }\n        }\n\n    }\n\n    fun schedule(now: Long, delayedTask: DelayedTask) {\n        when (scheduleImpl(now, delayedTask)) {\n            SCHEDULE_OK -> if (shouldUnpark(delayedTask)) unpark()\n            SCHEDULE_COMPLETED -> reschedule(now, delayedTask)\n            SCHEDULE_DISPOSED -> {} // do nothing -- task was already disposed\n            else -> error(\"unexpected result\")\n        }\n    }\n\n    private fun shouldUnpark(task: DelayedTask): Boolean = _delayed.value?.peek() === task\n\n    private fun scheduleImpl(now: Long, delayedTask: DelayedTask): Int {\n        if (isCompleted) return SCHEDULE_COMPLETED\n        val delayedQueue = _delayed.value ?: run {\n            _delayed.compareAndSet(null, DelayedTaskQueue(now))\n            _delayed.value!!\n        }\n        return delayedTask.scheduleTask(now, delayedQueue, this)\n    }\n\n    // It performs \"hard\" shutdown for test cleanup purposes\n    protected fun resetAll() {\n        _queue.value = null\n        _delayed.value = null\n    }\n\n    // This is a \"soft\" (normal) shutdown\n    private fun rescheduleAllDelayed() {\n        val now = nanoTime()\n        while (true) {\n            /*\n             * `removeFirstOrNull` below is the only operation on DelayedTask & ThreadSafeHeap that is not\n             * synchronized on DelayedTask itself. All other operation are synchronized both on\n             * DelayedTask & ThreadSafeHeap instances (in this order). It is still safe, because `dispose`\n             * first removes DelayedTask from the heap (under synchronization) then\n             * assign \"_heap = DISPOSED_TASK\", so there cannot be ever a race to _heap reference update.\n             */\n            val delayedTask = _delayed.value?.removeFirstOrNull() ?: break\n            reschedule(now, delayedTask)\n        }\n    }\n\n    internal abstract class DelayedTask(\n        /**\n         * This field can be only modified in [scheduleTask] before putting this DelayedTask\n         * into heap to avoid overflow and corruption of heap data structure.\n         */\n        @JvmField var nanoTime: Long\n    ) : Runnable, Comparable<DelayedTask>, DisposableHandle, ThreadSafeHeapNode, SynchronizedObject() {\n        @Volatile\n        private var _heap: Any? = null // null | ThreadSafeHeap | DISPOSED_TASK\n\n        override var heap: ThreadSafeHeap<*>?\n            get() = _heap as? ThreadSafeHeap<*>\n            set(value) {\n                require(_heap !== DISPOSED_TASK) // this can never happen, it is always checked before adding/removing\n                _heap = value\n            }\n\n        override var index: Int = -1\n\n        override fun compareTo(other: DelayedTask): Int {\n            val dTime = nanoTime - other.nanoTime\n            return when {\n                dTime > 0 -> 1\n                dTime < 0 -> -1\n                else -> 0\n            }\n        }\n\n        fun timeToExecute(now: Long): Boolean = now - nanoTime >= 0L\n\n        fun scheduleTask(now: Long, delayed: DelayedTaskQueue, eventLoop: EventLoopImplBase): Int = synchronized<Int>(this) {\n            if (_heap === DISPOSED_TASK) return SCHEDULE_DISPOSED // don't add -- was already disposed\n            delayed.addLastIf(this) { firstTask ->\n                if (eventLoop.isCompleted) return SCHEDULE_COMPLETED // non-local return from scheduleTask\n                /**\n                 * We are about to add new task and we have to make sure that [DelayedTaskQueue]\n                 * invariant is maintained. The code in this lambda is additionally executed under\n                 * the lock of [DelayedTaskQueue] and working with [DelayedTaskQueue.timeNow] here is thread-safe.\n                 */\n                if (firstTask == null) {\n                    /**\n                     * When adding the first delayed task we simply update queue's [DelayedTaskQueue.timeNow] to\n                     * the current now time even if that means \"going backwards in time\". This makes the structure\n                     * self-correcting in spite of wild jumps in `nanoTime()` measurements once all delayed tasks\n                     * are removed from the delayed queue for execution.\n                     */\n                    delayed.timeNow = now\n                } else {\n                    /**\n                     * Carefully update [DelayedTaskQueue.timeNow] so that it does not sweep past first's tasks time\n                     * and only goes forward in time. We cannot let it go backwards in time or invariant can be\n                     * violated for tasks that were already scheduled.\n                     */\n                    val firstTime = firstTask.nanoTime\n                    // compute min(now, firstTime) using a wrap-safe check\n                    val minTime = if (firstTime - now >= 0) now else firstTime\n                    // update timeNow only when going forward in time\n                    if (minTime - delayed.timeNow > 0) delayed.timeNow = minTime\n                }\n                /**\n                 * Here [DelayedTaskQueue.timeNow] was already modified and we have to double-check that newly added\n                 * task does not violate [DelayedTaskQueue] invariant because of that. Note also that this scheduleTask\n                 * function can be called to reschedule from one queue to another and this might be another reason\n                 * where new task's time might now violate invariant.\n                 * We correct invariant violation (if any) by simply changing this task's time to now.\n                 */\n                if (nanoTime - delayed.timeNow < 0) nanoTime = delayed.timeNow\n                true\n            }\n            return SCHEDULE_OK\n        }\n\n        final override fun dispose(): Unit = synchronized(this) {\n            val heap = _heap\n            if (heap === DISPOSED_TASK) return // already disposed\n            (heap as? DelayedTaskQueue)?.remove(this) // remove if it is in heap (first)\n            _heap = DISPOSED_TASK // never add again to any heap\n        }\n\n        override fun toString(): String = \"Delayed[nanos=$nanoTime]\"\n    }\n\n    private inner class DelayedResumeTask(\n        nanoTime: Long,\n        private val cont: CancellableContinuation<Unit>\n    ) : DelayedTask(nanoTime) {\n        override fun run() { with(cont) { resumeUndispatched(Unit) } }\n        override fun toString(): String = super.toString() + cont.toString()\n    }\n\n    private class DelayedRunnableTask(\n        nanoTime: Long,\n        private val block: Runnable\n    ) : DelayedTask(nanoTime) {\n        override fun run() { block.run() }\n        override fun toString(): String = super.toString() + block.toString()\n    }\n\n    /**\n     * Delayed task queue maintains stable time-comparision invariant despite potential wraparounds in\n     * long nano time measurements by maintaining last observed [timeNow]. It protects the integrity of the\n     * heap data structure in spite of potential non-monotonicity of `nanoTime()` source.\n     * The invariant is that for every scheduled [DelayedTask]:\n     *\n     * ```\n     * delayedTask.nanoTime - timeNow >= 0\n     * ```\n     *\n     * So the comparison of scheduled tasks via [DelayedTask.compareTo] is always stable as\n     * scheduled [DelayedTask.nanoTime] can be at most [Long.MAX_VALUE] apart. This invariant is maintained when\n     * new tasks are added by [DelayedTask.scheduleTask] function and it cannot be violated when tasks are removed\n     * (so there is nothing special to do there).\n     */\n    internal class DelayedTaskQueue(\n        @JvmField var timeNow: Long\n    ) : ThreadSafeHeap<DelayedTask>()\n}\n\ninternal expect fun createEventLoop(): EventLoop\n\ninternal expect fun nanoTime(): Long\n\ninternal expect object DefaultExecutor {\n    fun enqueue(task: Runnable)\n}\n\n/**\n * Used by Darwin targets to wrap a [Runnable.run] call in an Objective-C Autorelease Pool. It is a no-op on JVM, JS and\n * non-Darwin native targets.\n *\n * Coroutines on Darwin targets can call into the Objective-C world, where a callee may push a to-be-returned object to\n * the Autorelease Pool, so as to avoid a premature ARC release before it reaches the caller. This means the pool must\n * be eventually drained to avoid leaks. Since Kotlin Coroutines does not use [NSRunLoop], which provides automatic\n * pool management, it must manage the pool creation and pool drainage manually.\n */\ninternal expect inline fun platformAutoreleasePool(crossinline block: () -> Unit)\n```\n[end of kotlinx-coroutines-core/common/src/EventLoop.common.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 2448,
+            "endIndex": 2808,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 2751,
+            "endIndex": 3169,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 3102,
+            "endIndex": 3506,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 3330,
+            "endIndex": 3615,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 12747,
+            "endIndex": 13299,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 13050,
+            "endIndex": 13367,
+            "uri": "https://cloud.tencent.com/developer/article/1334825",
+            "license": ""
+          },
+          {
+            "startIndex": 13336,
+            "endIndex": 13531,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 22990,
+            "endIndex": 23354,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 26937,
+            "endIndex": 27122,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 26967,
+            "endIndex": 27302,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 27664,
+            "endIndex": 28028,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 27835,
+            "endIndex": 28167,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 34259,
+            "endIndex": 34619,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 34562,
+            "endIndex": 34980,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 34913,
+            "endIndex": 35317,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 35141,
+            "endIndex": 35426,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 36786,
+            "endIndex": 37100,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 38697,
+            "endIndex": 38901,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 39198,
+            "endIndex": 39759,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 39510,
+            "endIndex": 39836,
+            "uri": "https://cloud.tencent.com/developer/article/1334825",
+            "license": ""
+          },
+          {
+            "startIndex": 39805,
+            "endIndex": 40009,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 42841,
+            "endIndex": 43045,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 47007,
+            "endIndex": 47367,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 47310,
+            "endIndex": 47728,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 47661,
+            "endIndex": 48065,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 47889,
+            "endIndex": 48174,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 52921,
+            "endIndex": 53248,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 56154,
+            "endIndex": 56383,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 59715,
+            "endIndex": 59923,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 59928,
+            "endIndex": 60346,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 60279,
+            "endIndex": 60550,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 60687,
+            "endIndex": 60882,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 62506,
+            "endIndex": 62693,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 62565,
+            "endIndex": 62729,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 62764,
+            "endIndex": 63082,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 63375,
+            "endIndex": 63564,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 64706,
+            "endIndex": 65066,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 65009,
+            "endIndex": 65427,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 65360,
+            "endIndex": 65764,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 65588,
+            "endIndex": 65873,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 66044,
+            "endIndex": 66252,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 66257,
+            "endIndex": 66675,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 66608,
+            "endIndex": 66879,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 67084,
+            "endIndex": 67279,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 68338,
+            "endIndex": 68503,
+            "uri": "https://juejin.cn/post/6926695962354122765",
+            "license": ""
+          },
+          {
+            "startIndex": 70976,
+            "endIndex": 71327,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 72640,
+            "endIndex": 73215,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 72943,
+            "endIndex": 73290,
+            "uri": "https://cloud.tencent.com/developer/article/1334825",
+            "license": ""
+          },
+          {
+            "startIndex": 73259,
+            "endIndex": 73454,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 73498,
+            "endIndex": 73706,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 73711,
+            "endIndex": 74129,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 74062,
+            "endIndex": 74466,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 74290,
+            "endIndex": 74565,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 76178,
+            "endIndex": 76406,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 76460,
+            "endIndex": 76655,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 76675,
+            "endIndex": 77035,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 76978,
+            "endIndex": 77396,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 77329,
+            "endIndex": 77733,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 77557,
+            "endIndex": 77842,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 77941,
+            "endIndex": 78149,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 78154,
+            "endIndex": 78471,
+            "uri": "https://cloud.tencent.com/developer/article/1334825",
+            "license": ""
+          },
+          {
+            "startIndex": 81288,
+            "endIndex": 81538,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 81477,
+            "endIndex": 81605,
+            "uri": "https://atoulme.github.io/kotlinx.coroutines/kotlinx-coroutines-core/kotlinx.coroutines.experimental/index.html",
+            "license": ""
+          },
+          {
+            "startIndex": 81577,
+            "endIndex": 82680,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 82691,
+            "endIndex": 82882,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 82902,
+            "endIndex": 83199,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 83215,
+            "endIndex": 83495,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 83412,
+            "endIndex": 83588,
+            "uri": "https://juejin.cn/post/7126390088061157389",
+            "license": ""
+          },
+          {
+            "startIndex": 83605,
+            "endIndex": 83770,
+            "uri": "https://juejin.cn/post/6926695962354122765",
+            "license": ""
+          },
+          {
+            "startIndex": 83635,
+            "endIndex": 84200,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 84221,
+            "endIndex": 84419,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 84294,
+            "endIndex": 84991,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 84963,
+            "endIndex": 85459,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 85389,
+            "endIndex": 85825,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 85848,
+            "endIndex": 86159,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 86172,
+            "endIndex": 86456,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 86335,
+            "endIndex": 86819,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 86665,
+            "endIndex": 86903,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 86913,
+            "endIndex": 87080,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 86955,
+            "endIndex": 87464,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 87422,
+            "endIndex": 87917,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 87790,
+            "endIndex": 88126,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 88126,
+            "endIndex": 88440,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 88401,
+            "endIndex": 88798,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 88753,
+            "endIndex": 89284,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 89153,
+            "endIndex": 89425,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 89329,
+            "endIndex": 89625,
+            "uri": "https://www.jianshu.com/p/30f61d5c7568",
+            "license": ""
+          },
+          {
+            "startIndex": 89469,
+            "endIndex": 90163,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 90014,
+            "endIndex": 90495,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 90468,
+            "endIndex": 90676,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 90681,
+            "endIndex": 91099,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 91032,
+            "endIndex": 91436,
+            "uri": "https://www.jianshu.com/p/2bcd6e21b496",
+            "license": ""
+          },
+          {
+            "startIndex": 91260,
+            "endIndex": 91534,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 91603,
+            "endIndex": 91771,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 91647,
+            "endIndex": 91894,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 91800,
+            "endIndex": 92150,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 91975,
+            "endIndex": 92937,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 92742,
+            "endIndex": 93236,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 92990,
+            "endIndex": 93843,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 93632,
+            "endIndex": 94088,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 93906,
+            "endIndex": 94455,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 94441,
+            "endIndex": 94841,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 94692,
+            "endIndex": 95078,
+            "uri": "https://www.jianshu.com/p/30f61d5c7568",
+            "license": ""
+          },
+          {
+            "startIndex": 94909,
+            "endIndex": 95183,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 95161,
+            "endIndex": 95514,
+            "uri": "https://www.jianshu.com/p/30f61d5c7568",
+            "license": ""
+          },
+          {
+            "startIndex": 95345,
+            "endIndex": 95646,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 95582,
+            "endIndex": 95948,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 95784,
+            "endIndex": 96400,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 96248,
+            "endIndex": 96806,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 96662,
+            "endIndex": 97020,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 96865,
+            "endIndex": 97257,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 97091,
+            "endIndex": 97515,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 97341,
+            "endIndex": 97878,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 97818,
+            "endIndex": 100320,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 100116,
+            "endIndex": 100646,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 100621,
+            "endIndex": 102365,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          },
+          {
+            "startIndex": 102249,
+            "endIndex": 103079,
+            "uri": "https://github.com/Kotlin/kotlinx.coroutines",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 10987,
+    "candidatesTokenCount": 5626,
+    "totalTokenCount": 36428,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 10987
+      }
+    ],
+    "thoughtsTokenCount": 19815
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "ZIdDaKiIEpOv1MkPiquFyQY"
+}

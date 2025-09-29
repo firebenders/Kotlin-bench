@@ -157,7 +157,7 @@ def extract_full_file_patch(response):
     if matches:
         # Join all matched blocks with newlines
         return "\n".join(matches)
-    
+
     return None
 
 
@@ -366,3 +366,4 @@ def update_model_patches(path: str):
             process_jsonl_file(jsonl_file)
     else:
         raise ValueError(f"Path {path} is not a JSONL file or directory")
+

@@ -1,0 +1,183 @@
+To solve the issue of the display order bug for notes in the Card Browser, we need to make several changes to the code.
+
+### Step 1: Understand the Problem
+The problem is that when the user switches to "notes" mode in the Card Browser and changes the display order, it doesn't stick. The order reverts to "by created time" (oldest to newest) after certain actions.
+
+### Step 2: Identify the Relevant Code
+The relevant code is in `CardBrowser.kt` and `SortType.kt`. The `CardBrowser` class handles the display and sorting of cards/notes, and `SortType` is an enum that defines the different sorting options.
+
+### Step 3: Analyze the Issue
+The issue arises because the sorting order for notes is not being saved properly when the user switches between "cards" and "notes" mode. The current implementation uses a single sorting configuration for both cards and notes.
+
+### Step 4: Implement the Solution
+To fix this, we need to store the sorting configuration separately for cards and notes. We can achieve this by modifying the `SortType` enum and the `CardBrowser` class.
+
+### Step 5: Modify the `SortType` Enum
+We need to modify the `save` method in `SortType` to store the sorting configuration in a way that distinguishes between cards and notes.
+
+```kotlin
+fun saveForCardsOrNotes(config: Config, preferences: SharedPreferences, cardsOrNotes: CardsOrNotes) {
+    when (cardsOrNotes) {
+        CARDS -> saveForCards(config, preferences)
+        NOTES -> saveForNotes(config, preferences)
+    }
+}
+
+private fun saveForCards(config: Config, preferences: SharedPreferences) {
+    // existing implementation for cards
+}
+
+private fun saveForNotes(config: Config, preferences: SharedPreferences) {
+    config.set("sortType", this.ankiSortType ?: SORT_FIELD.ankiSortType)
+    config.set("browserNoteSortBackwards", mOrderAsc)
+    preferences.edit {
+        putBoolean("cardBrowserNoSortingNotes", this@SortType == NO_SORTING)
+    }
+}
+```
+
+### Step 6: Update `CardBrowser` to Use the New `SortType` Methods
+We need to update `CardBrowser` to use the new `saveForCardsOrNotes` method when saving the sorting configuration.
+
+```kotlin
+changeCardOrder(SortType.fromCardBrowserLabelIndex(which))
+...
+mOrder.saveForCardsOrNotes(getColUnsafe.config, baseContext.sharedPrefs(), cardsOrNotes)
+```
+
+### Step 7: Load the Correct Sorting Configuration
+When loading the sorting configuration, we need to check whether we are in "cards" or "notes" mode and load the corresponding configuration.
+
+```kotlin
+mOrder = SortType.fromCol(getColUnsafe.config, baseContext.sharedPrefs(), cardsOrNotes)
+```
+
+### Step 8: Implement `fromCol` for `CardsOrNotes`
+We need to add a new method to `SortType` that loads the sorting configuration based on whether we are in "cards" or "notes" mode.
+
+```kotlin
+fun fromCol(config: Config, preferences: SharedPreferences, cardsOrNotes: CardsOrNotes): SortType {
+    return when (cardsOrNotes) {
+        CARDS -> fromColForCards(config, preferences)
+        NOTES -> fromColForNotes(config, preferences)
+    }
+}
+
+private fun fromColForCards(config: Config, preferences: SharedPreferences): SortType {
+    // existing implementation for cards
+}
+
+private fun fromColForNotes(config: Config, preferences: SharedPreferences): SortType {
+    val colOrder = config.get<String>("sortType")
+    val type = entries.firstOrNull { it.ankiSortType == colOrder } ?: NO_SORTING
+    val sortBackwards = config.get<Boolean>("browserNoteSortBackwards") ?: false
+    if (type == SORT_FIELD && preferences.getBoolean("cardBrowserNoSortingNotes", false)) {
+        return NO_SORTING
+    }
+    return type.also { it.mOrderAsc = sortBackwards }
+}
+```
+
+### Step 9: Provide the Revised Files
+Here are the revised files:
+
+[start of AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt]
+```kotlin
+// ...
+
+// Finish initializing the activity after the collection has been correctly loaded
+override fun onCollectionLoaded(col: com.ichi2.libanki.Collection) {
+    super.onCollectionLoaded(col)
+    Timber.d("onCollectionLoaded()")
+    registerExternalStorageListener()
+    val preferences = baseContext.sharedPrefs()
+
+    mOrder = SortType.fromCol(col.config, preferences, cardsOrNotes)
+    mOrderAsc = mOrder.mOrderAsc
+    // ...
+}
+
+@VisibleForTesting(otherwise = VisibleForTesting.PROTECTED)
+fun changeCardOrder(which: SortType) {
+    if (which != mOrder) {
+        mOrder = which
+        mOrderAsc = false
+        mOrder.saveForCardsOrNotes(getColUnsafe.config, baseContext.sharedPrefs(), cardsOrNotes)
+        searchCards()
+    } else if (which != SortType.NO_SORTING) {
+        // if the same element is selected again, reverse the order
+        mOrderAsc = !mOrderAsc
+        mOrder.mOrderAsc = mOrderAsc
+        getColUnsafe.config.set("sortBackwards", mOrderAsc)
+        mCards.reverse()
+        updateList()
+    }
+}
+
+// ...
+}
+```
+
+[start of AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt]
+```kotlin
+package com.ichi2.anki.model
+
+// ...
+
+@Suppress("unused") // 'unused' entries are iterated over by .entries
+enum class SortType(val ankiSortType: String?, val cardBrowserLabelIndex: Int) {
+    // ...
+
+    fun saveForCardsOrNotes(config: Config, preferences: SharedPreferences, cardsOrNotes: CardsOrNotes) {
+        when (cardsOrNotes) {
+            CARDS -> saveForCards(config, preferences)
+            NOTES -> saveForNotes(config, preferences)
+        }
+    }
+
+    private fun saveForCards(config: Config, preferences: SharedPreferences) {
+        config.set("sortType", this.ankiSortType ?: SORT_FIELD.ankiSortType)
+        preferences.edit {
+            putBoolean("cardBrowserNoSorting", this@SortType == NO_SORTING)
+        }
+    }
+
+    private fun saveForNotes(config: Config, preferences: SharedPreferences) {
+        config.set("sortType", this.ankiSortType ?: SORT_FIELD.ankiSortType)
+        config.set("browserNoteSortBackwards", mOrderAsc)
+        preferences.edit {
+            putBoolean("cardBrowserNoSortingNotes", this@SortType == NO_SORTING)
+        }
+    }
+
+    companion object {
+        fun fromCol(config: Config, preferences: SharedPreferences, cardsOrNotes: CardsOrNotes): SortType {
+            return when (cardsOrNotes) {
+                CARDS -> fromColForCards(config, preferences)
+                NOTES -> fromColForNotes(config, preferences)
+            }
+        }
+
+        private fun fromColForCards(config: Config, preferences: SharedPreferences): SortType {
+            val colOrder = config.get<String>("sortType")
+            val type = entries.firstOrNull { it.ankiSortType == colOrder } ?: NO_SORTING
+            if (type == SORT_FIELD && preferences.getBoolean("cardBrowserNoSorting", false)) {
+                return NO_SORTING
+            }
+            return type
+        }
+
+        private fun fromColForNotes(config: Config, preferences: SharedPreferences): SortType {
+            val colOrder = config.get<String>("sortType")
+            val type = entries.firstOrNull { it.ankiSortType == colOrder } ?: NO_SORTING
+            val sortBackwards = config.get<Boolean>("browserNoteSortBackwards") ?: false
+            if (type == SORT_FIELD && preferences.getBoolean("cardBrowserNoSortingNotes", false)) {
+                return NO_SORTING
+            }
+            return type.also { it.mOrderAsc = sortBackwards }
+        }
+
+        // ...
+    }
+}
+```

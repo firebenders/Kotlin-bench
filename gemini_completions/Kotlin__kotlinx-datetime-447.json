@@ -1,0 +1,1294 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I will address the two specified issues from the issue statement:\n1.  The inconsistency in parsing `LocalDate` and `LocalDateTime` between `parse(s)` and `Formats.ISO.parse(s)` on JVM and JS platforms due to delegation to platform-specific parsers.\n2.  The incorrect parsing of \"P\" as a valid `DateTimePeriod`, which is inconsistent with ISO 8601.\n\nTo fix the first issue, I will modify `LocalDate.parse` and `LocalDateTime.parse` in both JVM and JS implementations to consistently use the library's own parser, which is more lenient with leading zeros in the year. This is achieved by removing the special handling for `Formats.ISO` and always delegating to `format.parse(input)`.\n\nTo fix the second issue, I will add a check in `DateTimePeriod.parse` to ensure that a period string contains at least one component, thus making it reject \"P\" as invalid.\n\nHere are the files I will be changing:\n\n*   `core/common/src/DateTimePeriod.kt`\n*   `core/commonJs/src/LocalDate.kt`\n*   `core/commonJs/src/LocalDateTime.kt`\n*   `core/jvm/src/LocalDate.kt`\n*   `core/jvm/src/LocalDateTime.kt`\n\nHere are the revised contents of the files:\n\n[start of core/common/src/DateTimePeriod.kt]\n/*\n * Copyright 2019-2020 JetBrains s.r.o.\n * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.\n */\n\npackage kotlinx.datetime\n\nimport kotlinx.datetime.internal.*\nimport kotlinx.datetime.serializers.DatePeriodIso8601Serializer\nimport kotlinx.datetime.serializers.DateTimePeriodIso8601Serializer\nimport kotlinx.datetime.serializers.DatePeriodComponentSerializer\nimport kotlinx.datetime.serializers.DateTimePeriodComponentSerializer\nimport kotlin.math.*\nimport kotlin.time.Duration\nimport kotlinx.serialization.Serializable\n\n/**\n * A difference between two [instants][Instant], decomposed into date and time components.\n *\n * The date components are: [years] ([DateTimeUnit.YEAR]), [months] ([DateTimeUnit.MONTH]), and [days] ([DateTimeUnit.DAY]).\n *\n * The time components are: [hours] ([DateTimeUnit.HOUR]), [minutes] ([DateTimeUnit.MINUTE]),\n * [seconds] ([DateTimeUnit.SECOND]), and [nanoseconds] ([DateTimeUnit.NANOSECOND]).\n *\n * The time components are not independent and are always normalized together.\n * Likewise, months are normalized together with years.\n * For example, there is no difference between `DateTimePeriod(months = 24, hours = 2, minutes = 63)` and\n * `DateTimePeriod(years = 2, hours = 3, minutes = 3)`.\n *\n * All components can also be negative: for example, `DateTimePeriod(months = -5, days = 6, hours = -3)`.\n * Whereas `months = 5` means \"5 months after,\" `months = -5` means \"5 months earlier.\"\n *\n * A constant time interval that consists of a single non-zero component (like \"yearly\" or \"quarterly\") should be\n * represented by a [DateTimeUnit] directly instead of a [DateTimePeriod]:\n * for example, instead of `DateTimePeriod(months = 6)`, one could use `DateTimeUnit.MONTH * 6`.\n * This provides a wider variety of operations: for example, finding how many such intervals fit between two instants\n * or dates or adding a multiple of such intervals at once.\n *\n * ### Interaction with other entities\n *\n * [DateTimePeriod] can be returned from [Instant.periodUntil], representing the difference between two instants.\n * Conversely, there is an [Instant.plus] overload that accepts a [DateTimePeriod] and returns a new instant.\n *\n * [DatePeriod] is a subtype of [DateTimePeriod] that only stores the date components and has all time components equal\n * to zero.\n *\n * [DateTimePeriod] can be thought of as a combination of a [Duration] and a [DatePeriod], as it contains both the\n * time components of [Duration] and the date components of [DatePeriod].\n * [Duration.toDateTimePeriod] can be used to convert a [Duration] to the corresponding [DateTimePeriod].\n *\n * ### Construction, serialization, and deserialization\n *\n * When a [DateTimePeriod] is constructed in any way, a [DatePeriod] value, which is a subtype of [DateTimePeriod],\n * will be returned if all time components happen to be zero.\n *\n * A `DateTimePeriod` can be constructed using the constructor function with the same name.\n * See sample 1.\n *\n * [parse] and [toString] methods can be used to obtain a [DateTimePeriod] from and convert it to a string in the\n * ISO 8601 extended format.\n * See sample 2.\n *\n * `DateTimePeriod` can also be returned as the result of instant arithmetic operations (see [Instant.periodUntil]).\n *\n * Additionally, there are several `kotlinx-serialization` serializers for [DateTimePeriod]:\n * - [DateTimePeriodIso8601Serializer] for the ISO 8601 format;\n * - [DateTimePeriodComponentSerializer]  for an object with components.\n *\n * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.construction\n * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.simpleParsingAndFormatting\n */\n@Serializable(with = DateTimePeriodIso8601Serializer::class)\n// TODO: could be error-prone without explicitly named params\npublic sealed class DateTimePeriod {\n    internal abstract val totalMonths: Int\n\n    /**\n     * The number of calendar days. Can be negative.\n     *\n     * Note that a calendar day is not identical to 24 hours, see [DateTimeUnit.DayBased] for details.\n     * Also, this field does not get normalized together with months, so values larger than 31 can be present.\n     *\n     * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.valueNormalization\n     */\n    public abstract val days: Int\n    internal abstract val totalNanoseconds: Long\n\n    /**\n     * The number of whole years. Can be negative.\n     *\n     * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.valueNormalization\n     */\n    public val years: Int get() = totalMonths / 12\n\n    /**\n     * The number of months in this period that don't form a whole year, so this value is always in `(-11..11)`.\n     *\n     * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.valueNormalization\n     */\n    public val months: Int get() = totalMonths % 12\n\n    /**\n     * The number of whole hours in this period. Can be negative.\n     *\n     * This field does not get normalized together with days, so values larger than 23 or smaller than -23 can be present.\n     *\n     * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.valueNormalization\n     */\n    public open val hours: Int get() = (totalNanoseconds / 3_600_000_000_000).toInt()\n\n    /**\n     * The number of whole minutes in this period that don't form a whole hour, so this value is always in `(-59..59)`.\n     *\n     * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.valueNormalization\n     */\n    public open val minutes: Int get() = ((totalNanoseconds % 3_600_000_000_000) / 60_000_000_000).toInt()\n\n    /**\n     * The number of whole seconds in this period that don't form a whole minute, so this value is always in `(-59..59)`.\n     *\n     * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.valueNormalization\n     */\n    public open val seconds: Int get() = ((totalNanoseconds % 60_000_000_000) / NANOS_PER_ONE).toInt()\n\n    /**\n     * The number of whole nanoseconds in this period that don't form a whole second, so this value is always in\n     * `(-999_999_999..999_999_999)`.\n     *\n     * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.valueNormalization\n     */\n    public open val nanoseconds: Int get() = (totalNanoseconds % NANOS_PER_ONE).toInt()\n\n    private fun allNonpositive() =\n        totalMonths <= 0 && days <= 0 && totalNanoseconds <= 0 && (totalMonths or days != 0 || totalNanoseconds != 0L)\n\n    /**\n     * Converts this period to the ISO 8601 string representation for durations, for example, `P2M1DT3H`.\n     *\n     * Note that the ISO 8601 duration is not the same as [Duration],\n     * but instead includes the date components, like [DateTimePeriod] does.\n     *\n     * Examples of the output:\n     * - `P2Y4M-1D`: two years, four months, minus one day;\n     * - `-P2Y4M1D`: minus two years, minus four months, minus one day;\n     * - `P1DT3H2M4.123456789S`: one day, three hours, two minutes, four seconds, 123456789 nanoseconds;\n     * - `P1DT-3H-2M-4.123456789S`: one day, minus three hours, minus two minutes,\n     *   minus four seconds, minus 123456789 nanoseconds;\n     *\n     * See ISO-8601-1:2019, 5.5.2.2a)\n     *\n     * @see DateTimePeriod.parse for the detailed description of the format.\n     * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.toStringSample\n     */\n    override fun toString(): String = buildString {\n        val sign = if (allNonpositive()) { append('-'); -1 } else 1\n        append('P')\n        if (years != 0) append(years * sign).append('Y')\n        if (months != 0) append(months * sign).append('M')\n        if (days != 0) append(days * sign).append('D')\n        var t = \"T\"\n        if (hours != 0) append(t).append(hours * sign).append('H').also { t = \"\" }\n        if (minutes != 0) append(t).append(minutes * sign).append('M').also { t = \"\" }\n        if (seconds or nanoseconds != 0) {\n            append(t)\n            append(when {\n                seconds != 0 -> seconds * sign\n                nanoseconds * sign < 0 -> \"-0\"\n                else -> \"0\"\n            })\n            if (nanoseconds != 0) append('.').append((nanoseconds.absoluteValue).toString().padStart(9, '0'))\n            append('S')\n        }\n\n        if (length == 1) append(\"0D\")\n    }\n\n    override fun equals(other: Any?): Boolean {\n        if (this === other) return true\n        if (other !is DateTimePeriod) return false\n\n        if (totalMonths != other.totalMonths) return false\n        if (days != other.days) return false\n        if (totalNanoseconds != other.totalNanoseconds) return false\n\n        return true\n    }\n\n    override fun hashCode(): Int {\n        var result = totalMonths\n        result = 31 * result + days\n        result = 31 * result + totalNanoseconds.hashCode()\n        return result\n    }\n\n    public companion object {\n        /**\n         * Parses a ISO 8601 duration string as a [DateTimePeriod].\n         *\n         * If the time components are absent or equal to zero, returns a [DatePeriod].\n         *\n         * Note that the ISO 8601 duration is not the same as [Duration],\n         * but instead includes the date components, like [DateTimePeriod] does.\n         *\n         * Examples of durations in the ISO 8601 format:\n         * - `P1Y40D` is one year and 40 days\n         * - `-P1DT1H` is minus (one day and one hour)\n         * - `P1DT-1H` is one day minus one hour\n         * - `-PT0.000000001S` is minus one nanosecond\n         *\n         * The format is defined as follows:\n         * - First, optionally, a `-` or `+`.\n         *   If `-` is present, the whole period after the `-` is negated: `-P-2M1D` is the same as `P2M-1D`.\n         * - Then, the letter `P`.\n         * - Optionally, the number of years, followed by `Y`.\n         * - Optionally, the number of months, followed by `M`.\n         * - Optionally, the number of weeks, followed by `W`.\n         * - Optionally, the number of days, followed by `D`.\n         * - The string can end here if there are no more time components.\n         *   If there are time components, the letter `T` is required.\n         * - Optionally, the number of hours, followed by `H`.\n         * - Optionally, the number of minutes, followed by `M`.\n         * - Optionally, the number of seconds, followed by `S`.\n         *   Seconds can optionally have a fractional part with up to nine digits.\n         *   The fractional part is separated with a `.`.\n         *\n         * An explicit `+` or `-` sign can be prepended to any number.\n         * `-` means that the number is negative, and `+` has no effect.\n         *\n         * See ISO-8601-1:2019, 5.5.2.2a) and 5.5.2.2b).\n         * We combine the two formats into one by allowing the number of weeks to go after the number of months\n         * and before the number of days.\n         *\n         * @throws IllegalArgumentException if the text cannot be parsed or the boundaries of [DateTimePeriod] are\n         * exceeded.\n         * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.parsing\n         */\n        public fun parse(text: String): DateTimePeriod {\n            fun parseException(message: String, position: Int): Nothing =\n                throw DateTimeFormatException(\"Parse error at char $position: $message\")\n            val START = 0\n            val AFTER_P = 1\n            val AFTER_YEAR = 2\n            val AFTER_MONTH = 3\n            val AFTER_WEEK = 4\n            val AFTER_DAY = 5\n            val AFTER_T = 6\n            val AFTER_HOUR = 7\n            val AFTER_MINUTE = 8\n            val AFTER_SECOND_AND_NANO = 9\n\n            var state = START\n            // next unread character\n            var i = 0\n            var sign = 1\n            var years = 0\n            var months = 0\n            var weeks = 0\n            var days = 0\n            var hours = 0\n            var minutes = 0\n            var seconds = 0\n            var nanoseconds = 0\n            while (true) {\n                if (i >= text.length) {\n                    if (state == START)\n                        parseException(\"Unexpected end of input; 'P' designator is required\", i)\n                    if (state == AFTER_P)\n                        parseException(\"The period must have at least one component\", i)\n                    if (state == AFTER_T)\n                        parseException(\"Unexpected end of input; at least one time component is required after 'T'\", i)\n                    val daysTotal = when (val n = days.toLong() + weeks * 7) {\n                        in Int.MIN_VALUE..Int.MAX_VALUE -> n.toInt()\n                        else -> parseException(\"The total number of days under 'D' and 'W' designators should fit into an Int\", 0)\n                    }\n                    return DateTimePeriod(years, months, daysTotal, hours, minutes, seconds, nanoseconds.toLong())\n                }\n                if (state == START) {\n                    if (i + 1 >= text.length && (text[i] == '+' || text[i] == '-'))\n                        parseException(\"Unexpected end of string; 'P' designator is required\", i)\n                    when (text[i]) {\n                        '+', '-' -> {\n                            if (text[i] == '-')\n                                sign = -1\n                            if (text[i + 1] != 'P')\n                                parseException(\"Expected 'P', got '${text[i + 1]}'\", i + 1)\n                            i += 2\n                        }\n                        'P' -> { i += 1 }\n                        else -> parseException(\"Expected '+', '-', 'P', got '${text[i]}'\", i)\n                    }\n                    state = AFTER_P\n                    continue\n                }\n                var localSign = sign\n                val iStart = i\n                when (text[i]) {\n                    '+', '-' -> {\n                        if (text[i] == '-') localSign *= -1\n                        i += 1\n                        if (i >= text.length || text[i] !in '0'..'9')\n                            parseException(\"A number expected after '${text[i]}'\", i)\n                    }\n                    in '0'..'9' -> { }\n                    'T' -> {\n                        if (state >= AFTER_T)\n                            parseException(\"Only one 'T' designator is allowed\", i)\n                        state = AFTER_T\n                        i += 1\n                        continue\n                    }\n                }\n                var number = 0L\n                while (i < text.length && text[i] in '0'..'9') {\n                    try {\n                        number = safeAdd(safeMultiply(number, 10), (text[i] - '0').toLong())\n                    } catch (e: ArithmeticException) {\n                        parseException(\"The number is too large\", iStart)\n                    }\n                    i += 1\n                }\n                number *= localSign\n                if (i == text.length)\n                    parseException(\"Expected a designator after the numerical value\", i)\n                val wrongOrder = \"Wrong component order: should be 'Y', 'M', 'W', 'D', then designator 'T', then 'H', 'M', 'S'\"\n                fun Long.toIntThrowing(component: Char): Int {\n                    if (this < Int.MIN_VALUE || this > Int.MAX_VALUE)\n                        parseException(\"Value $this does not fit into an Int, which is required for component '$component'\", iStart)\n                    return toInt()\n                }\n                when (text[i].uppercaseChar()) {\n                    'Y' -> {\n                        if (state >= AFTER_YEAR)\n                            parseException(wrongOrder, i)\n                        state = AFTER_YEAR\n                        years = number.toIntThrowing('Y')\n                    }\n                    'M' -> {\n                        if (state >= AFTER_T) {\n                            // Minutes\n                            if (state >= AFTER_MINUTE)\n                                parseException(wrongOrder, i)\n                            state = AFTER_MINUTE\n                            minutes = number.toIntThrowing('M')\n                        } else {\n                            // Months\n                            if (state >= AFTER_MONTH)\n                                parseException(wrongOrder, i)\n                            state = AFTER_MONTH\n                            months = number.toIntThrowing('M')\n                        }\n                    }\n                    'W' -> {\n                        if (state >= AFTER_WEEK)\n                            parseException(wrongOrder, i)\n                        state = AFTER_WEEK\n                        weeks = number.toIntThrowing('W')\n                    }\n                    'D' -> {\n                        if (state >= AFTER_DAY)\n                            parseException(wrongOrder, i)\n                        state = AFTER_DAY\n                        days = number.toIntThrowing('D')\n                    }\n                    'H' -> {\n                        if (state >= AFTER_HOUR || state < AFTER_T)\n                            parseException(wrongOrder, i)\n                        state = AFTER_HOUR\n                        hours = number.toIntThrowing('H')\n                    }\n                    'S' -> {\n                        if (state >= AFTER_SECOND_AND_NANO || state < AFTER_T)\n                            parseException(wrongOrder, i)\n                        state = AFTER_SECOND_AND_NANO\n                        seconds = number.toIntThrowing('S')\n                    }\n                    '.', ',' -> {\n                        i += 1\n                        if (i >= text.length)\n                            parseException(\"Expected designator 'S' after ${text[i - 1]}\", i)\n                        val iStartFraction = i\n                        while (i < text.length && text[i] in '0'..'9')\n                            i += 1\n                        val fractionLength = i - iStartFraction\n                        if (fractionLength > 9)\n                            parseException(\"Only the nanosecond fractions of a second are supported\", iStartFraction)\n                        val fractionalPart = text.substring(iStartFraction, i) + \"0\".repeat(9 - fractionLength)\n                        nanoseconds = fractionalPart.toInt(10) * localSign\n                        if (text[i] != 'S')\n                            parseException(\"Expected the 'S' designator after a fraction\", i)\n                        if (state >= AFTER_SECOND_AND_NANO || state < AFTER_T)\n                            parseException(wrongOrder, i)\n                        state = AFTER_SECOND_AND_NANO\n                        seconds = number.toIntThrowing('S')\n                    }\n                    else -> parseException(\"Expected a designator after the numerical value\", i)\n                }\n                i += 1\n           }\n        }\n    }\n}\n\n/**\n * @suppress\n */\n@Deprecated(\"Removed to support more idiomatic code. See https://github.com/Kotlin/kotlinx-datetime/issues/339\", ReplaceWith(\"DateTimePeriod.parse(this)\"), DeprecationLevel.WARNING)\npublic fun String.toDateTimePeriod(): DateTimePeriod = DateTimePeriod.parse(this)\n\n/**\n * A special case of [DateTimePeriod] that only stores the date components and has all time components equal to zero.\n *\n * A `DatePeriod` is automatically returned from all constructor functions for [DateTimePeriod] if it turns out that\n * the time components are zero.\n *\n * ```\n * DateTimePeriod.parse(\"P1Y3D\") as DatePeriod // 1 year and 3 days\n * ```\n *\n * Additionally, [DatePeriod] has its own constructor, the [parse] function that will fail if any of the time components\n * are not zero, and [DatePeriodIso8601Serializer] and [DatePeriodComponentSerializer], mirroring those of\n * [DateTimePeriod].\n *\n * `DatePeriod` values are used in operations on [LocalDates][LocalDate] and are returned from operations\n * on [LocalDates][LocalDate], but they also can be passed anywhere a [DateTimePeriod] is expected.\n *\n * On the JVM, there are `DatePeriod.toJavaPeriod()` and `java.time.Period.toKotlinDatePeriod()`\n * extension functions to convert between `kotlinx.datetime` and `java.time` objects used for the same purpose.\n *\n * @sample kotlinx.datetime.test.samples.DatePeriodSamples.simpleParsingAndFormatting\n */\n@Serializable(with = DatePeriodIso8601Serializer::class)\npublic class DatePeriod internal constructor(\n    internal override val totalMonths: Int,\n    override val days: Int,\n) : DateTimePeriod() {\n    /**\n     * Constructs a new [DatePeriod].\n     *\n     * It is recommended to always name the arguments explicitly when constructing this manually,\n     * like `DatePeriod(years = 1, months = 12, days = 16)`.\n     *\n     * The passed numbers are not stored as is but are normalized instead for human readability, so, for example,\n     * `DateTimePeriod(months = 24, days = 41)` becomes `DateTimePeriod(years = 2, days = 41)`.\n     *\n     * If only a single component is set and is always non-zero and is semantically a fixed time interval\n     * (like \"yearly\" or \"quarterly\"), please consider using a multiple of [DateTimeUnit.DateBased] instead.\n     * For example, instead of `DatePeriod(months = 6)`, one can use `DateTimeUnit.MONTH * 6`.\n     *\n     * @throws IllegalArgumentException if the total number of months in [years] and [months] overflows an [Int].\n     * @sample kotlinx.datetime.test.samples.DatePeriodSamples.construction\n     */\n    public constructor(years: Int = 0, months: Int = 0, days: Int = 0): this(totalMonths(years, months), days)\n    // avoiding excessive computations\n    /** The number of whole hours in this period. Always equal to zero. */\n    override val hours: Int get() = 0\n\n    /** The number of whole minutes in this period. Always equal to zero. */\n    override val minutes: Int get() = 0\n\n    /** The number of whole seconds in this period. Always equal to zero. */\n    override val seconds: Int get() = 0\n\n    /** The number of nanoseconds in this period. Always equal to zero. */\n    override val nanoseconds: Int get() = 0\n    internal override val totalNanoseconds: Long get() = 0\n\n    public companion object {\n        /**\n         * Parses the ISO 8601 duration representation as a [DatePeriod], for example, `P1Y2M30D`.\n         *\n         * This function is equivalent to [DateTimePeriod.parse], but will fail if any of the time components are not\n         * zero.\n         *\n         * @throws IllegalArgumentException if the text cannot be parsed, the boundaries of [DatePeriod] are exceeded,\n         * or any time components are not zero.\n         *\n         * @see DateTimePeriod.parse\n         * @sample kotlinx.datetime.test.samples.DatePeriodSamples.parsing\n         */\n        public fun parse(text: String): DatePeriod =\n            when (val period = DateTimePeriod.parse(text)) {\n                is DatePeriod -> period\n                else -> throw DateTimeFormatException(\"Period $period (parsed from string $text) is not date-based\")\n            }\n    }\n}\n\n/**\n * @suppress\n */\n@Deprecated(\"Removed to support more idiomatic code. See https://github.com/Kotlin/kotlinx-datetime/issues/339\", ReplaceWith(\"DatePeriod.parse(this)\"), DeprecationLevel.WARNING)\npublic fun String.toDatePeriod(): DatePeriod = DatePeriod.parse(this)\n\nprivate class DateTimePeriodImpl(\n    internal override val totalMonths: Int,\n    override val days: Int,\n    internal override val totalNanoseconds: Long,\n) : DateTimePeriod()\n\n// TODO: these calculations fit in a JS Number. Possible to do an expect/actual here.\nprivate fun totalMonths(years: Int, months: Int): Int =\n    when (val totalMonths = years.toLong() * 12 + months.toLong()) {\n        in Int.MIN_VALUE..Int.MAX_VALUE -> totalMonths.toInt()\n        else -> throw IllegalArgumentException(\"The total number of months in $years years and $months months overflows an Int\")\n    }\n\nprivate fun totalNanoseconds(hours: Int, minutes: Int, seconds: Int, nanoseconds: Long): Long {\n    val totalMinutes: Long = hours.toLong() * 60 + minutes\n    // absolute value at most 61 * Int.MAX_VALUE\n    val totalMinutesAsSeconds: Long = totalMinutes * 60\n    // absolute value at most 61 * 60 * Int.MAX_VALUE < 64 * 64 * 2^31 = 2^43\n    val minutesAndNanosecondsAsSeconds: Long = totalMinutesAsSeconds + nanoseconds / NANOS_PER_ONE\n    // absolute value at most 2^43 + 2^63 / 10^9 < 2^43 + 2^34 < 2^44\n    val totalSeconds = minutesAndNanosecondsAsSeconds + seconds\n    // absolute value at most 2^44 + 2^31 < 2^45\n    return try {\n        multiplyAndAdd(totalSeconds, 1_000_000_000, nanoseconds % NANOS_PER_ONE)\n    } catch (e: ArithmeticException) {\n        throw IllegalArgumentException(\"The total number of nanoseconds in $hours hours, $minutes minutes, $seconds seconds, and $nanoseconds nanoseconds overflows a Long\")\n    }\n}\n\ninternal fun buildDateTimePeriod(totalMonths: Int = 0, days: Int = 0, totalNanoseconds: Long): DateTimePeriod =\n    if (totalNanoseconds != 0L)\n        DateTimePeriodImpl(totalMonths, days, totalNanoseconds)\n    else\n        DatePeriod(totalMonths, days)\n\n/**\n * Constructs a new [DateTimePeriod]. If all the time components are zero, returns a [DatePeriod].\n *\n * It is recommended to always name the arguments explicitly when constructing this manually,\n * like `DateTimePeriod(years = 1, months = 12, days = 16)`.\n *\n * The passed numbers are not stored as is but are normalized instead for human readability, so, for example,\n * `DateTimePeriod(months = 24, days = 41)` becomes `DateTimePeriod(years = 2, days = 41)`.\n *\n * If only a single component is set and is always non-zero and is semantically a fixed time interval\n * (like \"yearly\" or \"quarterly\"), please consider using a multiple of [DateTimeUnit] instead.\n * For example, instead of `DateTimePeriod(months = 6)`, one can use `DateTimeUnit.MONTH * 6`.\n *\n * @throws IllegalArgumentException if the total number of months in [years] and [months] overflows an [Int].\n * @throws IllegalArgumentException if the total number of months in [hours], [minutes], [seconds] and [nanoseconds]\n * overflows a [Long].\n * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.constructorFunction\n */\npublic fun DateTimePeriod(\n    years: Int = 0,\n    months: Int = 0,\n    days: Int = 0,\n    hours: Int = 0,\n    minutes: Int = 0,\n    seconds: Int = 0,\n    nanoseconds: Long = 0\n): DateTimePeriod = buildDateTimePeriod(totalMonths(years, months), days,\n    totalNanoseconds(hours, minutes, seconds, nanoseconds))\n\n/**\n * Constructs a [DateTimePeriod] from a [Duration].\n *\n * If the duration value is too big to be represented as a [Long] number of nanoseconds,\n * the result will be [Long.MAX_VALUE] nanoseconds.\n *\n * **Pitfall**: a [DateTimePeriod] obtained this way will always have zero date components.\n * The reason is that even a [Duration] obtained via [Duration.Companion.days] just means a multiple of 24 hours,\n * whereas in `kotlinx-datetime`, a day is a calendar day, which can be different from 24 hours.\n * See [DateTimeUnit.DayBased] for details.\n *\n * @sample kotlinx.datetime.test.samples.DateTimePeriodSamples.durationToDateTimePeriod\n */\n// TODO: maybe it's more consistent to throw here on overflow?\npublic fun Duration.toDateTimePeriod(): DateTimePeriod = buildDateTimePeriod(totalNanoseconds = inWholeNanoseconds)\n\n/**\n * Adds two [DateTimePeriod] instances.\n *\n * **Pitfall**: given three instants, adding together the periods between the first and the second and between the\n * second and the third *does not* necessarily equal the period between the first and the third.\n *\n * @throws DateTimeArithmeticException if arithmetic overflow happens.\n */\npublic operator fun DateTimePeriod.plus(other: DateTimePeriod): DateTimePeriod = buildDateTimePeriod(\n    safeAdd(totalMonths, other.totalMonths),\n    safeAdd(days, other.days),\n    safeAdd(totalNanoseconds, other.totalNanoseconds),\n)\n\n/**\n * Adds two [DatePeriod] instances.\n *\n * **Pitfall**: given three dates, adding together the periods between the first and the second and between the\n * second and the third *does not* necessarily equal the period between the first and the third.\n *\n * @throws DateTimeArithmeticException if arithmetic overflow happens.\n */\npublic operator fun DatePeriod.plus(other: DatePeriod): DatePeriod = DatePeriod(\n    safeAdd(totalMonths, other.totalMonths),\n    safeAdd(days, other.days),\n)\n[end of core/common/src/DateTimePeriod.kt]\n[start of core/commonJs/src/LocalDate.kt]\n/*\n * Copyright 2019-2020 JetBrains s.r.o.\n * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.\n */\n\npackage kotlinx.datetime\n\nimport kotlinx.datetime.format.*\nimport kotlinx.datetime.serializers.LocalDateIso8601Serializer\nimport kotlinx.serialization.Serializable\nimport kotlinx.datetime.internal.JSJoda.LocalDate as jtLocalDate\nimport kotlinx.datetime.internal.JSJoda.ChronoUnit as jtChronoUnit\n\n@Serializable(with = LocalDateIso8601Serializer::class)\npublic actual class LocalDate internal constructor(internal val value: jtLocalDate) : Comparable<LocalDate> {\n    public actual companion object {\n\n        public actual fun parse(\n            input: CharSequence,\n            format: DateTimeFormat<LocalDate>\n        ): LocalDate = format.parse(input)\n\n        @Deprecated(\"This overload is only kept for binary compatibility\", level = DeprecationLevel.HIDDEN)\n        public fun parse(isoString: String): LocalDate = parse(input = isoString)\n\n        internal actual val MIN: LocalDate = LocalDate(jtLocalDate.MIN)\n        internal actual val MAX: LocalDate = LocalDate(jtLocalDate.MAX)\n\n        public actual fun fromEpochDays(epochDays: Int): LocalDate = try {\n            LocalDate(jsTry { jtLocalDate.ofEpochDay(epochDays) })\n        } catch (e: Throwable) {\n            if (e.isJodaDateTimeException()) throw IllegalArgumentException(e)\n            throw e\n        }\n\n        @Suppress(\"FunctionName\")\n        public actual fun Format(block: DateTimeFormatBuilder.WithDate.() -> Unit): DateTimeFormat<LocalDate> =\n            LocalDateFormat.build(block)\n    }\n\n    public actual object Formats {\n        public actual val ISO: DateTimeFormat<LocalDate> get() = ISO_DATE\n\n        public actual val ISO_BASIC: DateTimeFormat<LocalDate> = ISO_DATE_BASIC\n    }\n\n    public actual constructor(year: Int, monthNumber: Int, dayOfMonth: Int) :\n            this(try {\n                jsTry { jtLocalDate.of(year, monthNumber, dayOfMonth) }\n            } catch (e: Throwable) {\n                if (e.isJodaDateTimeException()) throw IllegalArgumentException(e)\n                throw e\n            })\n\n    public actual constructor(year: Int, month: Month, dayOfMonth: Int) : this(year, month.number, dayOfMonth)\n\n    public actual val year: Int get() = value.year()\n    public actual val monthNumber: Int get() = value.monthValue()\n    public actual val month: Month get() = value.month().toMonth()\n    public actual val dayOfMonth: Int get() = value.dayOfMonth()\n    public actual val dayOfWeek: DayOfWeek get() = value.dayOfWeek().toDayOfWeek()\n    public actual val dayOfYear: Int get() = value.dayOfYear()\n\n    override fun equals(other: Any?): Boolean =\n            (this === other) || (other is LocalDate && (this.value === other.value || this.value.equals(other.value)))\n\n    override fun hashCode(): Int = value.hashCode()\n\n    actual override fun toString(): String = value.toString()\n\n    actual override fun compareTo(other: LocalDate): Int = this.value.compareTo(other.value)\n\n    public actual fun toEpochDays(): Int = value.toEpochDay().toInt()\n}\n\n@Deprecated(\"Use the plus overload with an explicit number of units\", ReplaceWith(\"this.plus(1, unit)\"))\npublic actual fun LocalDate.plus(unit: DateTimeUnit.DateBased): LocalDate = plusNumber(1, unit)\npublic actual fun LocalDate.plus(value: Int, unit: DateTimeUnit.DateBased): LocalDate = plusNumber(value, unit)\npublic actual fun LocalDate.minus(value: Int, unit: DateTimeUnit.DateBased): LocalDate = plusNumber(-value, unit)\npublic actual fun LocalDate.plus(value: Long, unit: DateTimeUnit.DateBased): LocalDate = plusNumber(value, unit)\n\nprivate fun LocalDate.plusNumber(value: Number, unit: DateTimeUnit.DateBased): LocalDate =\n        try {\n            when (unit) {\n                is DateTimeUnit.DayBased -> jsTry { this.value.plusDays((value.toDouble() * unit.days).toInt()) }\n                is DateTimeUnit.MonthBased -> jsTry { this.value.plusMonths((value.toDouble() * unit.months).toInt()) }\n            }.let(::LocalDate)\n        } catch (e: Throwable) {\n            if (!e.isJodaDateTimeException() && !e.isJodaArithmeticException()) throw e\n            throw DateTimeArithmeticException(\"The result of adding $value of $unit to $this is out of LocalDate range.\", e)\n        }\n\n\npublic actual operator fun LocalDate.plus(period: DatePeriod): LocalDate = try {\n    with(period) {\n        return@with value\n                .run { if (totalMonths != 0) jsTry { plusMonths(totalMonths) } else this }\n                .run { if (days != 0) jsTry { plusDays(days) } else this }\n\n    }.let(::LocalDate)\n} catch (e: Throwable) {\n    if (e.isJodaDateTimeException() || e.isJodaArithmeticException()) throw DateTimeArithmeticException(e)\n    throw e\n}\n\n\n\npublic actual fun LocalDate.periodUntil(other: LocalDate): DatePeriod {\n    var startD = this.value\n    val endD = other.value\n    val months = startD.until(endD, jtChronoUnit.MONTHS).toInt(); startD = jsTry { startD.plusMonths(months) }\n    val days = startD.until(endD, jtChronoUnit.DAYS).toInt()\n\n    return DatePeriod(totalMonths = months, days)\n}\n\npublic actual fun LocalDate.until(other: LocalDate, unit: DateTimeUnit.DateBased): Int = when(unit) {\n    is DateTimeUnit.MonthBased -> monthsUntil(other) / unit.months\n    is DateTimeUnit.DayBased -> daysUntil(other) / unit.days\n}\n\npublic actual fun LocalDate.daysUntil(other: LocalDate): Int =\n        this.value.until(other.value, jtChronoUnit.DAYS).toInt()\n\npublic actual fun LocalDate.monthsUntil(other: LocalDate): Int =\n        this.value.until(other.value, jtChronoUnit.MONTHS).toInt()\n\npublic actual fun LocalDate.yearsUntil(other: LocalDate): Int =\n        this.value.until(other.value, jtChronoUnit.YEARS).toInt()\n[end of core/commonJs/src/LocalDate.kt]\n[start of core/commonJs/src/LocalDateTime.kt]\n/*\n * Copyright 2019-2022 JetBrains s.r.o. and contributors.\n * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.\n */\npackage kotlinx.datetime\n\nimport kotlinx.datetime.format.*\nimport kotlinx.datetime.format.ISO_DATETIME\nimport kotlinx.datetime.format.LocalDateTimeFormat\nimport kotlinx.datetime.serializers.LocalDateTimeIso8601Serializer\nimport kotlinx.serialization.Serializable\nimport kotlinx.datetime.internal.JSJoda.LocalDateTime as jtLocalDateTime\n\n@Serializable(with = LocalDateTimeIso8601Serializer::class)\npublic actual class LocalDateTime internal constructor(internal val value: jtLocalDateTime) : Comparable<LocalDateTime> {\n\n    public actual constructor(year: Int, monthNumber: Int, dayOfMonth: Int, hour: Int, minute: Int, second: Int, nanosecond: Int) :\n            this(try {\n                jsTry { jtLocalDateTime.of(year, monthNumber, dayOfMonth, hour, minute, second, nanosecond) }\n            } catch (e: Throwable) {\n                if (e.isJodaDateTimeException()) throw IllegalArgumentException(e)\n                throw e\n            })\n\n    public actual constructor(year: Int, month: Month, dayOfMonth: Int, hour: Int, minute: Int, second: Int, nanosecond: Int) :\n            this(year, month.number, dayOfMonth, hour, minute, second, nanosecond)\n\n    public actual constructor(date: LocalDate, time: LocalTime) :\n            this(jsTry { jtLocalDateTime.of(date.value, time.value) })\n\n    public actual val year: Int get() = value.year()\n    public actual val monthNumber: Int get() = value.monthValue()\n    public actual val month: Month get() = value.month().toMonth()\n    public actual val dayOfMonth: Int get() = value.dayOfMonth()\n    public actual val dayOfWeek: DayOfWeek get() = value.dayOfWeek().toDayOfWeek()\n    public actual val dayOfYear: Int get() = value.dayOfYear()\n\n    public actual val hour: Int get() = value.hour()\n    public actual val minute: Int get() = value.minute()\n    public actual val second: Int get() = value.second()\n    public actual val nanosecond: Int get() = value.nano().toInt()\n\n    public actual val date: LocalDate get() = LocalDate(value.toLocalDate()) // cache?\n\n    public actual val time: LocalTime get() = LocalTime(value.toLocalTime())\n\n    override fun equals(other: Any?): Boolean =\n            (this === other) || (other is LocalDateTime && (this.value === other.value || this.value.equals(other.value)))\n\n    override fun hashCode(): Int = value.hashCode()\n\n    actual override fun toString(): String = value.toString()\n\n    actual override fun compareTo(other: LocalDateTime): Int = this.value.compareTo(other.value)\n\n    public actual companion object {\n        public actual fun parse(input: CharSequence, format: DateTimeFormat<LocalDateTime>): LocalDateTime =\n            format.parse(input)\n\n        @Deprecated(\"This overload is only kept for binary compatibility\", level = DeprecationLevel.HIDDEN)\n        public fun parse(isoString: String): LocalDateTime = parse(input = isoString)\n\n        internal actual val MIN: LocalDateTime = LocalDateTime(jtLocalDateTime.MIN)\n        internal actual val MAX: LocalDateTime = LocalDateTime(jtLocalDateTime.MAX)\n\n        @Suppress(\"FunctionName\")\n        public actual fun Format(builder: DateTimeFormatBuilder.WithDateTime.() -> Unit): DateTimeFormat<LocalDateTime> =\n            LocalDateTimeFormat.build(builder)\n    }\n\n    public actual object Formats {\n        public actual val ISO: DateTimeFormat<LocalDateTime> = ISO_DATETIME\n    }\n\n}\n[end of core/commonJs/src/LocalDateTime.kt]\n[start of core/jvm/src/LocalDate.kt]\n/*\n * Copyright 2019-2020 JetBrains s.r.o.\n * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.\n */\n@file:JvmName(\"LocalDateJvmKt\")\npackage kotlinx.datetime\n\nimport kotlinx.datetime.format.*\nimport kotlinx.datetime.internal.safeAdd\nimport kotlinx.datetime.internal.safeMultiply\nimport kotlinx.datetime.internal.*\nimport kotlinx.datetime.serializers.LocalDateIso8601Serializer\nimport kotlinx.serialization.Serializable\nimport java.time.DateTimeException\nimport java.time.format.DateTimeParseException\nimport java.time.temporal.ChronoUnit\nimport java.time.LocalDate as jtLocalDate\n\n@Serializable(with = LocalDateIso8601Serializer::class)\npublic actual class LocalDate internal constructor(internal val value: jtLocalDate) : Comparable<LocalDate> {\n    public actual companion object {\n        public actual fun parse(input: CharSequence, format: DateTimeFormat<LocalDate>): LocalDate =\n            format.parse(input)\n\n        @Deprecated(\"This overload is only kept for binary compatibility\", level = DeprecationLevel.HIDDEN)\n        public fun parse(isoString: String): LocalDate = parse(input = isoString)\n\n        internal actual val MIN: LocalDate = LocalDate(jtLocalDate.MIN)\n        internal actual val MAX: LocalDate = LocalDate(jtLocalDate.MAX)\n\n        public actual fun fromEpochDays(epochDays: Int): LocalDate =\n            LocalDate(jtLocalDate.ofEpochDay(epochDays.toLong()))\n\n        @Suppress(\"FunctionName\")\n        public actual fun Format(block: DateTimeFormatBuilder.WithDate.() -> Unit): DateTimeFormat<LocalDate> =\n            LocalDateFormat.build(block)\n    }\n\n    public actual object Formats {\n        public actual val ISO: DateTimeFormat<LocalDate> get() = ISO_DATE\n\n        public actual val ISO_BASIC: DateTimeFormat<LocalDate> = ISO_DATE_BASIC\n    }\n\n    public actual constructor(year: Int, monthNumber: Int, dayOfMonth: Int) :\n            this(try {\n                jtLocalDate.of(year, monthNumber, dayOfMonth)\n            } catch (e: DateTimeException) {\n                throw IllegalArgumentException(e)\n            })\n\n    public actual constructor(year: Int, month: Month, dayOfMonth: Int) : this(year, month.number, dayOfMonth)\n\n    public actual val year: Int get() = value.year\n    public actual val monthNumber: Int get() = value.monthValue\n    public actual val month: Month get() = value.month\n    public actual val dayOfMonth: Int get() = value.dayOfMonth\n    public actual val dayOfWeek: DayOfWeek get() = value.dayOfWeek\n    public actual val dayOfYear: Int get() = value.dayOfYear\n\n    override fun equals(other: Any?): Boolean =\n            (this === other) || (other is LocalDate && this.value == other.value)\n\n    override fun hashCode(): Int = value.hashCode()\n\n    actual override fun toString(): String = value.toString()\n\n    actual override fun compareTo(other: LocalDate): Int = this.value.compareTo(other.value)\n\n    public actual fun toEpochDays(): Int = value.toEpochDay().clampToInt()\n}\n\n@Deprecated(\"Use the plus overload with an explicit number of units\", ReplaceWith(\"this.plus(1, unit)\"))\npublic actual fun LocalDate.plus(unit: DateTimeUnit.DateBased): LocalDate =\n        plus(1L, unit)\n\npublic actual fun LocalDate.plus(value: Int, unit: DateTimeUnit.DateBased): LocalDate =\n        plus(value.toLong(), unit)\n\npublic actual fun LocalDate.minus(value: Int, unit: DateTimeUnit.DateBased): LocalDate =\n        plus(-value.toLong(), unit)\n\npublic actual fun LocalDate.plus(value: Long, unit: DateTimeUnit.DateBased): LocalDate =\n        try {\n            when (unit) {\n                is DateTimeUnit.DayBased -> {\n                    val addDays: Long = safeMultiply(value, unit.days.toLong())\n                    ofEpochDayChecked(safeAdd(this.value.toEpochDay(), addDays))\n                }\n                is DateTimeUnit.MonthBased ->\n                    this.value.plusMonths(safeMultiply(value, unit.months.toLong()))\n            }.let(::LocalDate)\n        } catch (e: Exception) {\n            if (e !is DateTimeException && e !is ArithmeticException) throw e\n            throw DateTimeArithmeticException(\"The result of adding $value of $unit to $this is out of LocalDate range.\", e)\n        }\n\nprivate val minEpochDay = java.time.LocalDate.MIN.toEpochDay()\nprivate val maxEpochDay = java.time.LocalDate.MAX.toEpochDay()\nprivate fun ofEpochDayChecked(epochDay: Long): java.time.LocalDate {\n    // LocalDate.ofEpochDay doesn't actually check that the argument doesn't overflow year calculation\n    if (epochDay !in minEpochDay..maxEpochDay)\n        throw DateTimeException(\"The resulting day $epochDay is out of supported LocalDate range.\")\n    return java.time.LocalDate.ofEpochDay(epochDay)\n}\n\npublic actual operator fun LocalDate.plus(period: DatePeriod): LocalDate = try {\n    with(period) {\n        return@with value\n                .run { if (totalMonths != 0) plusMonths(totalMonths.toLong()) else this }\n                .run { if (days != 0) plusDays(days.toLong()) else this }\n\n    }.let(::LocalDate)\n} catch (e: DateTimeException) {\n    throw DateTimeArithmeticException(\"The result of adding $value to $this is out of LocalDate range.\")\n}\n\n\npublic actual fun LocalDate.periodUntil(other: LocalDate): DatePeriod {\n    var startD = this.value\n    val endD = other.value\n    val months = startD.until(endD, ChronoUnit.MONTHS); startD = startD.plusMonths(months)\n    val days = startD.until(endD, ChronoUnit.DAYS)\n\n    if (months > Int.MAX_VALUE || months < Int.MIN_VALUE) {\n        throw DateTimeArithmeticException(\"The number of months between $this and $other does not fit in an Int\")\n    }\n    return DatePeriod(totalMonths = months.toInt(), days.toInt())\n}\n\npublic actual fun LocalDate.until(other: LocalDate, unit: DateTimeUnit.DateBased): Int = when(unit) {\n    is DateTimeUnit.MonthBased -> (this.value.until(other.value, ChronoUnit.MONTHS) / unit.months).clampToInt()\n    is DateTimeUnit.DayBased -> (this.value.until(other.value, ChronoUnit.DAYS) / unit.days).clampToInt()\n}\n\npublic actual fun LocalDate.daysUntil(other: LocalDate): Int =\n        this.value.until(other.value, ChronoUnit.DAYS).clampToInt()\n\npublic actual fun LocalDate.monthsUntil(other: LocalDate): Int =\n        this.value.until(other.value, ChronoUnit.MONTHS).clampToInt()\n\npublic actual fun LocalDate.yearsUntil(other: LocalDate): Int =\n        this.value.until(other.value, ChronoUnit.YEARS).clampToInt()\n[end of core/jvm/src/LocalDate.kt]\n[start of core/jvm/src/LocalDateTime.kt]\n/*\n * Copyright 2019-2022 JetBrains s.r.o. and contributors.\n * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.\n */\n@file:JvmName(\"LocalDateTimeJvmKt\")\npackage kotlinx.datetime\n\nimport kotlinx.datetime.format.*\nimport kotlinx.datetime.serializers.LocalDateTimeIso8601Serializer\nimport kotlinx.serialization.Serializable\nimport java.time.DateTimeException\nimport java.time.format.DateTimeParseException\nimport java.time.LocalDateTime as jtLocalDateTime\n\npublic actual typealias Month = java.time.Month\npublic actual typealias DayOfWeek = java.time.DayOfWeek\n\n@Serializable(with = LocalDateTimeIso8601Serializer::class)\npublic actual class LocalDateTime internal constructor(internal val value: jtLocalDateTime) : Comparable<LocalDateTime> {\n\n    public actual constructor(year: Int, monthNumber: Int, dayOfMonth: Int, hour: Int, minute: Int, second: Int, nanosecond: Int) :\n            this(try {\n                jtLocalDateTime.of(year, monthNumber, dayOfMonth, hour, minute, second, nanosecond)\n            } catch (e: DateTimeException) {\n                throw IllegalArgumentException(e)\n            })\n\n    public actual constructor(year: Int, month: Month, dayOfMonth: Int, hour: Int, minute: Int, second: Int, nanosecond: Int) :\n            this(year, month.number, dayOfMonth, hour, minute, second, nanosecond)\n\n    public actual constructor(date: LocalDate, time: LocalTime) :\n            this(jtLocalDateTime.of(date.value, time.value))\n\n    public actual val year: Int get() = value.year\n    public actual val monthNumber: Int get() = value.monthValue\n    public actual val month: Month get() = value.month\n    public actual val dayOfMonth: Int get() = value.dayOfMonth\n    public actual val dayOfWeek: DayOfWeek get() = value.dayOfWeek\n    public actual val dayOfYear: Int get() = value.dayOfYear\n\n    public actual val hour: Int get() = value.hour\n    public actual val minute: Int get() = value.minute\n    public actual val second: Int get() = value.second\n    public actual val nanosecond: Int get() = value.nano\n\n    public actual val date: LocalDate get() = LocalDate(value.toLocalDate()) // cache?\n\n    public actual val time: LocalTime get() = LocalTime(value.toLocalTime())\n\n    override fun equals(other: Any?): Boolean =\n            (this === other) || (other is LocalDateTime && this.value == other.value)\n\n    override fun hashCode(): Int = value.hashCode()\n\n    actual override fun toString(): String = value.toString()\n\n    actual override fun compareTo(other: LocalDateTime): Int = this.value.compareTo(other.value)\n\n    public actual companion object {\n        public actual fun parse(input: CharSequence, format: DateTimeFormat<LocalDateTime>): LocalDateTime =\n            format.parse(input)\n\n        @Deprecated(\"This overload is only kept for binary compatibility\", level = DeprecationLevel.HIDDEN)\n        public fun parse(isoString: String): LocalDateTime = parse(input = isoString)\n\n        internal actual val MIN: LocalDateTime = LocalDateTime(jtLocalDateTime.MIN)\n        internal actual val MAX: LocalDateTime = LocalDateTime(jtLocalDateTime.MAX)\n\n        @Suppress(\"FunctionName\")\n        public actual fun Format(builder: DateTimeFormatBuilder.WithDateTime.() -> Unit): DateTimeFormat<LocalDateTime> =\n            LocalDateTimeFormat.build(builder)\n    }\n\n    public actual object Formats {\n        public actual val ISO: DateTimeFormat<LocalDateTime> = ISO_DATETIME\n    }\n\n}\n[end of core/jvm/src/LocalDateTime.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 1352,
+            "endIndex": 1788,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 2143,
+            "endIndex": 2580,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 2826,
+            "endIndex": 2990,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 3479,
+            "endIndex": 3979,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 5441,
+            "endIndex": 5877,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 7246,
+            "endIndex": 7410,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 8212,
+            "endIndex": 8543,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 9878,
+            "endIndex": 10012,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime/blob/master/core/jvm/src/Instant.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 9925,
+            "endIndex": 10396,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 10352,
+            "endIndex": 10803,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 10677,
+            "endIndex": 10841,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 10871,
+            "endIndex": 11006,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime/blob/master/core/jvm/src/Instant.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 10914,
+            "endIndex": 11476,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 11343,
+            "endIndex": 11534,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 11583,
+            "endIndex": 11978,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 12335,
+            "endIndex": 12475,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 12393,
+            "endIndex": 12585,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 12597,
+            "endIndex": 12753,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 12693,
+            "endIndex": 12848,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 12805,
+            "endIndex": 13052,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 13001,
+            "endIndex": 13204,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 13254,
+            "endIndex": 13425,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 13481,
+            "endIndex": 13884,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 14192,
+            "endIndex": 14650,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 15405,
+            "endIndex": 15885,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 16365,
+            "endIndex": 16591,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 16642,
+            "endIndex": 18344,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 19538,
+            "endIndex": 21795,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 24189,
+            "endIndex": 24953,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 25027,
+            "endIndex": 25254,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 25347,
+            "endIndex": 25922,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 26750,
+            "endIndex": 27433,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 28705,
+            "endIndex": 28839,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime/blob/master/core/jvm/src/Instant.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 28788,
+            "endIndex": 28948,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 28952,
+            "endIndex": 29272,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 29184,
+            "endIndex": 29403,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 29329,
+            "endIndex": 29865,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime/-date-time-period/",
+            "license": ""
+          },
+          {
+            "startIndex": 29742,
+            "endIndex": 30285,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 30269,
+            "endIndex": 30593,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 30528,
+            "endIndex": 30813,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 30694,
+            "endIndex": 31344,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime/-date-time-period/",
+            "license": ""
+          },
+          {
+            "startIndex": 31224,
+            "endIndex": 31528,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 31412,
+            "endIndex": 31596,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime/-date-time-period/",
+            "license": ""
+          },
+          {
+            "startIndex": 31612,
+            "endIndex": 31857,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime/-date-time-period/",
+            "license": ""
+          },
+          {
+            "startIndex": 31736,
+            "endIndex": 32002,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 31889,
+            "endIndex": 32167,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 32117,
+            "endIndex": 32490,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 32498,
+            "endIndex": 33347,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 33245,
+            "endIndex": 33983,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 33920,
+            "endIndex": 34303,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 34261,
+            "endIndex": 34642,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 34636,
+            "endIndex": 35003,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 34874,
+            "endIndex": 35188,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 35055,
+            "endIndex": 35365,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 35265,
+            "endIndex": 36182,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 36021,
+            "endIndex": 37661,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 37522,
+            "endIndex": 37925,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime/-date-time-period/-companion/parse.html",
+            "license": ""
+          },
+          {
+            "startIndex": 37865,
+            "endIndex": 38140,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 37952,
+            "endIndex": 39389,
+            "uri": "",
+            "license": ""
+          },
+          {
+            "startIndex": 39344,
+            "endIndex": 39870,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 39718,
+            "endIndex": 40814,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 40907,
+            "endIndex": 47523,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 48026,
+            "endIndex": 48160,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime/blob/master/core/jvm/src/Instant.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 48102,
+            "endIndex": 48804,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 48643,
+            "endIndex": 48970,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 48885,
+            "endIndex": 49616,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 49463,
+            "endIndex": 49654,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 49767,
+            "endIndex": 49907,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 49861,
+            "endIndex": 50188,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 50088,
+            "endIndex": 50606,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 50465,
+            "endIndex": 50792,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 50705,
+            "endIndex": 51105,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 50957,
+            "endIndex": 51369,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 51261,
+            "endIndex": 51611,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 51567,
+            "endIndex": 51849,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 51805,
+            "endIndex": 52160,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 52006,
+            "endIndex": 52329,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 52277,
+            "endIndex": 52481,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 52418,
+            "endIndex": 52730,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 52614,
+            "endIndex": 52849,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 52796,
+            "endIndex": 52951,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 52951,
+            "endIndex": 53271,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 53348,
+            "endIndex": 53482,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime/blob/master/core/jvm/src/Instant.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 53395,
+            "endIndex": 53866,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 53822,
+            "endIndex": 54273,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 54147,
+            "endIndex": 54451,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 54366,
+            "endIndex": 54928,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 54795,
+            "endIndex": 54986,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 55064,
+            "endIndex": 55204,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 55122,
+            "endIndex": 55314,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 55326,
+            "endIndex": 55482,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 55422,
+            "endIndex": 55788,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 55674,
+            "endIndex": 56135,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 55964,
+            "endIndex": 56331,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 56300,
+            "endIndex": 56698,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 56566,
+            "endIndex": 57223,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 57147,
+            "endIndex": 57461,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 57333,
+            "endIndex": 57629,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 57521,
+            "endIndex": 57725,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 57662,
+            "endIndex": 57974,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 57858,
+            "endIndex": 58093,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 58040,
+            "endIndex": 58195,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 58195,
+            "endIndex": 58515,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 60056,
+            "endIndex": 60190,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime/blob/master/core/jvm/src/Instant.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 60139,
+            "endIndex": 60299,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 60303,
+            "endIndex": 60623,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 60535,
+            "endIndex": 60754,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 60680,
+            "endIndex": 61216,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime/-date-time-period/",
+            "license": ""
+          },
+          {
+            "startIndex": 61093,
+            "endIndex": 61636,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 61620,
+            "endIndex": 61944,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 61879,
+            "endIndex": 62164,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 62045,
+            "endIndex": 62695,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime/-date-time-period/",
+            "license": ""
+          },
+          {
+            "startIndex": 62575,
+            "endIndex": 62879,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 62763,
+            "endIndex": 62947,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime/-date-time-period/",
+            "license": ""
+          },
+          {
+            "startIndex": 62963,
+            "endIndex": 63208,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime/-date-time-period/",
+            "license": ""
+          },
+          {
+            "startIndex": 63087,
+            "endIndex": 63353,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 63240,
+            "endIndex": 63518,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 63468,
+            "endIndex": 63841,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 63849,
+            "endIndex": 64698,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 64596,
+            "endIndex": 65334,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 65271,
+            "endIndex": 65654,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 65612,
+            "endIndex": 65993,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 65987,
+            "endIndex": 66354,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 66225,
+            "endIndex": 66539,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 66406,
+            "endIndex": 66716,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 66616,
+            "endIndex": 67533,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 67372,
+            "endIndex": 69012,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 68873,
+            "endIndex": 69276,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime/-date-time-period/-companion/parse.html",
+            "license": ""
+          },
+          {
+            "startIndex": 69216,
+            "endIndex": 69491,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 69303,
+            "endIndex": 70740,
+            "uri": "",
+            "license": ""
+          },
+          {
+            "startIndex": 70695,
+            "endIndex": 71221,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 71069,
+            "endIndex": 72165,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 72258,
+            "endIndex": 79246,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 79256,
+            "endIndex": 79450,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 79353,
+            "endIndex": 79683,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 79559,
+            "endIndex": 79799,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime/-date-period/",
+            "license": ""
+          },
+          {
+            "startIndex": 79812,
+            "endIndex": 80010,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 79885,
+            "endIndex": 80417,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 80383,
+            "endIndex": 80871,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 80754,
+            "endIndex": 81603,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 81472,
+            "endIndex": 82256,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 82109,
+            "endIndex": 82459,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 82310,
+            "endIndex": 82672,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 82508,
+            "endIndex": 82929,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 82755,
+            "endIndex": 85229,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 85101,
+            "endIndex": 85485,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 85372,
+            "endIndex": 85991,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 85979,
+            "endIndex": 86343,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 86195,
+            "endIndex": 86704,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 86585,
+            "endIndex": 87255,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 87255,
+            "endIndex": 87718,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 87598,
+            "endIndex": 87953,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 87802,
+            "endIndex": 88284,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 88164,
+            "endIndex": 88389,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 88485,
+            "endIndex": 88619,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime/blob/master/core/jvm/src/Instant.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 88561,
+            "endIndex": 89263,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 89102,
+            "endIndex": 89429,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 89344,
+            "endIndex": 90075,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 89922,
+            "endIndex": 90296,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 90164,
+            "endIndex": 90662,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 90563,
+            "endIndex": 90877,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 90781,
+            "endIndex": 91131,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 91116,
+            "endIndex": 91444,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 91413,
+            "endIndex": 91722,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 91657,
+            "endIndex": 93740,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 93700,
+            "endIndex": 94228,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 94328,
+            "endIndex": 94468,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 94422,
+            "endIndex": 94749,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 94649,
+            "endIndex": 95167,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 95026,
+            "endIndex": 95353,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 95266,
+            "endIndex": 95666,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 95518,
+            "endIndex": 95930,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 95822,
+            "endIndex": 96172,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 96128,
+            "endIndex": 96410,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 96366,
+            "endIndex": 96721,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 96567,
+            "endIndex": 96890,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 96838,
+            "endIndex": 97042,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 96979,
+            "endIndex": 97291,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 97175,
+            "endIndex": 97410,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 97357,
+            "endIndex": 97512,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 97512,
+            "endIndex": 97832,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 97935,
+            "endIndex": 98069,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime/blob/master/core/jvm/src/Instant.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 97982,
+            "endIndex": 98453,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 98409,
+            "endIndex": 98860,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 98734,
+            "endIndex": 99038,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 98953,
+            "endIndex": 99515,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 99382,
+            "endIndex": 99756,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 99624,
+            "endIndex": 100096,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 99948,
+            "endIndex": 100274,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 100154,
+            "endIndex": 100510,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 100387,
+            "endIndex": 100690,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 100615,
+            "endIndex": 100805,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 100741,
+            "endIndex": 101050,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 100990,
+            "endIndex": 103515,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 103422,
+            "endIndex": 104339,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 104430,
+            "endIndex": 104570,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 104488,
+            "endIndex": 104680,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 104692,
+            "endIndex": 104848,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 104788,
+            "endIndex": 105154,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 105040,
+            "endIndex": 105501,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 105330,
+            "endIndex": 105697,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 105666,
+            "endIndex": 106064,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 105932,
+            "endIndex": 106589,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 106513,
+            "endIndex": 106827,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 106699,
+            "endIndex": 106995,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 106887,
+            "endIndex": 107091,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 107028,
+            "endIndex": 107340,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 107224,
+            "endIndex": 107459,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 107406,
+            "endIndex": 107561,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 107561,
+            "endIndex": 107881,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 19208,
+    "candidatesTokenCount": 12586,
+    "totalTokenCount": 46751,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 19208
+      }
+    ],
+    "thoughtsTokenCount": 14957
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "24RDaLLuOMqF1MkP-p_RmQM"
+}

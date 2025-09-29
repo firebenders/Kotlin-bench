@@ -11,11 +11,8 @@ import time
 
 # Path to the dataset and reports directory
 dataset_path = "./datasets/Kotlin-bench"
-reports_dir = './evaluation_logs/reports'
-logs_dir = './evaluation_logs'
-
-# Configure OpenAI API (add your API key here or set as environment variable)
-# openai.api_key = "your-api-key"  # Or use: os.environ.get("OPENAI_API_KEY")
+reports_dir = './evaluation_logs_gpt_5_high/reports'
+logs_dir = './evaluation_logs_gpt_5_high'
 
 # Load the Kotlin-bench dataset
 def load_dataset():
@@ -239,7 +236,7 @@ def get_model_generated_patches(instance_id, model_names):
     model_patches = {}
     
     for model_name in model_names:
-        patch_path = os.path.join(logs_dir, instance_id, model_name, "unknown", "patch.diff")
+        patch_path = os.path.join(logs_dir, instance_id, model_name, "patch.diff")
         
         if os.path.exists(patch_path):
             try:
@@ -405,19 +402,9 @@ def extract_all_patches(dataset, output_folder="patches", model_names=None):
     
     # If model_names is not provided, try to detect from logs directory
     if model_names is None:
-        model_names = []
-        model_dirs = [d for d in os.listdir(logs_dir) if os.path.isdir(os.path.join(logs_dir, d))]
-        for model_dir in model_dirs:
-            if os.path.isdir(os.path.join(logs_dir, model_dir)):
-                # Check if this is a model directory or a task directory
-                potential_model_dir = os.path.join(logs_dir, model_dir)
-                subdirs = [d for d in os.listdir(potential_model_dir) if os.path.isdir(os.path.join(potential_model_dir, d))]
-                if "unknown" in subdirs:
-                    model_names.append(model_dir)
-    
-    if not model_names:
         print("Warning: No model names provided or detected. Only original PR patches will be extracted.")
     
+    print("Model names: ", model_names)
     count = 0
     
     # Process each task in the dataset
@@ -501,11 +488,9 @@ def main():
     # Save results to JSON file
     results_json = save_to_json(result_df, performance_df)
     
-    # Analyze failed tasks
-    analysis_results = analyze_failed_tasks(dataset, results_json)
-    
-    # Save analysis to file
-    save_analysis_to_file(analysis_results)
+    # # Analyze failed tasks
+    # analysis_results = analyze_failed_tasks(dataset, results_json)
+    # save_analysis_to_file(analysis_results)
     
     # Extract all patches to a separate folder
     extract_all_patches(dataset, "patches", [
@@ -513,12 +498,18 @@ def main():
         "deepseek-v3-0324",
         "o1",
         "o3-mini",
+        "o3",
+        "o4-mini",
         "gpt-4o-2024-11-20",
         "gemini-2.5-pro-exp-03-25",
+        "gemini-2.5-pro-preview-05-06",
         "claude-3-7-sonnet-20250219",
         "claude-3-7-sonnet-20250219-thinking",
+        "claude-sonnet-4-20250514",
+        "claude-opus-4-20250514",
         "llama4-maverick-instruct-basic",
-        "gpt-4.1"
+        "gpt-4.1",
+        "gpt-5"
     ])
 
     print("\nAnalysis complete. Results saved to JSON file and analysis file.")

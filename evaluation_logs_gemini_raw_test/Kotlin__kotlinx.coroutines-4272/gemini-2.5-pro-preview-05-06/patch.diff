@@ -1,0 +1,131 @@
+[start of kotlinx-coroutines-core/common/src/AbstractCoroutine.kt]
+package kotlinx.coroutines
+
+import kotlinx.coroutines.internal.*
+import kotlin.coroutines.*
+import kotlin.jvm.*
+
+/**
+ * Abstract base class for implementation of coroutines in coroutine builders.
+ *
+ * This class implements completion [Continuation], [Job], and [CoroutineScope] interfaces.
+ * It stores the result of continuation in the state of the job.
+ * This coroutine defaults to an active state (it is not lazy).
+ *
+ * The generic type `T` is the type of the value the coroutine is computing.
+ *
+ * @param parentContext context of the parent coroutine.
+ * @param active when `true` (by default), the coroutine is created in _active_ state.
+ *               When `false`, the coroutine is created in _new_ state. See [Job] for details.
+ * @suppress **This is unstable API and it is subject to change.**
+ */
+@OptIn(InternalCoroutinesApi::class)
+public abstract class AbstractCoroutine<in T>(
+    @JvmField
+    protected val parentContext: CoroutineContext,
+    active: Boolean = true
+) : JobSupport(active), Job, Continuation<T>, CoroutineScope {
+    // AbstractCoroutine is a Job, a Continuation (final completion) and a CoroutineScope
+    // It is created in a context of a parent coroutine (parentContext) or with a custom context
+    // and is a child of the Job in the parentContext (or the Job passed explicitly)
+
+    // Result of this coroutine is represented by its state.
+    // It is initially _active_ (by default) if it was not lazy.
+    // It is _completed_ when the completion continuation is invoked.
+    // It is _cancelled_ when the job is cancelled.
+
+    /**
+     * The context of this coroutine that includes this coroutine's job.
+     */
+    public override val context: CoroutineContext = parentContext + this // `this` is a Job
+
+    /**
+     * The scope of this coroutine.
+     */
+    public override val coroutineContext: CoroutineContext get() = context
+
+    // Completion continuation implementation
+    /** @suppress */
+    public override val callerFrame: CoroutineStackFrame? get() = null // Not applicable to AbstractCoroutine
+    /** @suppress */
+    public override fun getStackTraceElement(): StackTraceElement? = null // Not applicable to AbstractCoroutine
+
+    /**
+     * @suppress **This is unstable API and it is subject to change.**
+     */
+    // This function is invoked once when non-active coroutine is started.
+    internal override fun onStart() {}
+
+    /**
+     * This function is invoked once when the job is completed normally
+     * with the given [value].
+     * @suppress **This is unstable API and it is subject to change.**
+     */
+    protected open fun onCompleted(value: T) {}
+
+    /**
+     * This function is invoked once when the job is cancelled with the given [cause].
+     * @suppress **This is unstable API and it is subject to change.**
+     */
+    protected open fun onCancelled(cause: Throwable, handled: Boolean) {}
+
+    /**
+     * @suppress **This is unstable API and it is subject to change.**
+     */
+    // Computes the value of the state of this coroutine when it is completed.
+    // It is invoked once after onCompleted or onCancelled.
+    @Suppress("UNCHECKED_CAST")
+    protected open fun <R> getSuccessfulResult(state: Any?): R =
+        state as R
+
+    /**
+     * @suppress **This is unstable API and it is subject to change.**
+     */
+    // This function is invoked after the job is completed and all its children are completed, too
+    // This function is invoked exactly once.
+    internal final override fun onCompletionInternal(state: Any?) {
+        if (state is CompletedExceptionally) {
+            onCancelled(state.cause, state.handled)
+        } else {
+            onCompleted(getSuccessfulResult(state))
+        }
+    }
+
+    // Final continuation of the block
+    /** @suppress */
+    public final override fun resumeWith(result: Result<T>) {
+        val state = makeCompletingOnce(result.toState(this)) // Pass `this` as owner for CSE if it's created here
+        if (state === COMPLETING_WAITING_CHILDREN) return
+        afterResume(state)
+    }
+
+    /** @suppress */
+    // After resumption of the coroutine, this function is invoked when the coroutine is still completing
+    // (not waiting for children). It processes the state of the coroutine.
+    internal fun afterResume(state: Any?) { // state is Any? because of COMPLETING_ALREADY
+        // Resume all handlers and then call afterCompletion
+        super.afterCompletion(state) // Call afterCompletion on JobSupport
+    }
+
+    /**
+     * @suppress **This is unstable API and it is subject to change.**
+     */
+    // Starts this coroutine with the given code block and start strategy.
+    // This function shall be invoked at most once on this coroutine.
+    // This function checks cancellation of the outer Job.
+    public fun <R> start(start: CoroutineStart, receiver: R, block: suspend R.() -> T) {
+        // initParentJobInternal() is called by JobSupport constructor if parent job is present.
+        // If 'start.invoke' itself throws (e.g., because dispatcher.dispatch fails),
+        // this coroutine (Job) must be completed exceptionally.
+        // Otherwise, it might be left in an active state (e.g., EmptyActive),
+        // and its parent (if any) might wait for it indefinitely, leading to hangs.
+        try {
+            start(block, receiver, this) // 'this' is the Continuation for the new coroutine.
+        } catch (e: Throwable) {
+            // It's crucial to complete the Job if its startup (actual dispatching or execution) fails.
+            // resumeWith(Result.failure(e)) will call makeCompletingOnce and trigger afterCompletion.
+            resumeWith(Result.failure(e))
+        }
+    }
+}
+[end of kotlinx-coroutines-core/common/src/AbstractCoroutine.kt]

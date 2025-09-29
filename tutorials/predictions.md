@@ -1,8 +1,8 @@
 # Generating AI Predictions
+
 Aman Gottumukkala &bull; March 25, 2025
 
 In this tutorial, we explain how to use your previously validated task instances to generate AI predictions for SWE-bench evaluation.
-
 
 ## Creating a Dataset for Evaluation
 
@@ -28,7 +28,7 @@ After creating your dataset, you can generate predictions from various AI models
 ```bash
 # Set your API keys for different model providers
 export ANTHROPIC_API_KEY=your_anthropic_api_key
-export OPENAI_API_KEY=your_openai_api_key
+export OPENAI_API_KEY=your_openai_key
 export FIREWORKS_API_KEY=your_fireworks_api_key
 export GEMINI_API_KEY=your_gemini_api_key
 
@@ -46,8 +46,8 @@ python3 ./inference/run_api.py \
     --split test
 
 python3 ./inference/run_api.py \
-    --dataset_name_or_path ./datasets/Kotlin-bench__style-3__fs-oracle \
+    --dataset_name_or_path ./datasets/Kotlin-bench__full_file_gen__fs-oracle \
     --models o3 \
-    --output_dir ./predictions/Kotlin-bench \
+    --output_dir ./predictions \
     --split test
 ```

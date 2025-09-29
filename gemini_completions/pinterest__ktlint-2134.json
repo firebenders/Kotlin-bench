@@ -1,0 +1,556 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "An endless loop occurs when formatting a binary expression with an elvis operator followed by a `throw` expression. One rule merges the `throw` expression with the elvis operator onto a single line, which then exceeds the maximum line length. The `binary-expression-wrapping` rule then splits the line again, reintroducing the newline and causing a cycle.\n\nTo resolve this, I will modify the `BinaryExpressionWrappingRule` to avoid wrapping when an elvis operator (`?:`) is followed by a `throw` expression. This change breaks the formatting loop, and while it may leave a line that exceeds the maximum length, it prevents ktlint from getting stuck. This is preferable as it allows formatting to complete, even if a non-auto-correctable violation remains.\n\nHere are the changes for `ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt`:\n\n[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt]\n```kotlin\npackage com.pinterest.ktlint.ruleset.standard.rules\n\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_EXPRESSION\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.LAMBDA_ARGUMENT\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.LONG_STRING_TEMPLATE_ENTRY\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.OPERATION_REFERENCE\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.THROW\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT_LIST\nimport com.pinterest.ktlint.rule.engine.core.api.IndentConfig\nimport com.pinterest.ktlint.rule.engine.core.api.Rule\nimport com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRule\nimport com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRule.Mode.REGARDLESS_WHETHER_RUN_AFTER_RULE_IS_LOADED_OR_DISABLED\nimport com.pinterest.ktlint.rule.engine.core.api.RuleId\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf\nimport com.pinterest.ktlint.rule.engine.core.api.firstChildNode\nimport com.pinterest.ktlint.rule.engine.core.api.indent\nimport com.pinterest.ktlint.rule.engine.core.api.leavesOnLine\nimport com.pinterest.ktlint.rule.engine.core.api.nextCodeSibling\nimport com.pinterest.ktlint.rule.engine.core.api.nextSibling\nimport com.pinterest.ktlint.rule.engine.core.api.noNewLineInClosedRange\nimport com.pinterest.ktlint.rule.engine.core.api.parent\nimport com.pinterest.ktlint.rule.engine.core.api.prevSibling\nimport com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceBeforeMe\nimport com.pinterest.ktlint.ruleset.standard.StandardRule\nimport org.jetbrains.kotlin.com.intellij.lang.ASTNode\nimport org.jetbrains.kotlin.com.intellij.psi.tree.IElementType\n\n/**\n * Wraps a binary expression whenever the expression does not fit on the line. Wrapping a binary expression should take precedence before\n * argument of function calls inside that binary expression are wrapped.\n */\npublic class BinaryExpressionWrappingRule :\n    StandardRule(\n        id = \"binary-expression-wrapping\",\n        usesEditorConfigProperties =\n            setOf(\n                INDENT_SIZE_PROPERTY,\n                INDENT_STYLE_PROPERTY,\n                MAX_LINE_LENGTH_PROPERTY,\n            ),\n        visitorModifiers =\n            setOf(\n                RunAfterRule(ARGUMENT_LIST_WRAPPING_RULE_ID, REGARDLESS_WHETHER_RUN_AFTER_RULE_IS_LOADED_OR_DISABLED),\n            ),\n    ),\n    Rule.Experimental {\n    private var indentConfig = IndentConfig.DEFAULT_INDENT_CONFIG\n    private var maxLineLength = MAX_LINE_LENGTH_PROPERTY.defaultValue\n\n    override fun beforeFirstNode(editorConfig: EditorConfig) {\n        indentConfig =\n            IndentConfig(\n                indentStyle = editorConfig[INDENT_STYLE_PROPERTY],\n                tabWidth = editorConfig[INDENT_SIZE_PROPERTY],\n            )\n        maxLineLength = editorConfig[MAX_LINE_LENGTH_PROPERTY]\n    }\n\n    override fun beforeVisitChildNodes(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        when (node.elementType) {\n            BINARY_EXPRESSION -> visitExpression(node, emit, autoCorrect)\n        }\n    }\n\n    private fun visitExpression(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        require(node.elementType == BINARY_EXPRESSION)\n\n        // First check whether the entire expression has to be pushed to the next line after and assignment in a property or function\n        node\n            .takeIf { it.treeParent.elementType.anyOf(PROPERTY, FUN) }\n            ?.takeIf { binaryExpression ->\n                binaryExpression\n                    .prevSibling { it.elementType == EQ }\n                    ?.let { noNewLineInClosedRange(it, binaryExpression.firstChildLeafOrSelf()) }\n                    ?: false\n            }?.takeIf { it.isOnLineExceedingMaxLineLength() }\n            ?.let { expression ->\n                emit(\n                    expression.startOffset,\n                    \"Line is exceeding max line length. Break line between assignment and expression\",\n                    true,\n                )\n                if (autoCorrect) {\n                    expression.upsertWhitespaceBeforeMe(expression.indent().plus(indentConfig.indent))\n                }\n            }\n\n        node\n            .findChildByType(OPERATION_REFERENCE)\n            ?.let { operationReference -> visitOperationReference(operationReference, emit, autoCorrect) }\n    }\n\n    private fun visitOperationReference(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        node\n            .takeIf { it.elementType == OPERATION_REFERENCE }\n            ?.takeIf { it.treeParent.elementType == BINARY_EXPRESSION }\n            ?.takeIf { binaryExpression ->\n                // Ignore binary expression inside raw string literals. Raw string literals are allowed to exceed max-line-length. Wrapping\n                // (each) binary expression inside such a literal seems to create more chaos than it resolves.\n                binaryExpression.parent { it.elementType == LONG_STRING_TEMPLATE_ENTRY } == null\n            }?.takeIf { it.isOnLineExceedingMaxLineLength() }\n            ?.let { operationReference ->\n                if (\n                    node.isCallExpressionFollowedByLambdaArgument() ||\n                    cannotBeWrappedAtOperationReference(operationReference) ||\n                    operationReference.isElvisOperatorFollowedByThrowExpression()\n                ) {\n                    // Wrapping after operation reference might not be the best place in case of a call expression or just won't work as\n                    // the left hand side still does not fit on a single line\n                    emit(operationReference.startOffset, \"Line is exceeding max line length\", false)\n                } else {\n                    operationReference\n                        .nextSibling()\n                        ?.let { nextSibling ->\n                            emit(\n                                nextSibling.startOffset,\n                                \"Line is exceeding max line length. Break line after operator in binary expression\",\n                                true,\n                            )\n                            if (autoCorrect) {\n                                nextSibling.upsertWhitespaceBeforeMe(operationReference.indent().plus(indentConfig.indent))\n                            }\n                        }\n                }\n            }\n    }\n\n    private fun ASTNode.isElvisOperatorFollowedByThrowExpression(): Boolean =\n        firstChildNode.elementType == ELVIS && nextCodeSibling()?.elementType == THROW\n\n    private fun ASTNode.isCallExpressionFollowedByLambdaArgument() =\n        parent { it.elementType == VALUE_ARGUMENT_LIST }\n            ?.takeIf { it.treeParent.elementType == CALL_EXPRESSION }\n            ?.nextCodeSibling()\n            .let { it?.elementType == LAMBDA_ARGUMENT }\n\n    private fun cannotBeWrappedAtOperationReference(operationReference: ASTNode) =\n        operationReference\n            .takeUnless { it.nextCodeSibling()?.elementType == BINARY_EXPRESSION }\n            ?.let {\n                val stopAtOperationReferenceLeaf = operationReference.firstChildLeafOrSelf()\n                maxLineLength <=\n                    it\n                        .leavesOnLine()\n                        .takeWhile { leaf -> leaf != stopAtOperationReferenceLeaf }\n                        .lengthWithoutNewlinePrefix()\n            }\n            ?: false\n\n    private fun ASTNode.isOnLineExceedingMaxLineLength() = leavesOnLine().lengthWithoutNewlinePrefix() > maxLineLength\n\n    private fun Sequence<ASTNode>.lengthWithoutNewlinePrefix() =\n        joinToString(separator = \"\") { it.text }\n            .dropWhile { it == '\\n' }\n            .length\n}\n\nprivate fun IElementType.anyOf(vararg elementType: IElementType): Boolean = elementType.contains(this)\n\npublic val BINARY_EXPRESSION_WRAPPING_RULE_ID: RuleId = BinaryExpressionWrappingRule().ruleId\n```\n[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 2882,
+            "endIndex": 3094,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 3078,
+            "endIndex": 3422,
+            "uri": "https://github.com/mgroth0/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 3146,
+            "endIndex": 3717,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 4212,
+            "endIndex": 4564,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 4564,
+            "endIndex": 4919,
+            "uri": "https://github.com/detekt/detekt/pull/4645",
+            "license": ""
+          },
+          {
+            "startIndex": 4801,
+            "endIndex": 4981,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 12517,
+            "endIndex": 12685,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 14608,
+            "endIndex": 15010,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 14909,
+            "endIndex": 15105,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 15073,
+            "endIndex": 15418,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 15478,
+            "endIndex": 15690,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 21327,
+            "endIndex": 21466,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 21767,
+            "endIndex": 22106,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 22141,
+            "endIndex": 22378,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 25332,
+            "endIndex": 25459,
+            "uri": "https://github.com/hanggrian/rulebook",
+            "license": ""
+          },
+          {
+            "startIndex": 28657,
+            "endIndex": 28910,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29169,
+            "endIndex": 29298,
+            "uri": "https://github.com/RubixDev/ktlint-ruleset-mc-preprocessor",
+            "license": ""
+          },
+          {
+            "startIndex": 30801,
+            "endIndex": 31033,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 30915,
+            "endIndex": 31155,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 31840,
+            "endIndex": 32078,
+            "uri": "https://github.com/devashish-deepsource/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 31923,
+            "endIndex": 32331,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32748,
+            "endIndex": 33001,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33211,
+            "endIndex": 33402,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33311,
+            "endIndex": 33525,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 34583,
+            "endIndex": 35491,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39295,
+            "endIndex": 39424,
+            "uri": "https://github.com/RubixDev/ktlint-ruleset-mc-preprocessor",
+            "license": ""
+          },
+          {
+            "startIndex": 39482,
+            "endIndex": 40453,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40585,
+            "endIndex": 40776,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40685,
+            "endIndex": 41105,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40835,
+            "endIndex": 41594,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 41883,
+            "endIndex": 42050,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 41957,
+            "endIndex": 42124,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42099,
+            "endIndex": 42273,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42177,
+            "endIndex": 42500,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42414,
+            "endIndex": 42577,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42658,
+            "endIndex": 42787,
+            "uri": "https://github.com/RubixDev/ktlint-ruleset-mc-preprocessor",
+            "license": ""
+          },
+          {
+            "startIndex": 43060,
+            "endIndex": 43231,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 44484,
+            "endIndex": 44618,
+            "uri": "https://github.com/pinterest/ktlint/pull/2132",
+            "license": ""
+          },
+          {
+            "startIndex": 45349,
+            "endIndex": 45516,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 45423,
+            "endIndex": 45590,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 45569,
+            "endIndex": 45745,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 45710,
+            "endIndex": 46033,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 45947,
+            "endIndex": 46110,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 46148,
+            "endIndex": 46333,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 46280,
+            "endIndex": 46524,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 46417,
+            "endIndex": 46662,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 46638,
+            "endIndex": 46906,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 46880,
+            "endIndex": 47057,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 47080,
+            "endIndex": 47249,
+            "uri": "https://github.com/devashish-deepsource/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 47136,
+            "endIndex": 47493,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 47513,
+            "endIndex": 47743,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 47632,
+            "endIndex": 47969,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 47982,
+            "endIndex": 48781,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 48696,
+            "endIndex": 49088,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 49005,
+            "endIndex": 49407,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 49329,
+            "endIndex": 51635,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 51767,
+            "endIndex": 51958,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 51867,
+            "endIndex": 52287,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 52017,
+            "endIndex": 52776,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 52922,
+            "endIndex": 53277,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 53294,
+            "endIndex": 54269,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54821,
+            "endIndex": 54990,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54947,
+            "endIndex": 55304,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 55263,
+            "endIndex": 55394,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 56524,
+            "endIndex": 56691,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 56598,
+            "endIndex": 56765,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 56744,
+            "endIndex": 56920,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 56885,
+            "endIndex": 57208,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57122,
+            "endIndex": 57285,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57323,
+            "endIndex": 57508,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57455,
+            "endIndex": 57699,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57592,
+            "endIndex": 57837,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57813,
+            "endIndex": 58081,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 58055,
+            "endIndex": 58232,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 58255,
+            "endIndex": 58424,
+            "uri": "https://github.com/devashish-deepsource/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 58311,
+            "endIndex": 58668,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 58688,
+            "endIndex": 58918,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 58807,
+            "endIndex": 59144,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 59157,
+            "endIndex": 59956,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 59871,
+            "endIndex": 60263,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 60180,
+            "endIndex": 60582,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 60504,
+            "endIndex": 62810,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 62942,
+            "endIndex": 63133,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 63042,
+            "endIndex": 63462,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 63192,
+            "endIndex": 63951,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 64097,
+            "endIndex": 64452,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 64469,
+            "endIndex": 65444,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 49290,
+    "candidatesTokenCount": 2443,
+    "totalTokenCount": 65908,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 49290
+      }
+    ],
+    "thoughtsTokenCount": 14175
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "TIpDaJzVJsKn1MkPi6eqqAU"
+}

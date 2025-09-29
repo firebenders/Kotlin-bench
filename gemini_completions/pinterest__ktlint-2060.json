@@ -1,0 +1,724 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I've analyzed the issue and the provided codebase. The user is experiencing a bug with `ParameterListWrappingRule` where a long parameter list in a lambda expression causes a linting error on the opening parenthesis of the enclosing function call. This behavior is unexpected because `ParameterListWrappingRule` should operate on parameter lists of declarations (including lambdas), not on the argument list of a function call.\n\nMy investigation suggests two issues in the `ParameterListWrappingRule.kt` file:\n\n1.  The `hasNoParameters()` extension function is not implemented correctly for all cases, especially for lambdas. It uses a logic specific to function declarations with parentheses, which fails for lambdas that don't have them. A more robust implementation is to check for the absence of `VALUE_PARAMETER` children.\n2.  The `when` statement in `wrapParameterInList` combines the handling for `VALUE_PARAMETER` and `RPAR`. While the logic appears to be the same, separating them might resolve a subtle bug in AST manipulation or traversal, and it aligns with a known fix for this issue.\n\nI will apply these two changes to `ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt`.\n\nHere are the regenerated file contents:\n\n[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt]\npackage com.pinterest.ktlint.ruleset.standard.rules\n\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.FUNCTION_LITERAL\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.FUNCTION_TYPE\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.LPAR\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.NULLABLE_TYPE\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIMARY_CONSTRUCTOR\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.RPAR\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PARAMETER_LIST\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER_LIST\nimport com.pinterest.ktlint.rule.engine.core.api.IndentConfig\nimport com.pinterest.ktlint.rule.engine.core.api.RuleId\nimport com.pinterest.ktlint.rule.engine.core.api.column\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf\nimport com.pinterest.ktlint.rule.engine.core.api.indent\nimport com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline\nimport com.pinterest.ktlint.rule.engine.core.api.prevCodeLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.prevLeaf\nimport com.pinterest.ktlint.rule.engine.core.api.prevSibling\nimport com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe\nimport com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceBeforeMe\nimport com.pinterest.ktlint.ruleset.standard.StandardRule\nimport org.jetbrains.kotlin.com.intellij.lang.ASTNode\nimport org.jetbrains.kotlin.com.intellij.psi.PsiWhiteSpace\nimport org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement\nimport org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.PsiWhiteSpaceImpl\nimport org.jetbrains.kotlin.psi.KtTypeArgumentList\nimport org.jetbrains.kotlin.psi.psiUtil.children\nimport org.jetbrains.kotlin.psi.psiUtil.collectDescendantsOfType\nimport org.jetbrains.kotlin.psi.psiUtil.leaves\n\npublic class ParameterListWrappingRule :\n    StandardRule(\n        id = \"parameter-list-wrapping\",\n        usesEditorConfigProperties =\n            setOf(\n                CODE_STYLE_PROPERTY,\n                INDENT_SIZE_PROPERTY,\n                INDENT_STYLE_PROPERTY,\n                MAX_LINE_LENGTH_PROPERTY,\n            ),\n    ) {\n    private var codeStyle = CODE_STYLE_PROPERTY.defaultValue\n    private var indentConfig = IndentConfig.DEFAULT_INDENT_CONFIG\n    private var maxLineLength = MAX_LINE_LENGTH_PROPERTY.defaultValue\n\n    override fun beforeFirstNode(editorConfig: EditorConfig) {\n        codeStyle = editorConfig[CODE_STYLE_PROPERTY]\n        maxLineLength = editorConfig[MAX_LINE_LENGTH_PROPERTY]\n        indentConfig =\n            IndentConfig(\n                indentStyle = editorConfig[INDENT_STYLE_PROPERTY],\n                tabWidth = editorConfig[INDENT_SIZE_PROPERTY],\n            )\n        if (indentConfig.disabled) {\n            stopTraversalOfAST()\n        }\n    }\n\n    override fun beforeVisitChildNodes(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        when (node.elementType) {\n            NULLABLE_TYPE -> wrapNullableType(node, emit, autoCorrect)\n            VALUE_PARAMETER_LIST -> {\n                if (node.needToWrapParameterList()) {\n                    wrapParameterList(node, emit, autoCorrect)\n                }\n            }\n        }\n    }\n\n    private fun wrapNullableType(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        require(node.elementType == NULLABLE_TYPE)\n        node\n            .takeUnless {\n                // skip when max line length is not exceedd\n                (node.column - 1 + node.textLength) <= maxLineLength\n            }?.findChildByType(FUNCTION_TYPE)\n            ?.findChildByType(VALUE_PARAMETER_LIST)\n            ?.takeIf { it.findChildByType(VALUE_PARAMETER) != null }\n            ?.takeUnless { it.textContains('\\n') }\n            ?.let {\n                node\n                    .children()\n                    .forEach {\n                        when (it.elementType) {\n                            LPAR -> {\n                                emit(\n                                    it.startOffset,\n                                    \"Parameter of nullable type should be on a separate line (unless the type fits on a single line)\",\n                                    true,\n                                )\n                                if (autoCorrect) {\n                                    it.upsertWhitespaceAfterMe(indentConfig.childIndentOf(node))\n                                }\n                            }\n                            RPAR -> {\n                                emit(it.startOffset, errorMessage(it), true)\n                                if (autoCorrect) {\n                                    it.upsertWhitespaceBeforeMe(indentConfig.parentIndentOf(node))\n                                }\n                            }\n                        }\n                    }\n            }\n    }\n\n    private fun ASTNode.needToWrapParameterList() =\n        when {\n            hasNoParameters() -> false\n            codeStyle != ktlint_official && isPartOfFunctionLiteralInNonKtlintOfficialCodeStyle() -> false\n            codeStyle == ktlint_official && isPartOfFunctionLiteralStartingOnSameLineAsClosingParenthesisOfPrecedingReferenceExpression() ->\n                false\n            isFunctionTypeWrappedInNullableType() -> false\n            textContains('\\n') -> true\n            codeStyle == ktlint_official && containsAnnotatedParameter() -> true\n            exceedsMaxLineLength() -> true\n            else -> false\n        }\n\n    private fun ASTNode.hasNoParameters(): Boolean {\n        require(elementType == VALUE_PARAMETER_LIST)\n        return findChildByType(VALUE_PARAMETER) == null\n    }\n\n    private fun ASTNode.isPartOfFunctionLiteralInNonKtlintOfficialCodeStyle(): Boolean {\n        require(elementType == VALUE_PARAMETER_LIST)\n        return treeParent?.elementType == FUNCTION_LITERAL\n    }\n\n    private fun ASTNode.isPartOfFunctionLiteralStartingOnSameLineAsClosingParenthesisOfPrecedingReferenceExpression(): Boolean {\n        require(elementType == VALUE_PARAMETER_LIST)\n        return firstChildLeafOrSelf()\n            .let { startOfFunctionLiteral ->\n                treeParent\n                    ?.takeIf { it.elementType == FUNCTION_LITERAL }\n                    ?.prevCodeLeaf()\n                    ?.takeIf { it.treeParent.elementType == ElementType.VALUE_ARGUMENT_LIST }\n                    ?.takeIf { it.treeParent.treeParent.elementType == ElementType.CALL_EXPRESSION }\n                    ?.leaves()\n                    ?.takeWhile { it != startOfFunctionLiteral }\n                    ?.none { it.isWhiteSpaceWithNewline() }\n                    ?: false\n            }\n    }\n\n    private fun ASTNode.isFunctionTypeWrappedInNullableType(): Boolean {\n        require(elementType == VALUE_PARAMETER_LIST)\n        return treeParent.elementType == FUNCTION_TYPE && treeParent?.treeParent?.elementType == NULLABLE_TYPE\n    }\n\n    private fun ASTNode.containsAnnotatedParameter(): Boolean {\n        require(elementType == VALUE_PARAMETER_LIST)\n        return this.children()\n            .filter { it.elementType == VALUE_PARAMETER }\n            .any { it.isAnnotated() }\n    }\n\n    private fun ASTNode.isAnnotated() =\n        findChildByType(ElementType.MODIFIER_LIST)\n            ?.children()\n            .orEmpty()\n            .any { it.elementType == ElementType.ANNOTATION_ENTRY }\n\n    private fun wrapParameterList(\n        node: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        node\n            .children()\n            .forEach { child -> wrapParameterInList(child, emit, autoCorrect) }\n    }\n\n    private fun intendedIndent(child: ASTNode): String =\n        when {\n            // IDEA quirk:\n            // fun <\n            //     T,\n            //     R> test(\n            //     param1: T\n            //     param2: R\n            // )\n            // instead of\n            // fun <\n            //     T,\n            //     R> test(\n            //         param1: T\n            //         param2: R\n            //     )\n            child.treeParent.hasTypeParameterListInFront() -> -1\n\n            else -> 0\n        }.let {\n            if (child.elementType == VALUE_PARAMETER) {\n                it + 1\n            } else {\n                it\n            }\n        }.let { indentLevelFix ->\n            val indentLevel =\n                indentConfig\n                    .indentLevelFrom(child.treeParent.indent(false))\n                    .plus(indentLevelFix)\n            \"\\n\" + indentConfig.indent.repeat(indentLevel)\n        }\n\n    private fun wrapParameterInList(\n        child: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n        autoCorrect: Boolean,\n    ) {\n        when (child.elementType) {\n            LPAR -> {\n                val prevLeaf = child.prevLeaf()\n                if (prevLeaf is PsiWhiteSpace && prevLeaf.textContains('\\n')) {\n                    emit(child.startOffset, errorMessage(child), true)\n                    if (autoCorrect) {\n                        prevLeaf.delete()\n                    }\n                }\n            }\n            VALUE_PARAMETER -> {\n                // aiming for\n                // ... LPAR\n                // <line indent + indentSize> VALUE_PARAMETER...\n                // <line indent> RPAR\n                val intendedIndent = intendedIndent(child)\n                val prevLeaf = child.prevLeaf()\n                if (prevLeaf is PsiWhiteSpace) {\n                    if (prevLeaf.getText().contains(\"\\n\")) {\n                        // The current child is already wrapped to a new line. Checking and fixing the\n                        // correct size of the indent is the responsibility of the IndentationRule.\n                        return\n                    } else {\n                        // The current child needs to be wrapped to a newline.\n                        emit(child.startOffset, errorMessage(child), true)\n                        if (autoCorrect) {\n                            // The indentation is purely based on the previous leaf only. Note that in\n                            // autoCorrect mode the indent rule, if enabled, runs after this rule and\n                            // determines the final indentation. But if the indent rule is disabled then the\n                            // indent of this rule is kept.\n                            (prevLeaf as LeafPsiElement).rawReplaceWithText(intendedIndent)\n                        }\n                    }\n                } else {\n                    // Insert a new whitespace element in order to wrap the current child to a new line.\n                    emit(child.startOffset, errorMessage(child), true)\n                    if (autoCorrect) {\n                        child.treeParent.addChild(PsiWhiteSpaceImpl(intendedIndent), child)\n                    }\n                }\n                // Indentation of child nodes need to be fixed by the IndentationRule.\n            }\n            RPAR -> {\n                // aiming for\n                // ... LPAR\n                // <line indent + indentSize> VALUE_PARAMETER...\n                // <line indent> RPAR\n                val intendedIndent = intendedIndent(child)\n                val prevLeaf = child.prevLeaf()\n                if (prevLeaf is PsiWhiteSpace) {\n                    if (prevLeaf.getText().contains(\"\\n\")) {\n                        // The current child is already wrapped to a new line. Checking and fixing the\n                        // correct size of the indent is the responsibility of the IndentationRule.\n                        return\n                    } else {\n                        // The current child needs to be wrapped to a newline.\n                        emit(child.startOffset, errorMessage(child), true)\n                        if (autoCorrect) {\n                            // The indentation is purely based on the previous leaf only. Note that in\n                            // autoCorrect mode the indent rule, if enabled, runs after this rule and\n                            // determines the final indentation. But if the indent rule is disabled then the\n                            // indent of this rule is kept.\n                            (prevLeaf as LeafPsiElement).rawReplaceWithText(intendedIndent)\n                        }\n                    }\n                } else {\n                    // Insert a new whitespace element in order to wrap the current child to a new line.\n                    emit(child.startOffset, errorMessage(child), true)\n                    if (autoCorrect) {\n                        child.treeParent.addChild(PsiWhiteSpaceImpl(intendedIndent), child)\n                    }\n                }\n                // Indentation of child nodes need to be fixed by the IndentationRule.\n            }\n        }\n    }\n\n    private fun ASTNode.exceedsMaxLineLength() = (column - 1 + textLength) > maxLineLength && !textContains('\\n')\n\n    private fun errorMessage(node: ASTNode) =\n        when (node.elementType) {\n            LPAR -> \"\"\"Unnecessary newline before \"(\"\"\"\"\n            VALUE_PARAMETER ->\n                \"Parameter should start on a newline\"\n            RPAR -> \"\"\"Missing newline before \")\"\"\"\"\n            else -> throw UnsupportedOperationException()\n        }\n\n    private fun ASTNode.hasTypeParameterListInFront(): Boolean {\n        val parent = this.treeParent\n        val typeParameterList =\n            if (parent.elementType == PRIMARY_CONSTRUCTOR) {\n                parent.prevSibling { it.elementType == TYPE_PARAMETER_LIST }\n            } else {\n                parent.children().firstOrNull { it.elementType == TYPE_PARAMETER_LIST }\n            }\n        val typeListNode =\n            typeParameterList\n                ?: parent.psi.collectDescendantsOfType<KtTypeArgumentList>().firstOrNull()?.node\n                ?: return false\n        return typeListNode.children().any { it.isWhiteSpaceWithNewline() }\n    }\n}\n\npublic val PARAMETER_LIST_WRAPPING_RULE_ID: RuleId = ParameterListWrappingRule().ruleId\n[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 1485,
+            "endIndex": 1724,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 1856,
+            "endIndex": 2094,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 2077,
+            "endIndex": 2224,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 2222,
+            "endIndex": 2475,
+            "uri": "https://github.com/shashachu/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 3272,
+            "endIndex": 3551,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 3735,
+            "endIndex": 3907,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 3938,
+            "endIndex": 4200,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 4081,
+            "endIndex": 4572,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 4451,
+            "endIndex": 4804,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 4807,
+            "endIndex": 5203,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 5007,
+            "endIndex": 5579,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 5402,
+            "endIndex": 5822,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 5797,
+            "endIndex": 6177,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 8478,
+            "endIndex": 8671,
+            "uri": "https://github.com/setu1421/SAEON-Observations-Database",
+            "license": ""
+          },
+          {
+            "startIndex": 9606,
+            "endIndex": 9841,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 9653,
+            "endIndex": 9886,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 13945,
+            "endIndex": 14180,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 13992,
+            "endIndex": 14225,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 14740,
+            "endIndex": 15058,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 17404,
+            "endIndex": 17566,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 21128,
+            "endIndex": 21294,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24695,
+            "endIndex": 24857,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 26221,
+            "endIndex": 26674,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 26265,
+            "endIndex": 26939,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 26709,
+            "endIndex": 27160,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29168,
+            "endIndex": 29330,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32622,
+            "endIndex": 32857,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32669,
+            "endIndex": 32902,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33194,
+            "endIndex": 33461,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33282,
+            "endIndex": 33571,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33637,
+            "endIndex": 33862,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 34113,
+            "endIndex": 34292,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 40199,
+            "endIndex": 40389,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40916,
+            "endIndex": 41095,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 44301,
+            "endIndex": 44539,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 44533,
+            "endIndex": 44856,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 44716,
+            "endIndex": 45112,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 44916,
+            "endIndex": 45488,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 45311,
+            "endIndex": 45731,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 45706,
+            "endIndex": 46086,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 47088,
+            "endIndex": 47298,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 47349,
+            "endIndex": 47513,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 48130,
+            "endIndex": 48403,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 48397,
+            "endIndex": 48724,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 48583,
+            "endIndex": 48985,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 48786,
+            "endIndex": 49365,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 49186,
+            "endIndex": 49613,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 49588,
+            "endIndex": 49974,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 51304,
+            "endIndex": 51584,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 51355,
+            "endIndex": 51806,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 52283,
+            "endIndex": 52918,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 54301,
+            "endIndex": 54473,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54504,
+            "endIndex": 54766,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54618,
+            "endIndex": 54891,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54927,
+            "endIndex": 55165,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 55159,
+            "endIndex": 55482,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 55342,
+            "endIndex": 55738,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 55542,
+            "endIndex": 56114,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 55937,
+            "endIndex": 56357,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 56332,
+            "endIndex": 56712,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 56745,
+            "endIndex": 57012,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57006,
+            "endIndex": 57329,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57189,
+            "endIndex": 57585,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 57389,
+            "endIndex": 57961,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57784,
+            "endIndex": 58204,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 58179,
+            "endIndex": 58559,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 61203,
+            "endIndex": 61376,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 61338,
+            "endIndex": 61507,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 61481,
+            "endIndex": 61651,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 61611,
+            "endIndex": 61819,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 61839,
+            "endIndex": 62026,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 61937,
+            "endIndex": 62103,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 62116,
+            "endIndex": 62285,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 62254,
+            "endIndex": 62458,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 62368,
+            "endIndex": 62636,
+            "uri": "https://github.com/Kantis/kantis-ktlint-rules",
+            "license": ""
+          },
+          {
+            "startIndex": 62610,
+            "endIndex": 62787,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 62746,
+            "endIndex": 62915,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 62937,
+            "endIndex": 63164,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 63129,
+            "endIndex": 63359,
+            "uri": "https://github.com/kitterion/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 63451,
+            "endIndex": 63683,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 63582,
+            "endIndex": 63916,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 63892,
+            "endIndex": 64194,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 64082,
+            "endIndex": 64621,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 64446,
+            "endIndex": 64827,
+            "uri": "https://github.com/klcvlr/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 64790,
+            "endIndex": 65427,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 65373,
+            "endIndex": 65749,
+            "uri": "https://github.com/shashachu/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 65584,
+            "endIndex": 66387,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 66193,
+            "endIndex": 67123,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 66959,
+            "endIndex": 67197,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 67180,
+            "endIndex": 67327,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 67325,
+            "endIndex": 67693,
+            "uri": "https://github.com/shashachu/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 67763,
+            "endIndex": 68780,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 68769,
+            "endIndex": 69153,
+            "uri": "https://github.com/shashachu/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 69013,
+            "endIndex": 69473,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 69484,
+            "endIndex": 70064,
+            "uri": "https://github.com/Goooler/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 69824,
+            "endIndex": 70498,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 70268,
+            "endIndex": 70892,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 70923,
+            "endIndex": 71185,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71037,
+            "endIndex": 71310,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71346,
+            "endIndex": 71584,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71578,
+            "endIndex": 71901,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 71761,
+            "endIndex": 72157,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 71961,
+            "endIndex": 72533,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 72356,
+            "endIndex": 72776,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 72751,
+            "endIndex": 73131,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 73164,
+            "endIndex": 73431,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 73425,
+            "endIndex": 73748,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 73608,
+            "endIndex": 74004,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 73808,
+            "endIndex": 74380,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 74203,
+            "endIndex": 74623,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 74598,
+            "endIndex": 75052,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 75066,
+            "endIndex": 75326,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 75143,
+            "endIndex": 75494,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 75365,
+            "endIndex": 76114,
+            "uri": "https://github.com/Qdobbela/EP3Faith",
+            "license": ""
+          },
+          {
+            "startIndex": 75982,
+            "endIndex": 76226,
+            "uri": "https://github.com/shashachu/ktlint",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 49211,
+    "candidatesTokenCount": 3820,
+    "totalTokenCount": 68529,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 49211
+      }
+    ],
+    "thoughtsTokenCount": 15498
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "s4pDaK_NEpOv1MkPiquFyQY"
+}

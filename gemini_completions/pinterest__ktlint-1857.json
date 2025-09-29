@@ -1,0 +1,364 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I've analyzed the issue and the provided code. The problem lies in the `ImportOrderingRule`, where it incorrectly adds a blank line at the beginning of the import list if the configured import layout starts with an empty group followed by a blank line separator (`|`).\n\nThe fix is to ensure that a blank line is only inserted between non-empty import groups, and never before the first group of imports. I'll modify the logic that adds blank lines to only execute when it's processing imports between two groups, not before the very first one.\n\nHere are the changes for the affected file:\n\n[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ImportOrderingRule.kt]\n```kotlin\npackage com.pinterest.ktlint.ruleset.standard.rules\n\nimport com.pinterest.ktlint.logger.api.initKtLintKLogger\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType\nimport com.pinterest.ktlint.rule.engine.core.api.RuleId\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig\nimport com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfigProperty\nimport com.pinterest.ktlint.ruleset.standard.StandardRule\nimport com.pinterest.ktlint.ruleset.standard.rules.ImportOrderingRule.Companion.ASCII_PATTERN\nimport com.pinterest.ktlint.ruleset.standard.rules.ImportOrderingRule.Companion.IDEA_PATTERN\nimport com.pinterest.ktlint.ruleset.standard.rules.internal.importordering.ImportSorter\nimport com.pinterest.ktlint.ruleset.standard.rules.internal.importordering.PatternEntry\nimport com.pinterest.ktlint.ruleset.standard.rules.internal.importordering.parseImportsLayout\nimport mu.KotlinLogging\nimport org.ec4j.core.model.PropertyType\nimport org.jetbrains.kotlin.com.intellij.lang.ASTNode\nimport org.jetbrains.kotlin.com.intellij.psi.PsiWhiteSpace\nimport org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.PsiWhiteSpaceImpl\nimport org.jetbrains.kotlin.psi.KtImportDirective\n\nprivate val LOGGER = KotlinLogging.logger {}.initKtLintKLogger()\n\n/**\n * Import ordering is configured via EditorConfig's property `ij_kotlin_imports_layout`, so the Kotlin IDE plugin also recongizes it. Supported values:\n * * \"*,java.**,javax.**,kotlin.**,^\" - default IntelliJ IDEA's order, see [IDEA_PATTERN]\n * * \"*\" - alphabetical order as recommended in Android's Kotlin style guide, see [ASCII_PATTERN]\n * * custom - defined by the following set of tokens. Tokens can be combined together in a group, groups/tokens must be comma separated:\n *  * \"*\" - wildcard symbol, can be used as follows:\n *      1. Single, meaning matching any import (<all other imports> in IDEA)\n *      2. After an import path, e.g. \"java.*\" or \"kotlin.io.Closeable.*\"\n *      3. Doubled after an import path, e.g. \"java.**\" or \"kotlin.io.**\", meaning \"with subpackages\"\n *  * \"|\" - blank line symbol. Only supported single blank lines between imports. Multiple blank lines will be ignored. Blank lines are not allowed outside of import list.\n *  * \"^\" - alias symbol, can be used as follows:\n *      1. In front of an import path, meaning matching all alias imports from this path, e.g. \"^android.*\"\n *      2. Alone, meaning matching any alias import - \"^\" (<all other alias imports> in IDEA)\n *  * import paths - these can be full paths, e.g. \"java.util.List.*\" as well as wildcard paths meaning \"with subpackages\", e.g. \"kotlin.**\"\n *\n * In case the custom property is not provided, the rule defaults to alphabetical order in case of \"android\" flag supplied, or to idea otherwise.\n */\npublic class ImportOrderingRule :\n    StandardRule(\n        id = \"import-ordering\",\n        usesEditorConfigProperties = setOf(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY),\n    ) {\n    private lateinit var importsLayout: List<PatternEntry>\n    private lateinit var importSorter: ImportSorter\n\n    override fun beforeFirstNode(editorConfig: EditorConfig) {\n        importsLayout = editorConfig[IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY]\n        importSorter = ImportSorter(importsLayout)\n    }\n\n    override fun beforeVisitChildNodes(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        if (node.elementType == ElementType.IMPORT_LIST) {\n            val children = node.getChildren(null)\n            if (children.isNotEmpty()) {\n                // Get unique imports and blank lines\n                val (autoCorrectDuplicateImports: Boolean, imports: List<ASTNode>) =\n                    getUniqueImportsAndBlankLines(children, emit)\n\n                val hasComments = children.any { it.elementType == ElementType.BLOCK_COMMENT || it.elementType == ElementType.EOL_COMMENT }\n                val sortedImports = imports\n                    .asSequence()\n                    .mapNotNull { it.psi as? KtImportDirective } // sorter expects KtImportDirective, whitespaces are inserted afterwards\n                    .sortedWith(importSorter)\n                    .map { it.node } // transform back to ASTNode in order to operate over its method (addChild)\n\n                // insert blank lines wherever needed\n                // traverse the list using fold to have previous and current element and decide if the blank line is needed in between\n                // based on the ImportSorter imported patterns and indexes from the comparator\n                val sortedImportsWithSpaces = mutableListOf<ASTNode>()\n                sortedImports.fold(null as ASTNode?) { prev, current ->\n                    if (prev != null) {\n                        val index1 = importSorter.findImportIndex((prev.psi as KtImportDirective).importPath!!)\n                        val index2 = importSorter.findImportIndex((current.psi as KtImportDirective).importPath!!)\n\n                        var hasBlankLines = false\n                        for (i in (index1 + 1) until index2) {\n                            if (importSorter.patterns[i] == PatternEntry.BLANK_LINE_ENTRY) {\n                                hasBlankLines = true\n                                break\n                            }\n                        }\n                        if (hasBlankLines) {\n                            sortedImportsWithSpaces += PsiWhiteSpaceImpl(\"\\n\\n\")\n                        }\n                    }\n                    sortedImportsWithSpaces += current\n\n                    return@fold current\n                }\n\n                if (hasComments) {\n                    emit(\n                        node.startOffset,\n                        ERROR_MESSAGES.getOrDefault(importsLayout, CUSTOM_ERROR_MESSAGE) +\n                            \" -- no autocorrection due to comments in the import list\",\n                        false,\n                    )\n                } else {\n                    val autoCorrectWhitespace = hasTooMuchWhitespace(children) && !isCustomLayout()\n                    val autoCorrectSortOrder = !importsAreEqual(imports, sortedImportsWithSpaces)\n                    if (autoCorrectSortOrder || autoCorrectWhitespace) {\n                        emit(\n                            node.startOffset,\n                            ERROR_MESSAGES.getOrDefault(importsLayout, CUSTOM_ERROR_MESSAGE),\n                            true,\n                        )\n                    }\n                    if (autoCorrect && (autoCorrectDuplicateImports || autoCorrectSortOrder || autoCorrectWhitespace)) {\n                        node.removeRange(node.firstChildNode, node.lastChildNode.treeNext)\n                        sortedImportsWithSpaces.reduce { current, next ->\n                            node.addChild(current, null)\n                            if (current !is PsiWhiteSpace && next !is PsiWhiteSpace) {\n                                node.addChild(PsiWhiteSpaceImpl(\"\\n\"), null)\n                            }\n                            return@reduce next\n                        }\n                        node.addChild(sortedImportsWithSpaces.last(), null)\n                    }\n                }\n            }\n        }\n    }\n\n    private fun getUniqueImportsAndBlankLines(\n        children: Array<ASTNode>,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ): Pair<Boolean, List<ASTNode>> {\n        var autoCorrectDuplicateImports = false\n        val imports = mutableListOf<ASTNode>()\n        val importTextSet = mutableSetOf<String>()\n\n        children.forEach { current ->\n            val isPsiWhiteSpace = current.psi is PsiWhiteSpace\n\n            if (current.elementType == ElementType.IMPORT_DIRECTIVE ||\n                isPsiWhiteSpace && current.textLength > 1 // also collect empty lines, that are represented as \"\\n\\n\"\n            ) {\n                if (isPsiWhiteSpace || importTextSet.add(current.text)) {\n                    imports += current\n                } else {\n                    emit(\n                        current.startOffset,\n                        \"Duplicate '${current.text}' found\",\n                        true,\n                    )\n                    autoCorrectDuplicateImports = true\n                }\n            }\n        }\n\n        return autoCorrectDuplicateImports to imports\n    }\n\n    private fun importsAreEqual(\n        actual: List<ASTNode>,\n        expected: List<ASTNode>,\n    ): Boolean {\n        if (actual.size != expected.size) return false\n\n        val combined = actual.zip(expected)\n        return combined.all { (first, second) ->\n            if (first is PsiWhiteSpace && second is PsiWhiteSpace) {\n                return@all (first as PsiWhiteSpace).text == (second as PsiWhiteSpace).text\n            }\n            return@all first == second\n        }\n    }\n\n    private fun isCustomLayout() = importsLayout != IDEA_PATTERN && importsLayout != ASCII_PATTERN\n\n    private fun hasTooMuchWhitespace(nodes: Array<ASTNode>): Boolean {\n        return nodes.any { it is PsiWhiteSpace && (it as PsiWhiteSpace).text != \"\\n\" }\n    }\n\n    public companion object {\n        /**\n         * Alphabetical with capital letters before lower case letters (e.g. Z before a).\n         * No blank lines between major groups (android, com, junit, net, org, java, javax).\n         * Single group regardless of import type.\n         *\n         * https://developer.android.com/kotlin/style-guide#import_statements\n         */\n        private val ASCII_PATTERN = parseImportsLayout(\"*\")\n\n        /**\n         * Default IntelliJ IDEA style: Alphabetical with capital letters before lower case letters (e.g. Z before a),\n         * except such groups as \"java\", \"javax\" and \"kotlin\" that are placed in the end. Within the groups the alphabetical order is preserved.\n         * Alias imports are placed in a separate group in the end of the list with alphabetical order inside.\n         * No blank lines between groups.\n         *\n         * https://github.com/JetBrains/kotlin/blob/ffdab473e28d0d872136b910eb2e0f4beea2e19c/idea/formatter/src/org/jetbrains/kotlin/idea/core/formatter/KotlinCodeStyleSettings.java#L87-L91\n         */\n        private val IDEA_PATTERN = parseImportsLayout(\"*,java.**,javax.**,kotlin.**,^\")\n\n        private const val IDEA_ERROR_MESSAGE = \"Imports must be ordered in lexicographic order without any empty lines in-between \" +\n            \"with \\\"java\\\", \\\"javax\\\", \\\"kotlin\\\" and aliases in the end\"\n        private const val ASCII_ERROR_MESSAGE = \"Imports must be ordered in lexicographic order without any empty lines in-between\"\n        private const val CUSTOM_ERROR_MESSAGE = \"Imports must be ordered according to the pattern specified in .editorconfig\"\n\n        private val ERROR_MESSAGES = mapOf(\n            IDEA_PATTERN to IDEA_ERROR_MESSAGE,\n            ASCII_PATTERN to ASCII_ERROR_MESSAGE,\n        )\n\n        private val EDITOR_CONFIG_PROPERTY_PARSER: (String, String?) -> PropertyType.PropertyValue<List<PatternEntry>> =\n            { _, value ->\n                when {\n                    value.isNullOrBlank() -> PropertyType.PropertyValue.invalid(\n                        value,\n                        \"Import layout must contain at least one entry of a wildcard symbol (*)\",\n                    )\n                    value == \"idea\" -> {\n                        LOGGER.warn {\n                            \"`idea` is deprecated! Please use `*,java.**,javax.**,kotlin.**,^` instead to ensure that the Kotlin IDE \" +\n                                \"plugin recognizes the value\"\n                        }\n                        PropertyType.PropertyValue.valid(\n                            value,\n                            IDEA_PATTERN,\n                        )\n                    }\n                    value == \"ascii\" -> {\n                        LOGGER.warn {\n                            \"`ascii` is deprecated! Please use `*` instead to ensure that the Kotlin IDE plugin recognizes the value\"\n                        }\n                        PropertyType.PropertyValue.valid(\n                            value,\n                            ASCII_PATTERN,\n                        )\n                    }\n                    else -> try {\n                        PropertyType.PropertyValue.valid(\n                            value,\n                            parseImportsLayout(value),\n                        )\n                    } catch (e: IllegalArgumentException) {\n                        PropertyType.PropertyValue.invalid(\n                            value,\n                            \"Unexpected imports layout: $value\",\n                        )\n                    }\n                }\n            }\n\n        public val IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY: EditorConfigProperty<List<PatternEntry>> =\n            EditorConfigProperty<List<PatternEntry>>(\n                type = PropertyType(\n                    \"ij_kotlin_imports_layout\",\n                    \"Defines imports order layout for Kotlin files\",\n                    EDITOR_CONFIG_PROPERTY_PARSER,\n                ),\n                defaultValue = IDEA_PATTERN,\n                androidStudioCodeStyleDefaultValue = ASCII_PATTERN,\n                propertyWriter = { it.joinToString(separator = \",\") },\n            )\n    }\n}\n\npublic val IMPORT_ORDERING_RULE_ID: RuleId = ImportOrderingRule().ruleId\n```\n[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ImportOrderingRule.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 2157,
+            "endIndex": 2374,
+            "uri": "https://stackoverflow.com/questions/65055798/kotlin-linting-rulesetprovider-trailing-comma",
+            "license": ""
+          },
+          {
+            "startIndex": 2338,
+            "endIndex": 3319,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 3143,
+            "endIndex": 4675,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 5798,
+            "endIndex": 6537,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 10833,
+            "endIndex": 11135,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 11543,
+            "endIndex": 11812,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 12221,
+            "endIndex": 13147,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 16153,
+            "endIndex": 16563,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 20274,
+            "endIndex": 20483,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 23874,
+            "endIndex": 24028,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24169,
+            "endIndex": 24807,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 27156,
+            "endIndex": 28186,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29071,
+            "endIndex": 29340,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29843,
+            "endIndex": 30177,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 33857,
+            "endIndex": 34126,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 35577,
+            "endIndex": 36166,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 38773,
+            "endIndex": 39411,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40112,
+            "endIndex": 40925,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42432,
+            "endIndex": 43070,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 43329,
+            "endIndex": 43821,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 46455,
+            "endIndex": 46854,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 46940,
+            "endIndex": 47753,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 49972,
+            "endIndex": 50365,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 50409,
+            "endIndex": 51007,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 51375,
+            "endIndex": 52188,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 52398,
+            "endIndex": 53331,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54383,
+            "endIndex": 54550,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54436,
+            "endIndex": 54658,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 54610,
+            "endIndex": 54792,
+            "uri": "https://github.com/detekt/detekt/blob/main/detekt-formatting/src/main/kotlin/io/gitlab/arturbosch/detekt/formatting/FormattingRule.kt",
+            "license": ""
+          },
+          {
+            "startIndex": 54768,
+            "endIndex": 55208,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 55101,
+            "endIndex": 55281,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 55240,
+            "endIndex": 55413,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 55471,
+            "endIndex": 55769,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 55664,
+            "endIndex": 56122,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 56023,
+            "endIndex": 56550,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 56535,
+            "endIndex": 57151,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57162,
+            "endIndex": 57460,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57373,
+            "endIndex": 57742,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 57686,
+            "endIndex": 57871,
+            "uri": "https://stackoverflow.com/questions/65055798/kotlin-linting-rulesetprovider-trailing-comma",
+            "license": ""
+          },
+          {
+            "startIndex": 57835,
+            "endIndex": 58720,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 58560,
+            "endIndex": 59117,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 59203,
+            "endIndex": 60123,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 59847,
+            "endIndex": 60393,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 60389,
+            "endIndex": 60775,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 60786,
+            "endIndex": 61680,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 61680,
+            "endIndex": 62806,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 62822,
+            "endIndex": 63556,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 63497,
+            "endIndex": 63740,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 63629,
+            "endIndex": 64923,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 64806,
+            "endIndex": 65235,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 65107,
+            "endIndex": 65604,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 65581,
+            "endIndex": 66097,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 65953,
+            "endIndex": 66537,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 66365,
+            "endIndex": 67092,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 66919,
+            "endIndex": 67840,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 44633,
+    "candidatesTokenCount": 3200,
+    "totalTokenCount": 62446,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 44633
+      }
+    ],
+    "thoughtsTokenCount": 14613
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "UolDaJ_TA5KPjMcPya-ewQo"
+}

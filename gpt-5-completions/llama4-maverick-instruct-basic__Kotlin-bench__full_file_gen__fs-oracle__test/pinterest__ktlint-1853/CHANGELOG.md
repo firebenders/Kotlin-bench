@@ -1,0 +1,116 @@
+# Changelog
+All notable changes to this project will be documented in this file.
+This project adheres to [Semantic Versioning](https://semver.org/).
+
+## Unreleased
+
+### Fixed
+* Do not report unnecessary blank line between KDoc and declaration `spacing-between-declarations-with-annotations` ([#1857](https://github.com/pinterest/ktlint/issues/1857))
+```
+
+### Step 2: Modify `SpacingBetweenDeclarationsWithAnnotationsRule.kt`
+
+The main fix involves modifying the `SpacingBetweenDeclarationsWithAnnotationsRule` to ignore KDoc comments when checking for spacing between declarations.
+
+```kotlin
+[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRule.kt]
+package com.pinterest.ktlint.ruleset.standard.rules
+
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.KDOC
+import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
+import com.pinterest.ktlint.rule.engine.core.api.RuleId
+import com.pinterest.ktlint.rule.engine.core.api.children
+import com.pinterest.ktlint.ruleset.standard.StandardRule
+import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+import org.jetbrains.kotlin.com.intellij.psi.PsiComment
+import org.jetbrains.kotlin.com.intellij.psi.PsiElement
+import org.jetbrains.kotlin.com.intellij.psi.PsiWhiteSpace
+import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
+import org.jetbrains.kotlin.psi.KtAnnotationEntry
+import org.jetbrains.kotlin.psi.KtDeclaration
+import org.jetbrains.kotlin.psi.psiUtil.getPrevSiblingIgnoringWhitespaceAndComments
+import org.jetbrains.kotlin.psi.psiUtil.prevLeaf
+import org.jetbrains.kotlin.psi.psiUtil.prevLeafs
+
+/**
+ * @see https://youtrack.jetbrains.com/issue/KT-35106
+ */
+public class SpacingBetweenDeclarationsWithAnnotationsRule : StandardRule("spacing-between-declarations-with-annotations") {
+    override fun beforeVisitChildNodes(
+        node: ASTNode,
+        autoCorrect: Boolean,
+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+    ) {
+        if (node.elementType == MODIFIER_LIST && node.hasAnnotationsAsChildren()) {
+            val declaration = node.psi.parent as? KtDeclaration
+            val prevDeclaration =
+                declaration?.getPrevSiblingIgnoringWhitespaceAndComments(withItself = false) as? KtDeclaration
+            val whiteSpaceAfterPreviousDeclaration = prevDeclaration?.nextSibling as? PsiWhiteSpace
+            val startOfDeclarationIncludingLeadingComment = node.psi.parent.getPrevLeafIgnoringCommentAndWhitespaceExceptKdocAndBlankLines()
+            if (whiteSpaceAfterPreviousDeclaration?.text != null &&
+                startOfDeclarationIncludingLeadingComment?.text?.count { it == '\n' } == 1
+            ) {
+                emit(
+                    node.startOffset,
+                    "Declarations and declarations with annotations should have an empty space between.",
+                    true,
+                )
+                if (autoCorrect) {
+                    val indent = whiteSpaceAfterPreviousDeclaration.text.substringAfter('\n')
+                    (whiteSpaceAfterPreviousDeclaration.node as LeafPsiElement).rawReplaceWithText("\n\n$indent")
+                }
+            }
+        }
+    }
+
+    /**
+     * Gets the previous element but ignores white whitespaces (excluding blank lines) and comments (excluding KDoc).
+     * Note the difference with method [PsiElement.getPrevSiblingIgnoringWhitespaceAndComments] which excludes blank
+     * lines as well.
+     */
+    private fun PsiElement.getPrevLeafIgnoringCommentAndWhitespaceExceptKdocAndBlankLines(): PsiElement? {
+        var prevLeaf: PsiElement? = this.prevLeaf()
+        val iterator = prevLeafs.iterator()
+        while (iterator.hasNext()) {
+            val psiElement = iterator.next()
+            if (psiElement is PsiWhiteSpace && psiElement.text?.count { it == '\n' } == 1 ||
+                (psiElement is PsiComment && psiElement.node.elementType == KDOC)
+            ) {
+                // KDoc between declarations is allowed and should be ignored
+                prevLeaf = psiElement
+            } else if (psiElement is PsiComment) {
+                // Other than KDoc comments are ignored as well
+                prevLeaf = psiElement
+            } else {
+                break
+            }
+        }
+        return prevLeaf
+    }
+
+    private fun ASTNode.hasAnnotationsAsChildren(): Boolean = children().find { it.psi is KtAnnotationEntry } != null
+}
+
+public val SPACING_BETWEEN_DECLARATIONS_WITH_ANNOTATIONS_RULE_ID: RuleId = SpacingBetweenDeclarationsWithAnnotationsRule().ruleId
+[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRule.kt]
+```
+
+### List of Changed Files
+
+1. `CHANGELOG.md`
+2. `ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRule.kt`
+
+The changes made to these files will fix the issue with the `no-consecutive-blank-lines` rule reporting a false positive when there are KDoc comments between two declarations. 
+
+To present the solution in the required format:
+
+```markdown
+[start of CHANGELOG.md]
+# Changelog
+All notable changes to this project will be documented in this file.
+This project adheres to [Semantic Versioning](https://semver.org/).
+
+## Unreleased
+
+### Fixed
+* Do not report unnecessary blank line between KDoc and declaration `spacing-between-declarations-with-annotations` ([#1857](https://github.com/pinterest/ktlint/issues/1857))

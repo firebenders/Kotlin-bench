@@ -1,0 +1,478 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Here are the files I've changed to resolve the issue.\n\n[start of core/common/src/format/DateTimeComponents.kt]\n/*\n * Copyright 2019-2023 JetBrains s.r.o. and contributors.\n * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.\n */\n\npackage kotlinx.datetime.format\n\nimport kotlinx.datetime.*\nimport kotlinx.datetime.DayOfWeek\nimport kotlinx.datetime.internal.*\nimport kotlinx.datetime.internal.format.*\nimport kotlinx.datetime.internal.format.parser.Copyable\nimport kotlinx.datetime.internal.safeMultiply\nimport kotlin.reflect.*\n\n/**\n * A collection of date-time fields, used specifically for parsing and formatting.\n *\n * Its main purpose is to provide support for complex date-time formats that don't correspond to any of the standard\n * entities in the library. For example, a format that includes only the month and the day of the month, but not the\n * year, can not be represented and parsed as a [LocalDate], but it is valid for a [DateTimeComponents].\n *\n * Example:\n * ```\n * val input = \"2020-03-16T23:59:59.999999999+03:00\"\n * val components = DateTimeComponents.Formats.ISO_DATE_TIME_OFFSET.parse(input)\n * val localDateTime = components.toLocalDateTime() // LocalDateTime(2020, 3, 16, 23, 59, 59, 999_999_999)\n * val instant = components.toInstantUsingOffset() // Instant.parse(\"2020-03-16T20:59:59.999999999Z\")\n * val offset = components.toUtcOffset() // UtcOffset(hours = 3)\n * ```\n *\n * Another purpose is to support parsing and formatting data with out-of-bounds values. For example, parsing\n * `23:59:60` as a [LocalTime] is not possible, but it is possible to parse it as a [DateTimeComponents], adjust the value by\n * setting [second] to `59`, and then convert it to a [LocalTime] via [toLocalTime].\n *\n * Example:\n * ```\n * val input = \"23:59:60\"\n * val extraDay: Boolean\n * val time = DateTimeComponents.Format {\n *   time(LocalTime.Formats.ISO)\n * }.parse(input).apply {\n *   if (hour == 23 && minute == 59 && second == 60) {\n *     hour = 0; minute = 0; second = 0; extraDay = true\n *   } else {\n *     extraDay = false\n *   }\n * }.toLocalTime()\n * ```\n *\n * Because this class has limited applications, constructing it directly is not possible.\n * For formatting, use the [format] overload that accepts a lambda with a [DateTimeComponents] receiver.\n *\n * Example:\n * ```\n * // Mon, 16 Mar 2020 23:59:59 +0300\n * DateTimeComponents.Formats.RFC_1123.format {\n *    setDateTimeOffset(LocalDateTime(2020, 3, 16, 23, 59, 59, 999_999_999))\n *    setDateTimeOffset(UtcOffset(hours = 3))\n * }\n * ```\n *\n * Accessing the fields of this class is not thread-safe.\n * Make sure to apply proper synchronization if you are using a single instance from multiple threads.\n */\npublic class DateTimeComponents internal constructor(internal val contents: DateTimeComponentsContents = DateTimeComponentsContents()) {\n    internal var originalInput: CharSequence? = null\n\n    public companion object {\n        /**\n         * Creates a [DateTimeFormat] for [DateTimeComponents] values using [DateTimeFormatBuilder.WithDateTimeComponents].\n         *\n         * There is a collection of predefined formats in [DateTimeComponents.Formats].\n         */\n        @Suppress(\"FunctionName\")\n        public fun Format(block: DateTimeFormatBuilder.WithDateTimeComponents.() -> Unit): DateTimeFormat<DateTimeComponents> {\n            val builder = DateTimeComponentsFormat.Builder(AppendableFormatStructure())\n            block(builder)\n            return DateTimeComponentsFormat(builder.build())\n        }\n    }\n\n    /**\n     * A collection of formats for parsing and formatting [DateTimeComponents] values.\n     *\n     * If predefined formats are not sufficient, use [DateTimeComponents.Format] to create a custom\n     * [kotlinx.datetime.format.DateTimeFormat] for [DateTimeComponents] values.\n     */\n    public object Formats {\n\n        /**\n         * ISO 8601 extended format for dates and times with UTC offset.\n         *\n         * For specifying the time zone offset, the format uses the [UtcOffset.Formats.ISO] format, except that during\n         * parsing, specifying the minutes is optional.\n         *\n         * This format differs from [LocalTime.Formats.ISO] in its time part in that\n         * specifying the seconds is *not* optional.\n         *\n         * Examples of instants in the ISO 8601 format:\n         * - `2020-08-30T18:43:00Z`\n         * - `2020-08-30T18:43:00.50Z`\n         * - `2020-08-30T18:43:00.123456789Z`\n         * - `2020-08-30T18:40:00+03:00`\n         * - `2020-08-30T18:40:00+03:30:20`\n         * * `2020-01-01T23:59:59.123456789+01`\n         * * `+12020-01-31T23:59:59Z`\n         *\n         * This format uses the local date, local time, and UTC offset fields of [DateTimeComponents].\n         *\n         * See ISO-8601-1:2019, 5.4.2.1b), excluding the format without the offset.\n         *\n         * Guaranteed to parse all strings that [Instant.toString] produces.\n         */\n        public val ISO_DATE_TIME_OFFSET: DateTimeFormat<DateTimeComponents> = Format {\n            date(ISO_DATE)\n            alternativeParsing({\n                char('t')\n            }) {\n                char('T')\n            }\n            hour()\n            char(':')\n            minute()\n            char(':')\n            second()\n            optional {\n                char('.')\n                secondFraction(1, 9)\n            }\n            alternativeParsing({\n                offsetHours()\n            }) {\n                offset(UtcOffset.Formats.ISO)\n            }\n        }\n\n        /**\n         * RFC 1123 format for dates and times with UTC offset.\n         *\n         * Examples of valid strings:\n         * * `Mon, 30 Jun 2008 11:05:30 GMT`\n         * * `Mon, 30 Jun 2008 11:05:30 -0300`\n         * * `30 Jun 2008 11:05:30 UT`\n         *\n         * North American and military time zone abbreviations are not supported.\n         */\n        public val RFC_1123: DateTimeFormat<DateTimeComponents> = Format {\n            alternativeParsing({\n                // the day of week may be missing\n            }) {\n                dayOfWeek(DayOfWeekNames.ENGLISH_ABBREVIATED)\n                chars(\", \")\n            }\n            dayOfMonth(Padding.NONE)\n            char(' ')\n            monthName(MonthNames.ENGLISH_ABBREVIATED)\n            char(' ')\n            year()\n            char(' ')\n            hour()\n            char(':')\n            minute()\n            optional {\n                char(':')\n                second()\n            }\n            chars(\" \")\n            alternativeParsing({\n                chars(\"UT\")\n            }, {\n                chars(\"Z\")\n            }) {\n                optional(\"GMT\") {\n                    offset(UtcOffset.Formats.FOUR_DIGITS)\n                }\n            }\n        }\n    }\n\n    /**\n     * Writes the contents of the specified [localTime] to this [DateTimeComponents].\n     * The [localTime] is written to the [hour], [hourOfAmPm], [amPm], [minute], [second] and [nanosecond] fields.\n     *\n     * If any of the fields are already set, they will be overwritten.\n     */\n    public fun setTime(localTime: LocalTime) {\n        contents.time.populateFrom(localTime)\n    }\n\n    /**\n     * Writes the contents of the specified [localDate] to this [DateTimeComponents].\n     * The [localDate] is written to the [year], [monthNumber], [dayOfMonth], and [dayOfWeek] fields.\n     *\n     * If any of the fields are already set, they will be overwritten.\n     */\n    public fun setDate(localDate: LocalDate) {\n        contents.date.populateFrom(localDate)\n    }\n\n    /**\n     * Writes the contents of the specified [localDateTime] to this [DateTimeComponents].\n     * The [localDateTime] is written to the\n     * [year], [monthNumber], [dayOfMonth], [dayOfWeek],\n     * [hour], [hourOfAmPm], [amPm], [minute], [second] and [nanosecond] fields.\n     *\n     * If any of the fields are already set, they will be overwritten.\n     */\n    public fun setDateTime(localDateTime: LocalDateTime) {\n        contents.date.populateFrom(localDateTime.date)\n        contents.time.populateFrom(localDateTime.time)\n    }\n\n    /**\n     * Writes the contents of the specified [utcOffset] to this [DateTimeComponents].\n     * The [utcOffset] is written to the [offsetHours], [offsetMinutesOfHour], [offsetSecondsOfMinute], and\n     * [offsetIsNegative] fields.\n     *\n     * If any of the fields are already set, they will be overwritten.\n     */\n    public fun setOffset(utcOffset: UtcOffset) {\n        contents.offset.populateFrom(utcOffset)\n    }\n\n    /**\n     * Writes the contents of the specified [instant] to this [DateTimeComponents].\n     *\n     * This method is almost always equivalent to the following code:\n     * ```\n     * setDateTime(instant.toLocalDateTime(offset))\n     * setOffset(utcOffset)\n     * ```\n     * However, this also works for instants that are too large to be represented as a [LocalDateTime].\n     *\n     * If any of the fields are already set, they will be overwritten.\n     */\n    public fun setDateTimeOffset(instant: Instant, utcOffset: UtcOffset) {\n        val smallerInstant = Instant.fromEpochSeconds(\n            instant.epochSeconds % SECONDS_PER_10000_YEARS, instant.nanosecondsOfSecond\n        )\n        setDateTime(smallerInstant.toLocalDateTime(utcOffset))\n        setOffset(utcOffset)\n        year = year!! + ((instant.epochSeconds / SECONDS_PER_10000_YEARS) * 10000).toInt()\n    }\n\n    /**\n     * Writes the contents of the specified [localDateTime] and [utcOffset] to this [DateTimeComponents].\n     *\n     * A shortcut for calling [setDateTime] and [setOffset] separately.\n     *\n     * If [localDateTime] is obtained from an [Instant] using [LocalDateTime.toInstant], it is recommended to use\n     * [setDateTimeOffset] that accepts an [Instant] directly.\n     */\n    public fun setDateTimeOffset(localDateTime: LocalDateTime, utcOffset: UtcOffset) {\n        setDateTime(localDateTime)\n        setOffset(utcOffset)\n    }\n\n    /** The year component of the date. */\n    public var year: Int? by contents.date::year\n\n    /**\n     * The number-of-month (1..12) component of the date.\n     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.\n     */\n    public var monthNumber: Int? by TwoDigitNumber(contents.date::monthNumber)\n\n    /**\n     * The month ([Month]) component of the date.\n     * @throws IllegalArgumentException during getting if [monthNumber] is outside the `1..12` range.\n     */\n    public var month: Month?\n        get() = monthNumber?.let { Month(it) }\n        set(value) {\n            monthNumber = value?.number\n        }\n\n    /**\n     * The day-of-month component of the date.\n     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.\n     */\n    public var dayOfMonth: Int? by TwoDigitNumber(contents.date::dayOfMonth)\n\n    /** The day-of-week component of the date. */\n    public var dayOfWeek: DayOfWeek?\n        get() = contents.date.isoDayOfWeek?.let { DayOfWeek(it) }\n        set(value) {\n            contents.date.isoDayOfWeek = value?.isoDayNumber\n        }\n    // /** Returns the day-of-year component of the date. */\n    // public var dayOfYear: Int\n\n    /**\n     * The hour-of-day (0..23) time component.\n     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.\n     */\n    public var hour: Int? by TwoDigitNumber(contents.time::hour)\n\n    /**\n     * The 12-hour (1..12) time component.\n     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.\n     * @see amPm\n     */\n    public var hourOfAmPm: Int? by TwoDigitNumber(contents.time::hourOfAmPm)\n\n    /**\n     * The AM/PM state of the time component.\n     * @see hourOfAmPm\n     */\n    public var amPm: AmPmMarker? by contents.time::amPm\n\n    /**\n     * The minute-of-hour component.\n     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.\n     */\n    public var minute: Int? by TwoDigitNumber(contents.time::minute)\n\n    /**\n     * The second-of-minute component.\n     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.\n     */\n    public var second: Int? by TwoDigitNumber(contents.time::second)\n\n    /**\n     * The nanosecond-of-second component.\n     * @throws IllegalArgumentException during assignment if the value is outside the `0..999_999_999` range.\n     */\n    public var nanosecond: Int?\n        get() = contents.time.nanosecond\n        set(value) {\n            require(value == null || value in 0..999_999_999) {\n                \"Nanosecond must be in the range [0, 999_999_999].\"\n            }\n            contents.time.nanosecond = value\n        }\n\n    /** True if the offset is negative. */\n    public var offsetIsNegative: Boolean? by contents.offset::isNegative\n\n    /**\n     * The total amount of full hours in the UTC offset, in the range [0; 18].\n     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.\n     */\n    public var offsetHours: Int? by TwoDigitNumber(contents.offset::totalHoursAbs)\n\n    /**\n     * The amount of minutes that don't add to a whole hour in the UTC offset, in the range [0; 59].\n     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.\n     */\n    public var offsetMinutesOfHour: Int? by TwoDigitNumber(contents.offset::minutesOfHour)\n\n    /**\n     * The amount of seconds that don't add to a whole minute in the UTC offset, in the range [0; 59].\n     * @throws IllegalArgumentException during assignment if the value is outside the `0..99` range.\n     */\n    public var offsetSecondsOfMinute: Int? by TwoDigitNumber(contents.offset::secondsOfMinute)\n\n    /** The timezone identifier, for example, \"Europe/Berlin\". */\n    public var timeZoneId: String? by contents::timeZoneId\n\n    private fun formatExceptionMessage(e: Throwable): String =\n        (e.message ?: \"\") + (originalInput?.let { \" for input '$it'\" } ?: \"\")\n\n    /**\n     * Builds a [UtcOffset] from the fields in this [DateTimeComponents].\n     *\n     * This method uses the following fields:\n     * * [offsetIsNegative] (default value is `false`)\n     * * [offsetHours] (default value is 0)\n     * * [offsetMinutesOfHour] (default value is 0)\n     * * [offsetSecondsOfMinute] (default value is 0)\n     *\n     * @throws IllegalArgumentException if any of the fields has an out-of-range value.\n     */\n    public fun toUtcOffset(): UtcOffset = try {\n        contents.offset.toUtcOffset()\n    } catch (e: IllegalArgumentException) {\n        throw IllegalArgumentException(formatExceptionMessage(e), e)\n    }\n\n    /**\n     * Builds a [LocalDate] from the fields in this [DateTimeComponents].\n     *\n     * This method uses the following fields:\n     * * [year]\n     * * [monthNumber]\n     * * [dayOfMonth]\n     *\n     * Also, [dayOfWeek] is checked for consistency with the other fields.\n     *\n     * @throws IllegalArgumentException if any of the fields is missing or invalid.\n     */\n    public fun toLocalDate(): LocalDate = try {\n        contents.date.toLocalDate()\n    } catch (e: IllegalArgumentException) {\n        throw IllegalArgumentException(formatExceptionMessage(e), e)\n    }\n\n    /**\n     * Builds a [LocalTime] from the fields in this [DateTimeComponents].\n     *\n     * This method uses the following fields:\n     * * [hour], [hourOfAmPm], and [amPm]\n     * * [minute]\n     * * [second] (default value is 0)\n     * * [nanosecond] (default value is 0)\n     *\n     * @throws IllegalArgumentException if hours or minutes are not present, if any of the fields are invalid, or\n     * [hourOfAmPm] and [amPm] are inconsistent with [hour].\n     */\n    public fun toLocalTime(): LocalTime = try {\n        contents.time.toLocalTime()\n    } catch (e: IllegalArgumentException) {\n        throw IllegalArgumentException(formatExceptionMessage(e), e)\n    }\n\n    /**\n     * Builds a [LocalDateTime] from the fields in this [DateTimeComponents].\n     *\n     * This method uses the following fields:\n     * * [year]\n     * * [monthNumber]\n     * * [dayOfMonth]\n     * * [hour], [hourOfAmPm], and [amPm]\n     * * [minute]\n     * * [second] (default value is 0)\n     * * [nanosecond] (default value is 0)\n     *\n     * Also, [dayOfWeek] is checked for consistency with the other fields.\n     *\n     * @throws IllegalArgumentException if any of the required fields are not present,\n     * any of the fields are invalid, or there's inconsistency.\n     *\n     * @see toLocalDate\n     * @see toLocalTime\n     */\n    public fun toLocalDateTime(): LocalDateTime = toLocalDate().atTime(toLocalTime())\n\n    /**\n     * Builds an [Instant] from the fields in this [DateTimeComponents].\n     *\n     * Uses the fields required for [toLocalDateTime] and [toUtcOffset].\n     *\n     * Almost always equivalent to `toLocalDateTime().toInstant(toUtcOffset())`, but also accounts for cases when\n     * the year is outside the range representable by [LocalDate] but not outside the range representable by [Instant].\n     *\n     * @throws IllegalArgumentException if any of the required fields are not present, out-of-range, or inconsistent\n     * with one another.\n     */\n    public fun toInstantUsingOffset(): Instant {\n        try {\n            val offset = toUtcOffset()\n            val time = toLocalTime()\n            val truncatedDate = contents.date.copy()\n            /**\n             * 10_000 is a number that is both\n             * * guaranteed to be representable as the number of years in a [LocalDate],\n             * * and is a multiple of 400, which is the number of years in a leap cycle, which means that taking the\n             *   remainder of the year after dividing by 40_000 will not change the leap year status of the year.\n             */\n            truncatedDate.year = requireParsedField(truncatedDate.year, \"year\") % 10_000\n            val totalSeconds = try {\n                val secDelta = safeMultiply((year!! / 10_000).toLong(), SECONDS_PER_10000_YEARS)\n                val epochDays = truncatedDate.toLocalDate().toEpochDays().toLong()\n                safeAdd(secDelta, epochDays * SECONDS_PER_DAY + time.toSecondOfDay() - offset.totalSeconds)\n            } catch (e: ArithmeticException) {\n                throw DateTimeFormatException(\"The parsed date is outside the range representable by Instant\", e)\n            }\n            if (totalSeconds < Instant.MIN.epochSeconds || totalSeconds > Instant.MAX.epochSeconds)\n                throw DateTimeFormatException(\"The parsed date is outside the range representable by Instant\")\n            return Instant.fromEpochSeconds(totalSeconds, nanosecond ?: 0)\n        } catch (e: IllegalArgumentException) {\n            if (e.message?.contains(\" for input '\") == true) throw e\n            throw IllegalArgumentException(formatExceptionMessage(e), e)\n        } catch (e: DateTimeFormatException) {\n            if (e.message?.contains(\" for input '\") == true) throw e\n            throw DateTimeFormatException(formatExceptionMessage(e), e.cause)\n        }\n    }\n}\n\n/**\n * Uses this format to format an unstructured [DateTimeComponents].\n *\n * [block] is called on an initially-empty [DateTimeComponents] before formatting.\n *\n * Example:\n * ```\n * // Mon, 16 Mar 2020 23:59:59 +0300\n * DateTimeComponents.Formats.RFC_1123.format {\n *    setDateTime(LocalDateTime(2020, 3, 16, 23, 59, 59, 999_999_999))\n *    setOffset(UtcOffset(hours = 3))\n * }\n * ```\n *\n * @throws IllegalStateException if some values needed for the format are not present or can not be formatted:\n * for example, trying to format [DateTimeFormatBuilder.WithDate.monthName] using a [DateTimeComponents.monthNumber]\n * value of 20.\n */\npublic fun DateTimeFormat<DateTimeComponents>.format(block: DateTimeComponents.() -> Unit): String =\n    format(DateTimeComponents().apply { block() })\n\n/**\n * Parses a [DateTimeComponents] from [input] using the given format.\n * Equivalent to calling [DateTimeFormat.parse] on [format] with [input].\n *\n * [DateTimeComponents] does not perform any validation, so even invalid values may be parsed successfully if the string pattern\n * matches.\n *\n * @throws IllegalArgumentException if the text does not match the format.\n */\npublic fun DateTimeComponents.Companion.parse(\n    input: CharSequence,\n    format: DateTimeFormat<DateTimeComponents>\n): DateTimeComponents =\n    format.parse(input).apply { originalInput = input }\n\ninternal class DateTimeComponentsContents internal constructor(\n    val date: IncompleteLocalDate = IncompleteLocalDate(),\n    val time: IncompleteLocalTime = IncompleteLocalTime(),\n    val offset: IncompleteUtcOffset = IncompleteUtcOffset(),\n    var timeZoneId: String? = null,\n) : DateFieldContainer by date, TimeFieldContainer by time, UtcOffsetFieldContainer by offset,\n    DateTimeFieldContainer, Copyable<DateTimeComponentsContents> {\n    override fun copy(): DateTimeComponentsContents =\n        DateTimeComponentsContents(date.copy(), time.copy(), offset.copy(), timeZoneId)\n\n    override fun equals(other: Any?): Boolean =\n        other is DateTimeComponentsContents && other.date == date && other.time == time &&\n            other.offset == offset && other.timeZoneId == timeZoneId\n\n    override fun hashCode(): Int =\n        date.hashCode() xor time.hashCode() xor offset.hashCode() xor (timeZoneId?.hashCode() ?: 0)\n}\n\ninternal val timeZoneField = GenericFieldSpec(PropertyAccessor(DateTimeComponentsContents::timeZoneId))\n\ninternal class TimeZoneIdDirective(private val knownZones: Set<String>) :\n    StringFieldFormatDirective<DateTimeComponentsContents>(timeZoneField, knownZones) {\n\n    override val builderRepresentation: String\n        get() =\n            \"${DateTimeFormatBuilder.WithDateTimeComponents::timeZoneId.name}()\"\n\n    override fun equals(other: Any?): Boolean = other is TimeZoneIdDirective && other.knownZones == knownZones\n    override fun hashCode(): Int = knownZones.hashCode()\n}\n\ninternal class DateTimeComponentsFormat(override val actualFormat: CachedFormatStructure<DateTimeComponentsContents>) :\n    AbstractDateTimeFormat<DateTimeComponents, DateTimeComponentsContents>() {\n    override fun intermediateFromValue(value: DateTimeComponents): DateTimeComponentsContents = value.contents\n\n    override fun valueFromIntermediate(intermediate: DateTimeComponentsContents): DateTimeComponents =\n        DateTimeComponents(intermediate)\n\n    override val emptyIntermediate get() = emptyDateTimeComponentsContents\n\n    class Builder(override val actualBuilder: AppendableFormatStructure<DateTimeComponentsContents>) :\n        AbstractDateTimeFormatBuilder<DateTimeComponentsContents, Builder>, AbstractWithDateTimeBuilder,\n        AbstractWithOffsetBuilder, DateTimeFormatBuilder.WithDateTimeComponents {\n        override fun addFormatStructureForDateTime(structure: FormatStructure<DateTimeFieldContainer>) {\n            actualBuilder.add(structure)\n        }\n\n        override fun addFormatStructureForOffset(structure: FormatStructure<UtcOffsetFieldContainer>) {\n            actualBuilder.add(structure)\n        }\n\n        override fun timeZoneId() =\n            actualBuilder.add(BasicFormatStructure(TimeZoneIdDirective(TimeZone.availableZoneIds)))\n\n        @Suppress(\"NO_ELSE_IN_WHEN\")\n        override fun dateTimeComponents(format: DateTimeFormat<DateTimeComponents>) = when (format) {\n            is DateTimeComponentsFormat -> actualBuilder.add(format.actualFormat)\n        }\n\n        override fun createEmpty(): Builder = Builder(AppendableFormatStructure())\n    }\n}\n\nprivate class TwoDigitNumber(private val reference: KMutableProperty0<Int?>) {\n    operator fun getValue(thisRef: Any?, property: KProperty<*>) = reference.getValue(thisRef, property)\n\n    operator fun setValue(thisRef: Any?, property: KProperty<*>, value: Int?) {\n        require(value === null || value in 0..99) { \"${property.name} must be a two-digit number, got '$value'\" }\n        reference.setValue(thisRef, property, value)\n    }\n}\n\nprivate val emptyDateTimeComponentsContents = DateTimeComponentsContents()\n[end of core/common/src/format/DateTimeComponents.kt]\n[start of core/common/src/format/DateTimeFormat.kt]\n/*\n * Copyright 2019-2023 JetBrains s.r.o. and contributors.\n * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.\n */\n\npackage kotlinx.datetime.format\n\nimport kotlinx.datetime.*\nimport kotlinx.datetime.internal.format.*\nimport kotlinx.datetime.internal.format.parser.*\n\n/**\n * A format for parsing and formatting date-time-related values.\n */\npublic sealed interface DateTimeFormat<T> {\n    /**\n     * Formats the given [value] into a string, using this format.\n     */\n    public fun format(value: T): String\n\n    /**\n     * Formats the given [value] into the given [appendable] using this format.\n     */\n    public fun <A : Appendable> formatTo(appendable: A, value: T): A\n\n    /**\n     * Parses the given [input] string as [T] using this format.\n     *\n     * @throws IllegalArgumentException if the input string is not in the expected format or the value is invalid.\n     */\n    public fun parse(input: CharSequence): T\n\n    /**\n     * Parses the given [input] string as [T] using this format.\n     *\n     * @return the parsed value, or `null` if the input string is not in the expected format or the value is invalid.\n     */\n    public fun parseOrNull(input: CharSequence): T?\n\n    public companion object {\n        /**\n         * Produces Kotlin code that, when pasted into a Kotlin source file, creates a [DateTimeFormat] instance that\n         * behaves identically to [format].\n         *\n         * The typical use case for this is to create a [DateTimeFormat] instance using a non-idiomatic approach and\n         * then convert it to a builder DSL.\n         */\n        public fun formatAsKotlinBuilderDsl(format: DateTimeFormat<*>): String = when (format) {\n            is AbstractDateTimeFormat<*, *> -> format.actualFormat.builderString(allFormatConstants)\n        }\n    }\n}\n\n/**\n * The style of padding to use when formatting a value.\n */\npublic enum class Padding {\n    /**\n     * No padding.\n     */\n    NONE,\n\n    /**\n     * Pad with zeros.\n     */\n    ZERO,\n\n    /**\n     * Pad with spaces.\n     */\n    SPACE\n}\n\ninternal fun Padding.toKotlinCode(): String = when (this) {\n    Padding.NONE -> \"Padding.NONE\"\n    Padding.ZERO -> \"Padding.ZERO\"\n    Padding.SPACE -> \"Padding.SPACE\"\n}\n\ninternal inline fun Padding.minDigits(width: Int) = if (this == Padding.ZERO) width else 1\ninternal inline fun Padding.spaces(width: Int) = if (this == Padding.SPACE) width else null\n\n/** [T] is the user-visible type, whereas [U] is its mutable representation for parsing and formatting. */\ninternal sealed class AbstractDateTimeFormat<T, U : Copyable<U>> : DateTimeFormat<T> {\n\n    abstract val actualFormat: CachedFormatStructure<U>\n\n    abstract fun intermediateFromValue(value: T): U\n\n    abstract fun valueFromIntermediate(intermediate: U): T\n\n    abstract val emptyIntermediate: U // should be part of the `Copyable` interface once the language allows this\n\n    open fun valueFromIntermediateOrNull(intermediate: U): T? = try {\n        valueFromIntermediate(intermediate)\n    } catch (e: IllegalArgumentException) {\n        null\n    }\n\n    override fun format(value: T): String = StringBuilder().also {\n        actualFormat.formatter().format(intermediateFromValue(value), it)\n    }.toString()\n\n    override fun <A : Appendable> formatTo(appendable: A, value: T): A = appendable.apply {\n        actualFormat.formatter().format(intermediateFromValue(value), this)\n    }\n\n    override fun parse(input: CharSequence): T {\n        val matched = try {\n            // without the fully qualified name, the compilation fails for some reason\n            Parser(actualFormat.parser()).match(input, emptyIntermediate)\n        } catch (e: ParseException) {\n            throw DateTimeFormatException(\"Failed to parse value from '$input'\", e)\n        }\n        try {\n            return valueFromIntermediate(matched)\n        } catch (e: IllegalArgumentException) {\n            throw DateTimeFormatException(\"${e.message} for input '$input'\", e)\n        }\n    }\n\n    override fun parseOrNull(input: CharSequence): T? =\n        // without the fully qualified name, the compilation fails for some reason\n        Parser(actualFormat.parser()).matchOrNull(input, emptyIntermediate)?.let { valueFromIntermediateOrNull(it) }\n\n}\n\nprivate val allFormatConstants: List<Pair<String, CachedFormatStructure<*>>> by lazy {\n    fun unwrap(format: DateTimeFormat<*>): CachedFormatStructure<*> = (format as AbstractDateTimeFormat<*, *>).actualFormat\n    // the formats are ordered vaguely by decreasing length, as the topmost among suitable ones is chosen.\n    listOf(\n        \"${DateTimeFormatBuilder.WithDateTimeComponents::dateTimeComponents.name}(DateTimeComponents.Formats.RFC_1123)\" to\n            unwrap(DateTimeComponents.Formats.RFC_1123),\n        \"${DateTimeFormatBuilder.WithDateTimeComponents::dateTimeComponents.name}(DateTimeComponents.Formats.ISO_DATE_TIME_OFFSET)\" to\n            unwrap(DateTimeComponents.Formats.ISO_DATE_TIME_OFFSET),\n        \"${DateTimeFormatBuilder.WithDateTime::date.name}(LocalDateTime.Formats.ISO)\" to unwrap(LocalDateTime.Formats.ISO),\n        \"${DateTimeFormatBuilder.WithDate::date.name}(LocalDate.Formats.ISO)\" to unwrap(LocalDate.Formats.ISO),\n        \"${DateTimeFormatBuilder.WithDate::date.name}(LocalDate.Formats.ISO_BASIC)\" to unwrap(LocalDate.Formats.ISO_BASIC),\n        \"${DateTimeFormatBuilder.WithTime::time.name}(LocalTime.Formats.ISO)\" to unwrap(LocalTime.Formats.ISO),\n        \"${DateTimeFormatBuilder.WithUtcOffset::offset.name}(UtcOffset.Formats.ISO)\" to unwrap(UtcOffset.Formats.ISO),\n        \"${DateTimeFormatBuilder.WithUtcOffset::offset.name}(UtcOffset.Formats.ISO_BASIC)\" to unwrap(UtcOffset.Formats.ISO_BASIC),\n        \"${DateTimeFormatBuilder.WithUtcOffset::offset.name}(UtcOffset.Formats.FOUR_DIGITS)\" to unwrap(UtcOffset.Formats.FOUR_DIGITS),\n    )\n}\n[end of core/common/src/format/DateTimeFormat.kt]\n[start of core/common/src/internal/format/parser/ParserOperation.kt]\n/*\n * Copyright 2023 JetBrains s.r.o. and contributors.\n * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.\n */\n\npackage kotlinx.datetime.internal.format.parser\n\ninternal interface ParserOperation<in Output> {\n    fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult\n}\n\n/**\n * Consumes exactly the string [string].\n */\ninternal class PlainStringParserOperation<Output>(val string: String) : ParserOperation<Output> {\n    init {\n        require(string.isNotEmpty()) { \"Empty string is not allowed\" }\n        require(!string[0].isDigit()) { \"String '$string' starts with a digit\" }\n        require(!string[string.length - 1].isDigit()) { \"String '$string' ends with a digit\" }\n    }\n\n    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {\n        if (startIndex + string.length > input.length)\n            return ParseResult.Error(startIndex) { \"Unexpected end of input: yet to parse '$string'\" }\n        for (i in string.indices) {\n            if (input[startIndex + i] != string[i]) return ParseResult.Error(startIndex + i) {\n                \"Expected $string but got ${input.substring(startIndex, startIndex + i + 1)}\"\n            }\n        }\n        return ParseResult.Ok(startIndex + string.length)\n    }\n\n    // TODO: properly escape\n    override fun toString(): String = \"'$string'\"\n}\n\n/**\n * Greedily consumes as many digits as possible and redistributes them among [consumers].\n *\n * At most one consumer is allowed to have a variable length.\n * If more digits are supplied than the sum of lengths of all consumers, this is the consumer that will receive the\n * extra.\n */\ninternal class NumberSpanParserOperation<Output>(\n    val consumers: List<NumberConsumer<Output>>,\n) : ParserOperation<Output> {\n\n    private val minLength = consumers.sumOf { it.length ?: 1 }\n    private val isFlexible = consumers.any { it.length == null }\n\n    init {\n        require(consumers.all { (it.length ?: Int.MAX_VALUE) > 0 })\n        require(consumers.count { it.length == null } <= 1)\n    }\n\n    private val whatThisExpects: String\n        get() {\n            val consumerLengths = consumers.map {\n                when (val length = it.length) {\n                    null -> \"at least one digit\"\n                    else -> \"$length digits\"\n                } + \" for ${it.whatThisExpects}\"\n            }\n            return if (isFlexible) {\n                \"a number with at least $minLength digits: $consumerLengths\"\n            } else {\n                \"a number with exactly $minLength digits: $consumerLengths\"\n            }\n        }\n\n    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {\n        if (startIndex + minLength > input.length)\n            return ParseResult.Error(startIndex) { \"Unexpected end of input: yet to parse $whatThisExpects\" }\n        var digitsInRow = 0\n        while (startIndex + digitsInRow < input.length && input[startIndex + digitsInRow].isDigit()) {\n            ++digitsInRow\n        }\n        if (digitsInRow < minLength)\n            return ParseResult.Error(startIndex) {\n                \"Only found $digitsInRow digits in a row, but need to parse $whatThisExpects\"\n            }\n        var index = startIndex\n        for (i in consumers.indices) {\n            val length = consumers[i].length ?: (digitsInRow - minLength + 1)\n            val numberString = input.substring(index, index + length)\n            val error = consumers[i].consume(storage, numberString)\n            if (error != null) {\n                return ParseResult.Error(index) {\n                    \"Can not interpret the string '$numberString' as ${consumers[i].whatThisExpects}: ${error.errorMessage()}\"\n                }\n            }\n            index += length\n        }\n        return ParseResult.Ok(index)\n    }\n\n    override fun toString(): String = whatThisExpects\n}\n\ninternal class SignParser<Output>(\n    private val isNegativeSetter: (Output, Boolean) -> Unit,\n    private val withPlusSign: Boolean,\n    private val whatThisExpects: String,\n) : ParserOperation<Output> {\n    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {\n        if (startIndex >= input.length)\n            return ParseResult.Ok(startIndex)\n        val char = input[startIndex]\n        if (char == '-') {\n            isNegativeSetter(storage, true)\n            return ParseResult.Ok(startIndex + 1)\n        }\n        if (char == '+' && withPlusSign) {\n            isNegativeSetter(storage, false)\n            return ParseResult.Ok(startIndex + 1)\n        }\n        return ParseResult.Error(startIndex) { \"Expected $whatThisExpects but got $char\" }\n    }\n\n    override fun toString(): String = whatThisExpects\n}\n\n/**\n * Consumes an empty string and unconditionally modifies the accumulator.\n */\ninternal class UnconditionalModification<Output>(\n    private val operation: (Output) -> Unit\n) : ParserOperation<Output> {\n    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {\n        operation(storage)\n        return ParseResult.Ok(startIndex)\n    }\n}\n\n/**\n * Matches the longest suitable string from `strings` and calls [consume] with the matched string.\n */\ninternal class StringSetParserOperation<Output>(\n    strings: Collection<String>,\n    private val setter: AssignableField<Output, String>,\n    private val whatThisExpects: String,\n) : ParserOperation<Output> {\n\n    // TODO: tries don't have good performance characteristics for small sets, add a special case for small sets\n\n    private class TrieNode(\n        val children: MutableList<Pair<String, TrieNode>> = mutableListOf(),\n        var isTerminal: Boolean = false\n    )\n\n    private val trie = TrieNode()\n\n    init {\n        for (string in strings) {\n            var node = trie\n            for (char in string) {\n                val searchResult = node.children.binarySearchBy(char.toString()) { it.first }\n                node = if (searchResult < 0) {\n                    TrieNode().also { node.children.add(-searchResult - 1, char.toString() to it) }\n                } else {\n                    node.children[searchResult].second\n                }\n            }\n            node.isTerminal = true\n        }\n        fun reduceTrie(trie: TrieNode) {\n            for ((_, child) in trie.children) {\n                reduceTrie(child)\n            }\n            val newChildren = mutableListOf<Pair<String, TrieNode>>()\n            for ((key, child) in trie.children) {\n                if (!child.isTerminal && child.children.size == 1) {\n                    val (grandChildKey, grandChild) = child.children.single()\n                    newChildren.add(key + grandChildKey to grandChild)\n                } else {\n                    newChildren.add(key to child)\n                }\n            }\n            trie.children.clear()\n            trie.children.addAll(newChildren.sortedBy { it.first })\n        }\n        reduceTrie(trie)\n    }\n\n    override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {\n        var node = trie\n        var index = startIndex\n        var lastMatch: Int? = null\n        loop@ while (index <= input.length) {\n            if (node.isTerminal) lastMatch = index\n            for ((key, child) in node.children) {\n                if (input.startsWith(key, index)) {\n                    node = child\n                    index += key.length\n                    continue@loop\n                }\n            }\n            break // nothing found\n        }\n        return if (lastMatch != null) {\n            setter.setWithoutReassigning(storage, input.substring(startIndex, lastMatch), startIndex, lastMatch)\n        } else {\n            ParseResult.Error(index) { \"Expected $whatThisExpects but got ${input.substring(startIndex, index)}\" }\n        }\n    }\n}\n\ninternal fun <Output> SignedIntParser(\n    minDigits: Int?,\n    maxDigits: Int?,\n    spacePadding: Int?,\n    setter: AssignableField<Output, Int>,\n    name: String,\n    plusOnExceedsWidth: Int?,\n): ParserStructure<Output> {\n    val parsers = mutableListOf(\n        spaceAndZeroPaddedUnsignedInt(minDigits, maxDigits, spacePadding, setter, name, withMinus = true)\n    )\n    if (plusOnExceedsWidth != null) {\n        parsers.add(\n            spaceAndZeroPaddedUnsignedInt(minDigits, plusOnExceedsWidth, spacePadding, setter, name)\n        )\n        parsers.add(\n            ParserStructure(\n                listOf(\n                    PlainStringParserOperation(\"+\"),\n                    NumberSpanParserOperation(\n                        listOf(\n                            UnsignedIntConsumer(\n                                plusOnExceedsWidth + 1,\n                                maxDigits,\n                                setter,\n                                name,\n                                multiplyByMinus1 = false\n                            )\n                        )\n                    )\n                ),\n                emptyList()\n            )\n        )\n    } else {\n        parsers.add(\n            spaceAndZeroPaddedUnsignedInt(minDigits, maxDigits, spacePadding, setter, name)\n        )\n    }\n    return ParserStructure(\n        emptyList(),\n        parsers,\n    )\n}\n\n// With maxWidth = 4,\n// padWidth = 7: \"   \" + (four digits | \" \" (three digits | \" \" (two digits | \" \", one digit)))\n// padWidth = 3: three to four digits | \" \" (two digits | \" \", one digit)\ninternal fun <Target> spaceAndZeroPaddedUnsignedInt(\n    minDigits: Int?,\n    maxDigits: Int?,\n    spacePadding: Int?,\n    setter: AssignableField<Target, Int>,\n    name: String,\n    withMinus: Boolean = false,\n): ParserStructure<Target> {\n    val minNumberLength = (minDigits ?: 1) + if (withMinus) 1 else 0\n    val maxNumberLength = maxDigits?.let { if (withMinus) it + 1 else it } ?: Int.MAX_VALUE\n    val spacePadding = spacePadding ?: 0\n    fun numberOfRequiredLengths(minNumberLength: Int, maxNumberLength: Int): ParserStructure<Target> {\n        check(maxNumberLength >= 1 + if (withMinus) 1 else 0)\n        return ParserStructure(\n            buildList {\n                if (withMinus) add(PlainStringParserOperation(\"-\"))\n                add(\n                    NumberSpanParserOperation(\n                        listOf(\n                            UnsignedIntConsumer(\n                                minNumberLength - if (withMinus) 1 else 0,\n                                maxNumberLength - if (withMinus) 1 else 0,\n                                setter,\n                                name,\n                                multiplyByMinus1 = withMinus,\n                            )\n                        )\n                    )\n                )\n            },\n            emptyList()\n        )\n    }\n\n    val maxPaddedNumberLength = minOf(maxNumberLength, spacePadding)\n    if (minNumberLength >= maxPaddedNumberLength) return numberOfRequiredLengths(minNumberLength, maxNumberLength)\n    // invariant: the length of the string parsed by 'accumulated' is exactly 'accumulatedWidth'\n    var accumulated: ParserStructure<Target> = numberOfRequiredLengths(minNumberLength, minNumberLength)\n    for (accumulatedWidth in minNumberLength until maxPaddedNumberLength) {\n        accumulated = ParserStructure(\n            emptyList(),\n            listOf(\n                numberOfRequiredLengths(accumulatedWidth + 1, accumulatedWidth + 1),\n                listOf(\n                    ParserStructure(listOf(PlainStringParserOperation(\" \")), emptyList()),\n                    accumulated\n                ).concat()\n            )\n        )\n    }\n    // accumulatedWidth == maxNumberLength || accumulatedWidth == spacePadding.\n    // In the first case, we're done, in the second case, we need to add the remaining numeric lengths.\n    return if (spacePadding > maxNumberLength) {\n        val prepadding = PlainStringParserOperation<Target>(\" \".repeat(spacePadding - maxNumberLength))\n        listOf(\n            ParserStructure(\n                listOf(\n                    prepadding,\n                ),\n                emptyList()\n            ), accumulated\n        ).concat()\n    } else if (spacePadding == maxNumberLength) {\n        accumulated\n    } else {\n        val r = ParserStructure(\n            emptyList(),\n            listOf(\n                numberOfRequiredLengths(spacePadding + 1, maxNumberLength),\n                accumulated\n            )\n        )\n        r\n    }\n}\n\ninternal fun <Output> ReducedIntParser(\n    digits: Int,\n    base: Int,\n    setter: AssignableField<Output, Int>,\n    name: String,\n): ParserStructure<Output> = ParserStructure(\n    emptyList(),\n    listOf(\n        ParserStructure(\n            listOf(\n                NumberSpanParserOperation(\n                    listOf(\n                        ReducedIntConsumer(\n                            digits,\n                            setter,\n                            name,\n                            base = base\n                        )\n                    )\n                )\n            ),\n            emptyList()\n        ),\n        ParserStructure(\n            listOf(\n                PlainStringParserOperation(\"+\"),\n                NumberSpanParserOperation(\n                    listOf(\n                        UnsignedIntConsumer(\n                            null,\n                            null,\n                            setter,\n                            name,\n                            multiplyByMinus1 = false\n                        )\n                    )\n                )\n            ),\n            emptyList()\n        ),\n        ParserStructure(\n            listOf(\n                PlainStringParserOperation(\"-\"),\n                NumberSpanParserOperation(\n                    listOf(\n                        UnsignedIntConsumer(\n                            null,\n                            null,\n                            setter,\n                            name,\n                            multiplyByMinus1 = true\n                        )\n                    )\n                )\n            ),\n            emptyList()\n        ),\n    )\n)\n\ninternal interface AssignableField<in Object, Type> {\n    /**\n     * If the field is not set, sets it to the given value.\n     * If the field is set to the given value, does nothing.\n     * If the field is set to a different value, throws [IllegalArgumentException].\n     *\n     * This function is used to ensure internal consistency during parsing.\n     * There exist formats where the same data is repeated several times in the same object, for example,\n     * \"14:15 (02:15 PM)\". In such cases, we want to ensure that the values are consistent.\n     */\n    fun trySetWithoutReassigning(container: Object, newValue: Type): Type?\n\n    /**\n     * The name of the field.\n     */\n    val name: String\n}\n\nprivate fun <Object, Type> AssignableField<Object, Type>.setWithoutReassigning(\n    receiver: Object,\n    value: Type,\n    position: Int,\n    nextIndex: Int\n): ParseResult {\n    val conflictingValue = trySetWithoutReassigning(receiver, value)\n    return if (conflictingValue === null) {\n        ParseResult.Ok(nextIndex)\n    } else {\n        ParseResult.Error(position) {\n            \"Attempting to assign conflicting values '$conflictingValue' and '$value' to field '$name'\"\n        }\n    }\n}\n[end of core/common/src/internal/format/parser/ParserOperation.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 2589,
+            "endIndex": 3137,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 3849,
+            "endIndex": 3970,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime/issues/361",
+            "license": ""
+          },
+          {
+            "startIndex": 4759,
+            "endIndex": 4942,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 5063,
+            "endIndex": 5318,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 5141,
+            "endIndex": 5351,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 6487,
+            "endIndex": 6617,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 6655,
+            "endIndex": 7173,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 7256,
+            "endIndex": 7397,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 9067,
+            "endIndex": 9426,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 10243,
+            "endIndex": 10613,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 11404,
+            "endIndex": 11677,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 12051,
+            "endIndex": 12602,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 13737,
+            "endIndex": 14300,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 14677,
+            "endIndex": 14851,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 14902,
+            "endIndex": 15201,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 15377,
+            "endIndex": 15603,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 15538,
+            "endIndex": 15719,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 17164,
+            "endIndex": 17322,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 19242,
+            "endIndex": 19805,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 20234,
+            "endIndex": 20516,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 21432,
+            "endIndex": 21632,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 24148,
+            "endIndex": 24293,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 24318,
+            "endIndex": 24520,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 24519,
+            "endIndex": 24760,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 25262,
+            "endIndex": 25463,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 25493,
+            "endIndex": 25741,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 26120,
+            "endIndex": 26297,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 26183,
+            "endIndex": 26582,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 26569,
+            "endIndex": 26780,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 27068,
+            "endIndex": 27937,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 31152,
+            "endIndex": 31525,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 32162,
+            "endIndex": 32298,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 32840,
+            "endIndex": 32981,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 34878,
+            "endIndex": 35164,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 36002,
+            "endIndex": 36143,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 39036,
+            "endIndex": 39931,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 43587,
+            "endIndex": 44002,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 46502,
+            "endIndex": 46645,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 46999,
+            "endIndex": 47413,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 48723,
+            "endIndex": 49019,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 50906,
+            "endIndex": 51321,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 53866,
+            "endIndex": 54005,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 56713,
+            "endIndex": 57128,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 58677,
+            "endIndex": 58849,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 59235,
+            "endIndex": 59365,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 61307,
+            "endIndex": 61437,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 63193,
+            "endIndex": 63375,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 64089,
+            "endIndex": 64290,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 68479,
+            "endIndex": 68984,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 71475,
+            "endIndex": 72086,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 72546,
+            "endIndex": 72747,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 73406,
+            "endIndex": 73541,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 73476,
+            "endIndex": 76156,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 76221,
+            "endIndex": 77328,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 77192,
+            "endIndex": 77571,
+            "uri": "https://kotlinlang.org/api/kotlinx-datetime/kotlinx-datetime/kotlinx.datetime.format/-date-time-components/-formats/-i-s-o_-d-a-t-e_-t-i-m-e_-o-f-f-s-e-t.html",
+            "license": ""
+          },
+          {
+            "startIndex": 77419,
+            "endIndex": 77815,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 77799,
+            "endIndex": 78116,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 78097,
+            "endIndex": 87194,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 87357,
+            "endIndex": 87822,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 88006,
+            "endIndex": 88407,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 88587,
+            "endIndex": 89075,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 89258,
+            "endIndex": 90579,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 90609,
+            "endIndex": 92010,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 92410,
+            "endIndex": 93326,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 93208,
+            "endIndex": 93721,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 93759,
+            "endIndex": 97390,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 97507,
+            "endIndex": 97642,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 97577,
+            "endIndex": 101469,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 101484,
+            "endIndex": 101661,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 101517,
+            "endIndex": 103338,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 103477,
+            "endIndex": 103602,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 103554,
+            "endIndex": 104615,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 104637,
+            "endIndex": 111265,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          },
+          {
+            "startIndex": 111278,
+            "endIndex": 118798,
+            "uri": "https://github.com/Kotlin/kotlinx-datetime",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 33202,
+    "candidatesTokenCount": 11719,
+    "totalTokenCount": 61959,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 33202
+      }
+    ],
+    "thoughtsTokenCount": 17038
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "44dDaPT3HsKw1MkP57_oAQ"
+}

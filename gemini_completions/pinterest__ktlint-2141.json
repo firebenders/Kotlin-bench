@@ -1,0 +1,448 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Hello! As an AI code assistant, I'd be happy to help you with this issue. Based on the problem description, it seems like the `property-naming` rule in `ktlint` isn't correctly handling mutable collection properties within objects, leading to an incorrect style enforcement.\n\nHere are the changes to fix the `PropertyNamingRule` to correctly identify mutable collections and apply the appropriate naming convention.\n\n[start of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt]\n```kotlin\npackage com.pinterest.ktlint.ruleset.standard.rules\n\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS_BODY\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.CONST_KEYWORD\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.GET_KEYWORD\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.IDENTIFIER\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.OBJECT_DECLARATION\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.OVERRIDE_KEYWORD\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIVATE_KEYWORD\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY_ACCESSOR\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.REFERENCE_EXPRESSION\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE\nimport com.pinterest.ktlint.rule.engine.core.api.ElementType.VAL_KEYWORD\nimport com.pinterest.ktlint.rule.engine.core.api.Rule\nimport com.pinterest.ktlint.rule.engine.core.api.RuleId\nimport com.pinterest.ktlint.rule.engine.core.api.children\nimport com.pinterest.ktlint.rule.engine.core.api.nextCodeSibling\nimport com.pinterest.ktlint.ruleset.standard.StandardRule\nimport com.pinterest.ktlint.ruleset.standard.rules.internal.regExIgnoringDiacriticsAndStrokesOnLetters\nimport org.jetbrains.kotlin.com.intellij.lang.ASTNode\nimport org.jetbrains.kotlin.com.intellij.psi.tree.IElementType\n\n/**\n * https://kotlinlang.org/docs/coding-conventions.html#function-names\n * https://kotlinlang.org/docs/coding-conventions.html#property-names\n */\npublic class PropertyNamingRule :\n    StandardRule(\"property-naming\"),\n    Rule.Experimental {\n    override fun beforeVisitChildNodes(\n        node: ASTNode,\n        autoCorrect: Boolean,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        node\n            .takeIf { node.elementType == PROPERTY }\n            ?.let { property -> visitProperty(property, emit) }\n    }\n\n    private fun visitProperty(\n        property: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        property\n            .findChildByType(IDENTIFIER)\n            ?.let { identifier ->\n                when {\n                    property.hasCustomGetter() -> {\n                        // Can not reliably determine whether the value is immutable or not\n                    }\n                    property.isBackingProperty() -> {\n                        visitBackingProperty(identifier, emit)\n                    }\n                    property.isMutableCollection() -> {\n                        visitNonConstProperty(identifier, emit)\n                    }\n                    property.hasConstModifier() ||\n                        property.isTopLevelValue() ||\n                        property.isObjectValue() -> {\n                        visitConstProperty(identifier, emit)\n                    }\n                    else -> {\n                        visitNonConstProperty(identifier, emit)\n                    }\n                }\n            }\n    }\n\n    private fun ASTNode.isMutableCollection(): Boolean {\n        // E.g. \"val myVar: MutableSet<String>\"\n        findChildByType(TYPE_REFERENCE)\n            ?.let { typeReference ->\n                if (typeReference.text.startsWith(\"Mutable\")) {\n                    return true\n                }\n            }\n\n        // E.g. \"val myVar = mutableSetOf<String>()\"\n        val initializer = findChildByType(EQ)?.nextCodeSibling()\n        if (initializer?.elementType == CALL_EXPRESSION) {\n            val callee = initializer.findChildByType(REFERENCE_EXPRESSION)?.text\n            return when (callee) {\n                \"mutableListOf\", \"mutableSetOf\", \"mutableMapOf\",\n                \"arrayListOf\", \"hashMapOf\", \"hashSetOf\",\n                -> true\n                else -> false\n            }\n        }\n\n        return false\n    }\n\n    private fun visitBackingProperty(\n        identifier: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        identifier\n            .text\n            .takeUnless { it.matches(BACKING_PROPERTY_LOWER_CAMEL_CASE_REGEXP) }\n            ?.let {\n                emit(identifier.startOffset, \"Backing property name should start with underscore followed by lower camel case\", false)\n            }\n    }\n\n    private fun visitConstProperty(\n        identifier: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        identifier\n            .text\n            .takeUnless {\n                // Allow\n                // object Foo {\n                //     private const val serialVersionUID: Long = 123\n                // }\n                it == SERIAL_VERSION_UID_PROPERTY_NAME\n            }?.takeUnless { it.matches(SCREAMING_SNAKE_CASE_REGEXP) }\n            ?.let {\n                emit(\n                    identifier.startOffset,\n                    \"Property name should use the screaming snake case notation when the value can not be changed\",\n                    false,\n                )\n            }\n    }\n\n    private fun visitNonConstProperty(\n        identifier: ASTNode,\n        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,\n    ) {\n        identifier\n            .text\n            .takeUnless { it.matches(LOWER_CAMEL_CASE_REGEXP) }\n            ?.let {\n                emit(identifier.startOffset, \"Property name should start with a lowercase letter and use camel case\", false)\n            }\n    }\n\n    private fun ASTNode.hasCustomGetter() = findChildByType(PROPERTY_ACCESSOR)?.findChildByType(GET_KEYWORD) != null\n\n    private fun ASTNode.hasConstModifier() = hasModifier(CONST_KEYWORD)\n\n    private fun ASTNode.hasModifier(iElementType: IElementType) =\n        findChildByType(MODIFIER_LIST)\n            ?.children()\n            .orEmpty()\n            .any { it.elementType == iElementType }\n\n    private fun ASTNode.isTopLevelValue() = treeParent.elementType == FILE && containsValKeyword()\n\n    private fun ASTNode.containsValKeyword() = children().any { it.elementType == VAL_KEYWORD }\n\n    private fun ASTNode.isObjectValue() =\n        treeParent.elementType == CLASS_BODY &&\n            treeParent?.treeParent?.elementType == OBJECT_DECLARATION &&\n            containsValKeyword() &&\n            !hasModifier(OVERRIDE_KEYWORD)\n\n    private fun ASTNode.isBackingProperty() =\n        takeIf { hasModifier(PRIVATE_KEYWORD) }\n            ?.findChildByType(IDENTIFIER)\n            ?.takeIf { it.text.startsWith(\"_\") }\n            ?.let { identifier ->\n                this.hasPublicProperty(identifier.text.removePrefix(\"_\"))\n            }\n            ?: false\n\n    private fun ASTNode.hasPublicProperty(identifier: String) =\n        treeParent\n            .children()\n            .filter { it.elementType == PROPERTY }\n            .mapNotNull { it.findChildByType(IDENTIFIER) }\n            .any { it.text == identifier }\n\n    private companion object {\n        val LOWER_CAMEL_CASE_REGEXP = \"[a-z][a-zA-Z0-9]*\".regExIgnoringDiacriticsAndStrokesOnLetters()\n        val SCREAMING_SNAKE_CASE_REGEXP = \"[A-Z][_A-Z0-9]*\".regExIgnoringDiacriticsAndStrokesOnLetters()\n        val BACKING_PROPERTY_LOWER_CAMEL_CASE_REGEXP = \"_[a-z][a-zA-Z0-9]*\".regExIgnoringDiacriticsAndStrokesOnLetters()\n        const val SERIAL_VERSION_UID_PROPERTY_NAME = \"serialVersionUID\"\n    }\n}\n\npublic val PROPERTY_NAMING_RULE_ID: RuleId = PropertyNamingRule().ruleId\n```\n[end of ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt]"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "citationMetadata": {
+        "citationSources": [
+          {
+            "startIndex": 935,
+            "endIndex": 1176,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 1101,
+            "endIndex": 1657,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 1456,
+            "endIndex": 1881,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 1721,
+            "endIndex": 2258,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 2763,
+            "endIndex": 2996,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 7911,
+            "endIndex": 8208,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 8007,
+            "endIndex": 8372,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 8516,
+            "endIndex": 8963,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 10696,
+            "endIndex": 10827,
+            "uri": "https://github.com/hendraanggrian/rulebook",
+            "license": ""
+          },
+          {
+            "startIndex": 10773,
+            "endIndex": 10914,
+            "uri": "https://github.com/hendraanggrian/rulebook",
+            "license": ""
+          },
+          {
+            "startIndex": 11661,
+            "endIndex": 11958,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 11757,
+            "endIndex": 12122,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 12254,
+            "endIndex": 12701,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 13111,
+            "endIndex": 13242,
+            "uri": "https://github.com/hendraanggrian/rulebook",
+            "license": ""
+          },
+          {
+            "startIndex": 13188,
+            "endIndex": 13329,
+            "uri": "https://github.com/hendraanggrian/rulebook",
+            "license": ""
+          },
+          {
+            "startIndex": 16998,
+            "endIndex": 17295,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 17094,
+            "endIndex": 17519,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 17359,
+            "endIndex": 17596,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 17679,
+            "endIndex": 18047,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 20191,
+            "endIndex": 20322,
+            "uri": "https://github.com/hendraanggrian/rulebook",
+            "license": ""
+          },
+          {
+            "startIndex": 20332,
+            "endIndex": 20473,
+            "uri": "https://github.com/hendraanggrian/rulebook",
+            "license": ""
+          },
+          {
+            "startIndex": 20360,
+            "endIndex": 20523,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 22185,
+            "endIndex": 22482,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 22281,
+            "endIndex": 22706,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 22546,
+            "endIndex": 22783,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 22857,
+            "endIndex": 23225,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 23873,
+            "endIndex": 24863,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24856,
+            "endIndex": 25039,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 24926,
+            "endIndex": 25207,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 25373,
+            "endIndex": 25504,
+            "uri": "https://github.com/hendraanggrian/rulebook",
+            "license": ""
+          },
+          {
+            "startIndex": 25514,
+            "endIndex": 25655,
+            "uri": "https://github.com/hendraanggrian/rulebook",
+            "license": ""
+          },
+          {
+            "startIndex": 25542,
+            "endIndex": 25705,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 26683,
+            "endIndex": 26814,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 26758,
+            "endIndex": 26885,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 27465,
+            "endIndex": 27709,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 28321,
+            "endIndex": 28488,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 28451,
+            "endIndex": 28654,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 28662,
+            "endIndex": 29384,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29360,
+            "endIndex": 29523,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29497,
+            "endIndex": 29675,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29603,
+            "endIndex": 29777,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29731,
+            "endIndex": 30019,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 29957,
+            "endIndex": 30215,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 30101,
+            "endIndex": 30464,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 30389,
+            "endIndex": 30945,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 30744,
+            "endIndex": 31169,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 31009,
+            "endIndex": 31246,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 31320,
+            "endIndex": 31764,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 32594,
+            "endIndex": 36182,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 36349,
+            "endIndex": 36480,
+            "uri": "https://github.com/hendraanggrian/rulebook",
+            "license": ""
+          },
+          {
+            "startIndex": 36426,
+            "endIndex": 36629,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 36637,
+            "endIndex": 37359,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 37335,
+            "endIndex": 37498,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 37472,
+            "endIndex": 37650,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 37578,
+            "endIndex": 37752,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39086,
+            "endIndex": 39253,
+            "uri": "https://github.com/mateuszkwiecinski/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39216,
+            "endIndex": 39419,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 39427,
+            "endIndex": 40149,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40125,
+            "endIndex": 40288,
+            "uri": "https://github.com/pinterest/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40262,
+            "endIndex": 40440,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40368,
+            "endIndex": 40542,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40496,
+            "endIndex": 40784,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40722,
+            "endIndex": 40980,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 40866,
+            "endIndex": 41229,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 41154,
+            "endIndex": 41710,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 41509,
+            "endIndex": 41934,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 41774,
+            "endIndex": 42011,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 42085,
+            "endIndex": 42529,
+            "uri": "https://github.com/nwe223/ktlint",
+            "license": ""
+          },
+          {
+            "startIndex": 43359,
+            "endIndex": 46947,
+            "uri": "https://github.com/hendraanggrian/ktlint",
+            "license": ""
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 57679,
+    "candidatesTokenCount": 2198,
+    "totalTokenCount": 69861,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 57679
+      }
+    ],
+    "thoughtsTokenCount": 9984
+  },
+  "modelVersion": "gemini-2.5-pro-preview-06-05",
+  "responseId": "LIxDaMGHErrO_uMPsZ-h8QQ"
+}

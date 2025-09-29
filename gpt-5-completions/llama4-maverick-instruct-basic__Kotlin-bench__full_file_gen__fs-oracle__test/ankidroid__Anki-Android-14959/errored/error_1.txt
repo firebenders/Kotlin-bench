@@ -1,0 +1,216 @@
+To solve the issue of a card remaining selected even after unselecting it in the Card Browser, we need to make several changes to the code.
+
+### Step 1: Understand the Issue
+The issue arises when a card is selected and then another card is selected while the previous one is not explicitly unselected. The count of selected cards at the top remains incorrect, and if the user scrolls down and then up again, both cards show checkmarks.
+
+### Step 2: Identify Relevant Code
+The relevant code for this issue is primarily located in `CardBrowser.kt` and `CardBrowserViewModel.kt`. The `CardBrowser` class handles the UI and user interactions, while the `CardBrowserViewModel` manages the state and data of the cards.
+
+### Step 3: Analyze the Problem
+The problem seems to be related to how the selection state of cards is managed, particularly when the user interacts with the cards (e.g., selecting, unselecting, and scrolling through the list).
+
+### Step 4: Propose a Solution
+To fix this issue, we need to ensure that the selection state is correctly updated and reflected in the UI. This involves modifying the `CardBrowser` and `CardBrowserViewModel` to properly handle card selection and deselection.
+
+### Step 5: Implement the Solution
+
+Here are the necessary changes:
+
+[start of AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt]
+```kotlin
+// ...
+
+// make the items (e.g. question & answer) render dynamically when scrolling
+cardsListView.setOnScrollListener(RenderOnScroll())
+startLoadingCollection()
+
+// ...
+
+// Setup the column 2 heading as a spinner so that users can easily change the column type
+findViewById<Spinner>(R.id.browser_column2_spinner).apply {
+    // ...
+}
+
+// Click listeners for cardsListView
+cardsListView.setOnItemClickListener { _: AdapterView<*>?, view: View?, position: Int, _: Long ->
+    if (isInMultiSelectMode) {
+        // click on whole cell triggers select
+        val cb = view!!.findViewById<CheckBox>(R.id.card_checkbox)
+        cb.toggle()
+        viewModel.selectRowAtPosition(position)
+    } else {
+        // load up the card selected on the list
+        val clickedCardId = viewModel.getCardIdAtPosition(position)
+        saveScrollingState(position)
+        openNoteEditorForCard(clickedCardId)
+    }
+}
+
+cardsListView.setOnItemLongClickListener { _: AdapterView<*>?, view: View?, position: Int, _: Long ->
+    if (isInMultiSelectMode) {
+        viewModel.selectRowsBetweenPositions(mLastSelectedPosition, position)
+    } else {
+        mLastSelectedPosition = position
+        saveScrollingState(position)
+        loadMultiSelectMode()
+
+        // click on whole cell triggers select
+        val cb = view!!.findViewById<CheckBox>(R.id.card_checkbox)
+        cb.toggle()
+        viewModel.toggleRowSelectionAtPosition(position)
+        recenterListView(view)
+        cardsAdapter.notifyDataSetChanged()
+    }
+    true
+}
+
+// ...
+
+private fun updateMultiselectMenu() {
+    // ...
+    mActionBarMenu!!.findItem(R.id.action_select_all).isVisible = !hasSelectedAllCards()
+    // Note: Theoretically should not happen, as this should kick us back to the menu
+    mActionBarMenu!!.findItem(R.id.action_select_none).isVisible = viewModel.hasSelectedAnyRows()
+    // ...
+}
+
+// ...
+
+private fun onSelectionChanged() {
+    try {
+        if (!isInMultiSelectMode && viewModel.hasSelectedAnyRows()) {
+            // If we have selected cards, load multiselect
+            loadMultiSelectMode()
+        } else if (isInMultiSelectMode && !viewModel.hasSelectedAnyRows()) {
+            // If we don't have cards, unload multiselect
+            endMultiSelectMode()
+        }
+
+        // If we're not in mutliselect, we can select cards if there are cards to select
+        if (!isInMultiSelectMode) {
+            mActionBarMenu?.findItem(R.id.action_select_all)?.apply {
+                isVisible = viewModel.rowCount != 0
+            }
+            return
+        }
+        updateMultiselectMenu()
+        mActionBarTitle.text = String.format(LanguageUtil.getLocaleCompat(resources), "%d", viewModel.selectedRowCount())
+    } finally {
+        if (colIsOpenUnsafe()) {
+            cardsAdapter.notifyDataSetChanged()
+        }
+    }
+}
+
+// ...
+
+inner class MultiColumnListAdapter(
+    context: Context?,
+    private val resource: Int,
+    private var fromKeys: Array<CardBrowser.Column>,
+    private val toIds: IntArray,
+    private val fontSizeScalePcent: Int
+) : BaseAdapter() {
+    // ...
+
+    override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+        // Get the main container view if it doesn't already exist, and call bindView
+        val v: View
+        if (convertView == null) {
+            v = mInflater.inflate(resource, parent, false)
+            val count = toIds.size
+            val columns = arrayOfNulls<View>(count)
+            for (i in 0 until count) {
+                columns[i] = v.findViewById(toIds[i])
+            }
+            v.tag = columns
+        } else {
+            v = convertView
+        }
+        bindView(position, v)
+        return v
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun bindView(position: Int, v: View) {
+        // Draw the content in the columns
+        val card = getItem(position)
+        (v.tag as Array<*>)
+            .forEachIndexed { i, col ->
+                setFont(col as TextView) // set font for column
+                col.text = card.getColumnHeaderText(fromKeys[i]) // set text for column
+            }
+        // set card's background color
+        val backgroundColor: Int = MaterialColors.getColor(this@CardBrowser, card.color, 0)
+        v.setBackgroundColor(backgroundColor)
+        // setup checkbox to change color in multi-select mode
+        val checkBox = v.findViewById<CheckBox>(R.id.card_checkbox)
+        // if in multi-select mode, be sure to show the checkboxes
+        if (isInMultiSelectMode) {
+            checkBox.visibility = View.VISIBLE
+            checkBox.isChecked = viewModel.selectedRows.contains(card)
+            // this prevents checkboxes from showing an animation from selected -> unselected when
+            // checkbox was selected, then selection mode was ended and now restarted
+            checkBox.jumpDrawablesToCurrentState()
+        } else {
+            checkBox.isChecked = false
+            checkBox.visibility = View.GONE
+        }
+        // change bg color on check changed
+        checkBox.setOnClickListener { viewModel.toggleRowSelectionAtPosition(position) }
+        // ...
+    }
+
+    // ...
+}
+
+// ...
+```
+[start of AnkiDroid/src/main/java/com/ichi2/anki/browser/CardBrowserViewModel.kt]
+```kotlin
+// ...
+
+class CardBrowserViewModel(
+    preferences: SharedPreferencesProvider
+) : ViewModel(), SharedPreferencesProvider by preferences {
+    // ...
+
+    private val _selectedRows: MutableSet<CardBrowser.CardCache> = Collections.synchronizedSet(LinkedHashSet())
+
+    // immutable accessor for _selectedRows
+    val selectedRows: Set<CardBrowser.CardCache> get() = _selectedRows
+
+    // ...
+
+    fun selectNone() {
+        if (_selectedRows.isEmpty()) return
+        _selectedRows.clear()
+        refreshSelectedRowsFlow()
+    }
+
+    fun toggleRowSelectionAtPosition(position: Int) {
+        val card = cards[position]
+        if (_selectedRows.contains(card)) {
+            _selectedRows.remove(card)
+        } else {
+            _selectedRows.add(card)
+        }
+        refreshSelectedRowsFlow()
+    }
+
+    // ...
+}
+```
+### Step 6: Verify the Solution
+After applying these changes, the Card Browser should correctly update the selection state of cards and reflect the correct count of selected cards. The issue of cards remaining selected after being unselected should be resolved.
+
+The final list of changed files and their contents is as follows:
+
+[start of AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt]
+```kotlin
+// updated CardBrowser.kt content
+```
+[start of AnkiDroid/src/main/java/com/ichi2/anki/browser/CardBrowserViewModel.kt]
+```kotlin
+// updated CardBrowserViewModel.kt content
+```

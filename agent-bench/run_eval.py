@@ -430,8 +430,8 @@ util_image = (
 EVAL_VOLUME_PATH = "/eval"
 RESULTS_BASE = EVAL_VOLUME_PATH  # Volume is already named kotlin-bench-agent
 
-# Local output directory
-LOCAL_OUTPUTS_DIR = Path(__file__).parent / "outputs"
+# Local output directory (at project root, not inside agent-bench/)
+LOCAL_OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"
 
 # =============================================================================
 # Timeout Configuration (all values in seconds)

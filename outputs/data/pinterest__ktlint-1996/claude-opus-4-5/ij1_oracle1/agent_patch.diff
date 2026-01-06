@@ -1,0 +1,152 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b7d5f5fd..4d64f42a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -15,6 +15,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ * Prevent nullpointer exception (NPE) if class without body is followed by multiple blank lines until end of file `no-consecutive-blank-lines` ([#1987](https://github.com/pinterest/ktlint/issues/1987))
+ * Allow to 'unset' the `.editorconfig` property `ktlint_function_signature_rule_force_multiline_when_parameter_count_greater_or_equal_than` when using `ktlint_official` code style `function-signature` ([#1977](https://github.com/pinterest/ktlint/issues/1977))
+ * Prevent nullpointer exception (NPE) if or operator at start of line is followed by dot qualified expression `indent` ([#1993](https://github.com/pinterest/ktlint/issues/1993))
++* Fix inconsistent reporting of multiline string closing quotes for functions and properties `indent` ([#2330](https://github.com/pinterest/ktlint/issues/2330))
+ 
+ ### Changed
+ * Separated Baseline functionality out of `ktlint-cli` into separate `ktlint-baseline` module for API consumers
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index c802acac..20a328df 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -1259,7 +1259,11 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+                         //       bar: String
+                         //   ) = """
+                         //       $bar
+-                        //       """.trimIndent
++                        //       """.trimIndent()
++                        // or
++                        //   val foo = """
++                        //       some text
++                        //       """.trimIndent()
+                         node
+                             .indent(false)
+                             .plus(indentConfig.indent)
+@@ -1328,11 +1332,11 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+ 
+     private fun ASTNode.isRawStringLiteralFunctionBodyExpression() =
+         (prevLeaf()?.elementType != WHITE_SPACE || prevLeaf()?.text == " ") &&
+-            FUN ==
+             prevCodeLeaf()
+                 .takeIf { it?.elementType == EQ }
+                 ?.treeParent
+                 ?.elementType
++                .let { it == FUN || it == PROPERTY }
+ 
+     private fun ASTNode.isRawStringLiteralReturnInFunctionBodyBlock() = RETURN_KEYWORD == prevCodeLeaf()?.elementType
+ 
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
+index 8ba35fc2..7ec32b8b 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
+@@ -98,7 +98,7 @@ internal class IndentationRuleTest {
+                     """
+                     val foo = $MULTILINE_STRING_QUOTE
+                         foo
+-                    $MULTILINE_STRING_QUOTE.trimIndent()
++                        $MULTILINE_STRING_QUOTE.trimIndent()
+                     """.trimIndent()
+                 indentationRuleAssertThat(code).hasNoLintViolations()
+             }
+@@ -3112,7 +3112,7 @@ internal class IndentationRuleTest {
+                     val foo1 = $MULTILINE_STRING_QUOTE
+                         {
+                         }
+-                    $MULTILINE_STRING_QUOTE.trimIndent()
++                        $MULTILINE_STRING_QUOTE.trimIndent()
+                     val foo2 =
+                         $MULTILINE_STRING_QUOTE
+                         {
+@@ -3127,6 +3127,7 @@ internal class IndentationRuleTest {
+                 """.trimIndent()
+             indentationRuleAssertThat(code)
+                 .hasLintViolations(
++                    LintViolation(5, 1, "Unexpected indent of multiline string closing quotes"),
+                     LintViolation(7, 1, "Unexpected indentation (4) (should be 8)"),
+                     LintViolation(10, 1, "Unexpected indent of multiline string closing quotes"),
+                     LintViolation(12, 1, "Unexpected indentation (4) (should be 8)"),
+@@ -5122,6 +5123,71 @@ internal class IndentationRuleTest {
+         }
+     }
+ 
++    @Nested
++    inner class `Given a property with raw string literal as value` {
++        @Test
++        fun `As value on same line as equals and preceded by space`() {
++            val code =
++                """
++                val foo = $MULTILINE_STRING_QUOTE
++                    bar
++                    $MULTILINE_STRING_QUOTE.trimIndent()
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `As value on same line as equals but not preceded by space`() {
++            val code =
++                """
++                val foo =$MULTILINE_STRING_QUOTE
++                    bar
++                    $MULTILINE_STRING_QUOTE.trimIndent()
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `As value on next line`() {
++            val code =
++                """
++                val foo =
++                    $MULTILINE_STRING_QUOTE
++                    bar
++                    $MULTILINE_STRING_QUOTE.trimIndent()
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `As value of property wrapped in class`() {
++            val code =
++                """
++                class Bar {
++                    val foo = $MULTILINE_STRING_QUOTE
++                        bar
++                        $MULTILINE_STRING_QUOTE.trimIndent()
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++    }
++
++    @Test
++    fun `Issue 2330 - Multiline string closing quotes for both functions and properties should be treated consistently`() {
++        val code =
++            """
++            fun foo() = $MULTILINE_STRING_QUOTE
++                some text
++                $MULTILINE_STRING_QUOTE.trimIndent()
++
++            val bar = $MULTILINE_STRING_QUOTE
++                some text
++                $MULTILINE_STRING_QUOTE.trimIndent()
++            """.trimIndent()
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++
+     @Test
+     fun `Issue 1993 - An or operator at start of line followed by a dot qualified expressions should not throw an exception`() {
+         val code =
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

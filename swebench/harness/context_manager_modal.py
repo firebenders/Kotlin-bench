@@ -416,6 +416,136 @@ class ModalTaskEnvManager:
                 f.write(f"\n{INSTALL_PASS}\n")
             return True
 
+    def run_tests_task(self, instance: dict):
+        """
+        Run tests for task instance
+
+        Args:
+            instance (dict): Task instance
+
+        Returns:
+            bool: True if tests ran successfully, False otherwise
+        """
+        try:
+            # Ensure test command exists
+            if "test_cmd" not in instance:
+                # Generate test command if not already present
+                instance["test_directives"] = get_test_directives(instance)
+                instance["test_cmd"] = get_android_test_cmd(instance)
+
+            test_cmd = instance["test_cmd"]
+            if test_cmd is None:
+                self.log.write("No test command found for instance", level=ERROR)
+                return True
+
+            # # Log test command
+            # with open(self.log_file, "a") as f:
+            #     f.write(f"Test Script: {test_cmd};\n")
+
+            # Set environment variables for testing if specified
+            specifications = MAP_VERSION_TO_INSTALL.get(instance.get("repo", ""), {}).get(
+                instance.get("version", ""), {})
+            if "env_vars_test" in specifications:
+                self.exec.subprocess_args["env"].update(specifications["env_vars_test"])
+
+            # Set additional JVM arguments to fix ByteBuddy/Mockito issues
+            mockito_fix = "-Dmockito.mock.maker=org.mockito.internal.creation.bytebuddy.SubclassByteBuddyMockMaker -Djdk.attach.allowAttachSelf=true -Dnet.bytebuddy.experimental=true"
+            current_java_opts = self.exec.subprocess_args["env"].get("JAVA_TOOL_OPTIONS", "")
+            if mockito_fix not in current_java_opts:
+                self.exec.subprocess_args["env"]["JAVA_TOOL_OPTIONS"] = f"{current_java_opts} {mockito_fix}".strip()
+                self.log.write(
+                    f"Added Mockito fix to JAVA_TOOL_OPTIONS: {self.exec.subprocess_args['env']['JAVA_TOOL_OPTIONS']}")
+
+            android_sdk_path = self.android_sdk_path or os.environ.get("ANDROID_HOME", "/root/android-sdk")
+            self.log.write(f"Setting Android environment variables: ANDROID_HOME={android_sdk_path}")
+            self.exec.subprocess_args["env"]["ANDROID_HOME"] = android_sdk_path
+
+            # Update PATH to include Android tools
+            self.exec.subprocess_args["env"]["PATH"] = (
+                f"{android_sdk_path}/platform-tools:{android_sdk_path}/cmdline-tools/latest/bin:"
+                f"{self.exec.subprocess_args['env'].get('PATH', '')}"
+            )
+
+            # Double-check local.properties exists before running tests
+            local_properties_path = os.path.join(self.testbed, "local.properties")
+            if not os.path.exists(local_properties_path):
+                self.log.write(f"Creating local.properties with sdk.dir={android_sdk_path}")
+                with open(local_properties_path, "w") as f:
+                    f.write(f"sdk.dir={android_sdk_path}\n")
+
+            # Add Mockito fix to gradle.properties
+            gradle_properties_path = os.path.join(self.testbed, "gradle.properties")
+            mockito_gradle_fix = "org.gradle.jvmargs=-Dmockito.mock.maker=org.mockito.internal.creation.bytebuddy.SubclassByteBuddyMockMaker -Djdk.attach.allowAttachSelf=true -Dnet.bytebuddy.experimental=true"
+
+            if os.path.exists(gradle_properties_path):
+                self.log.write("Updating gradle.properties with Mockito fix")
+                # Read existing content
+                with open(gradle_properties_path, "r") as f:
+                    lines = f.readlines()
+
+                # Check if org.gradle.jvmargs is already defined
+                jvmargs_found = False
+                for i, line in enumerate(lines):
+                    if line.startswith("org.gradle.jvmargs="):
+                        if "mockito.mock.maker" not in line:
+                            # Append Mockito fix to existing jvmargs
+                            lines[
+                                i] = line.strip() + " -Dmockito.mock.maker=org.mockito.internal.creation.bytebuddy.SubclassByteBuddyMockMaker -Djdk.attach.allowAttachSelf=true -Dnet.bytebuddy.experimental=true\n"
+                        jvmargs_found = True
+                        break
+
+                # Add jvmargs if not found
+                if not jvmargs_found:
+                    lines.append(f"{mockito_gradle_fix}\n")
+
+                # Write updated content
+                with open(gradle_properties_path, "w") as f:
+                    f.writelines(lines)
+            else:
+                # Create new gradle.properties file
+                self.log.write("Creating gradle.properties with Mockito fix")
+                with open(gradle_properties_path, "w") as f:
+                    f.write(f"{mockito_gradle_fix}\n")
+
+            # Run test command
+            self.log.write(f"Running test command: {test_cmd}")
+            out_test = self.exec(test_cmd, shell=True, timeout=self.timeout, check=False)
+
+            # Unset environment variables
+            if "env_vars_test" in specifications:
+                for key in specifications["env_vars_test"]:
+                    if key in self.exec.subprocess_args["env"]:
+                        del self.exec.subprocess_args["env"][key]
+
+            # Write test results to log file
+            with open(self.log_file, "a") as f:
+                if out_test.returncode != 0:
+                    f.write(f"\n{TESTS_FAILED}\n")
+                    # Add detailed test output to help identify which predictions failed
+                    f.write("=== Detailed Test Output ===\n")
+                    if hasattr(out_test, 'stdout') and out_test.stdout:
+                        f.write(out_test.stdout)
+                    if hasattr(out_test, 'stderr') and out_test.stderr:
+                        f.write(out_test.stderr)
+                    f.write("=== End Test Output ===\n")
+                else:
+                    f.write(f"\n{TESTS_PASSED}\n")
+
+            self.log.write(f"Test script completed with return code {out_test.returncode}")
+            return True
+
+        except subprocess.TimeoutExpired:
+            self.log.write("Test script timed out", level=ERROR)
+            with open(self.log_file, "a") as f:
+                f.write(f"\n{TESTS_TIMEOUT}\n")
+            return False
+
+        except Exception as e:
+            self.log.write(f"Test script failed: {e}", level=ERROR)
+            with open(self.log_file, "a") as f:
+                f.write(f"\n{TESTS_ERROR}: {e}\n")
+            return False
+
     def apply_patch(
         self, patch: str, patch_type: str = "", revert: bool = False
     ) -> bool:
@@ -578,132 +708,6 @@ class ModalTaskEnvManager:
                 f.write(f"{APPLY_PATCH_FAIL}; ApplyService API error: {str(e)}\n")
             return False
 
-    def run_tests_task(self, instance: dict):
-        """
-        Run tests for task instance
-        
-        Args:
-            instance (dict): Task instance
-            
-        Returns:
-            bool: True if tests ran successfully, False otherwise
-        """
-        try:
-            # Ensure test command exists
-            if "test_cmd" not in instance:
-                # Generate test command if not already present
-                instance["test_directives"] = get_test_directives(instance)
-                instance["test_cmd"] = get_android_test_cmd(instance)
-                
-            test_cmd = instance["test_cmd"]
-            if test_cmd is None:
-                self.log.write("No test command found for instance", level=ERROR)
-                return True
-            
-            # # Log test command
-            # with open(self.log_file, "a") as f:
-            #     f.write(f"Test Script: {test_cmd};\n")
-
-            # Set environment variables for testing if specified
-            specifications = MAP_VERSION_TO_INSTALL.get(instance.get("repo", ""), {}).get(instance.get("version", ""), {})
-            if "env_vars_test" in specifications:
-                self.exec.subprocess_args["env"].update(specifications["env_vars_test"])
-            
-            # Set additional JVM arguments to fix ByteBuddy/Mockito issues
-            mockito_fix = "-Dmockito.mock.maker=org.mockito.internal.creation.bytebuddy.SubclassByteBuddyMockMaker -Djdk.attach.allowAttachSelf=true -Dnet.bytebuddy.experimental=true"
-            current_java_opts = self.exec.subprocess_args["env"].get("JAVA_TOOL_OPTIONS", "")
-            if mockito_fix not in current_java_opts:
-                self.exec.subprocess_args["env"]["JAVA_TOOL_OPTIONS"] = f"{current_java_opts} {mockito_fix}".strip()
-                self.log.write(f"Added Mockito fix to JAVA_TOOL_OPTIONS: {self.exec.subprocess_args['env']['JAVA_TOOL_OPTIONS']}")
-            
-            android_sdk_path = self.android_sdk_path or os.environ.get("ANDROID_HOME", "/root/android-sdk")
-            self.log.write(f"Setting Android environment variables: ANDROID_HOME={android_sdk_path}")
-            self.exec.subprocess_args["env"]["ANDROID_HOME"] = android_sdk_path
-            
-            # Update PATH to include Android tools
-            self.exec.subprocess_args["env"]["PATH"] = (
-                f"{android_sdk_path}/platform-tools:{android_sdk_path}/cmdline-tools/latest/bin:"
-                f"{self.exec.subprocess_args['env'].get('PATH', '')}"
-            )
-            
-            # Double-check local.properties exists before running tests
-            local_properties_path = os.path.join(self.testbed, "local.properties")
-            if not os.path.exists(local_properties_path):
-                self.log.write(f"Creating local.properties with sdk.dir={android_sdk_path}")
-                with open(local_properties_path, "w") as f:
-                    f.write(f"sdk.dir={android_sdk_path}\n")
-            
-            # Add Mockito fix to gradle.properties
-            gradle_properties_path = os.path.join(self.testbed, "gradle.properties")
-            mockito_gradle_fix = "org.gradle.jvmargs=-Dmockito.mock.maker=org.mockito.internal.creation.bytebuddy.SubclassByteBuddyMockMaker -Djdk.attach.allowAttachSelf=true -Dnet.bytebuddy.experimental=true"
-            
-            if os.path.exists(gradle_properties_path):
-                self.log.write("Updating gradle.properties with Mockito fix")
-                # Read existing content
-                with open(gradle_properties_path, "r") as f:
-                    lines = f.readlines()
-                
-                # Check if org.gradle.jvmargs is already defined
-                jvmargs_found = False
-                for i, line in enumerate(lines):
-                    if line.startswith("org.gradle.jvmargs="):
-                        if "mockito.mock.maker" not in line:
-                            # Append Mockito fix to existing jvmargs
-                            lines[i] = line.strip() + " -Dmockito.mock.maker=org.mockito.internal.creation.bytebuddy.SubclassByteBuddyMockMaker -Djdk.attach.allowAttachSelf=true -Dnet.bytebuddy.experimental=true\n"
-                        jvmargs_found = True
-                        break
-                
-                # Add jvmargs if not found
-                if not jvmargs_found:
-                    lines.append(f"{mockito_gradle_fix}\n")
-                
-                # Write updated content
-                with open(gradle_properties_path, "w") as f:
-                    f.writelines(lines)
-            else:
-                # Create new gradle.properties file
-                self.log.write("Creating gradle.properties with Mockito fix")
-                with open(gradle_properties_path, "w") as f:
-                    f.write(f"{mockito_gradle_fix}\n")
-            
-            # Run test command
-            self.log.write(f"Running test command: {test_cmd}")
-            out_test = self.exec(test_cmd, shell=True, timeout=self.timeout, check=False)
-            
-            # Unset environment variables
-            if "env_vars_test" in specifications:
-                for key in specifications["env_vars_test"]:
-                    if key in self.exec.subprocess_args["env"]:
-                        del self.exec.subprocess_args["env"][key]
-                        
-            # Write test results to log file
-            with open(self.log_file, "a") as f:
-                if out_test.returncode != 0:
-                    f.write(f"\n{TESTS_FAILED}\n")
-                    # Add detailed test output to help identify which predictions failed
-                    f.write("=== Detailed Test Output ===\n")
-                    if hasattr(out_test, 'stdout') and out_test.stdout:
-                        f.write(out_test.stdout)
-                    if hasattr(out_test, 'stderr') and out_test.stderr:
-                        f.write(out_test.stderr)
-                    f.write("=== End Test Output ===\n")
-                else:
-                    f.write(f"\n{TESTS_PASSED}\n")
-                    
-            self.log.write(f"Test script completed with return code {out_test.returncode}")
-            return True
-            
-        except subprocess.TimeoutExpired:
-            self.log.write("Test script timed out", level=ERROR)
-            with open(self.log_file, "a") as f:
-                f.write(f"\n{TESTS_TIMEOUT}\n")
-            return False
-            
-        except Exception as e:
-            self.log.write(f"Test script failed: {e}", level=ERROR)
-            with open(self.log_file, "a") as f:
-                f.write(f"\n{TESTS_ERROR}: {e}\n")
-            return False
 
     def apply_full_file_changes(self, full_file_content: str, patch_type: str = "pred") -> bool:
         """

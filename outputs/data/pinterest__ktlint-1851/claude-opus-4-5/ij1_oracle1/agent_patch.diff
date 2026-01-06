@@ -1,0 +1,145 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 737e9a62..a0d82dd5 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -61,11 +61,13 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.SUPER_TYPE_CALL_ENT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.SUPER_TYPE_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.SUPER_TYPE_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.THEN
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_ARGUMENT_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_CONSTRAINT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_CONSTRAINT_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PARAMETER_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPEALIAS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.USER_TYPE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER
+@@ -311,6 +313,12 @@ public class IndentationRule :
+ 
+             node.elementType == DESTRUCTURING_DECLARATION -> visitDestructuringDeclaration(node)
+ 
++            node.elementType == TRY ->
++                visitTry(node)
++
++            node.elementType == TYPEALIAS ->
++                visitTypealias(node)
++
+             else -> {
+                 LOGGER.trace { "No processing for ${node.elementType}: ${node.textWithEscapedTabAndNewline()}" }
+             }
+@@ -765,6 +773,33 @@ public class IndentationRule :
+             }
+     }
+ 
++    private fun visitTry(node: ASTNode) {
++        // Find the try block (BLOCK element) and create a context for content after it
++        // This ensures catch and finally blocks are not indented extra relative to try
++        node
++            .findChildByType(BLOCK)
++            ?.lastChildLeafOrSelf()
++            ?.nextLeaf()
++            ?.let { nodeAfterTryBlock ->
++                startIndentContext(
++                    fromAstNode = nodeAfterTryBlock,
++                    toAstNode = node.lastChildLeafOrSelf(),
++                    childIndent = "",
++                )
++            }
++    }
++
++    private fun visitTypealias(node: ASTNode) {
++        node
++            .findChildByType(EQ)
++            ?.let { eq ->
++                startIndentContext(
++                    fromAstNode = eq,
++                    toAstNode = node.lastChildLeafOrSelf(),
++                )
++            }
++    }
++
+     private fun ASTNode.skipLeadingWhitespaceCommentsAndAnnotations(): ASTNode {
+         require(elementType == SECONDARY_CONSTRUCTOR || elementType == VALUE_PARAMETER)
+         return findChildByType(MODIFIER_LIST)
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
+index 79d0d3a4..818e270d 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
+@@ -4876,6 +4876,67 @@ internal class IndentationRuleTest {
+         }
+     }
+ 
++    @Nested
++    inner class `Issue try-catch and typealias` {
++        @Test
++        fun `Given a try-catch where catch is on a separate line`() {
++            val code =
++                """
++                fun test() = try {
++                    1
++                }
++                catch (_: Throwable) {
++                    2
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a try-catch-finally where catch and finally are on separate lines`() {
++            val code =
++                """
++                fun test() = try {
++                    1
++                }
++                catch (_: Throwable) {
++                    2
++                }
++                finally {
++                    3
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a typealias with type on a separate line`() {
++            val code =
++                """
++                typealias Foo =
++                    HashMap<Bar, Baz?>
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a typealias with type on a separate line and with wrong indent`() {
++            val code =
++                """
++                typealias Foo =
++                HashMap<Bar, Baz?>
++                """.trimIndent()
++            val formattedCode =
++                """
++                typealias Foo =
++                    HashMap<Bar, Baz?>
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .hasLintViolation(2, 1, "Unexpected indentation (0) (should be 4)")
++                .isFormattedAs(formattedCode)
++        }
++    }
++
+     private companion object {
+         val INDENT_STYLE_TAB =
+             INDENT_STYLE_PROPERTY to PropertyType.IndentStyleValue.tab
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

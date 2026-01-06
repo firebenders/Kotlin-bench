@@ -1,0 +1,88 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 8722a8cd..c1fefc12 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -11,6 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ ### Fixed
+ 
+ * Do not flag a (potential) mutable extension property in case the getter is annotated or prefixed with a modifier `property-naming` ([#2024](https://github.com/pinterest/ktlint/issues/2024))
++* Do not merge an annotated expression body with the function signature to avoid a conflict with the `annotation` rule `function-signature` ([#2028](https://github.com/pinterest/ktlint/issues/2028))
+ 
+ ### Changed
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+index 28a6ebc7..17898dd8 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+@@ -1,5 +1,6 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATED_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
+@@ -541,7 +542,9 @@ public class FunctionSignatureRule :
+             ?.also { firstLineOfBodyExpression ->
+                 if (whiteSpaceBeforeFunctionBodyExpression.isWhiteSpaceWithNewline()) {
+                     val mergeWithFunctionSignature =
+-                        if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression) {
++                        if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression &&
++                            !functionBodyExpressionNodes.startsWithAnnotatedExpression()
++                        ) {
+                             functionBodyExpressionWrapping == default ||
+                                 (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||
+                                 node.isMultilineFunctionSignatureWithoutExplicitReturnType(
+@@ -658,6 +661,20 @@ public class FunctionSignatureRule :
+             .firstOrNull()
+             ?.takeIf { first -> first.isWhiteSpace() }
+ 
++    private fun List<ASTNode>.startsWithAnnotatedExpression(): Boolean =
++        firstOrNull()
++            ?.let { first ->
++                var node: ASTNode? = first
++                while (node != null && node.elementType != FUN) {
++                    if (node.elementType == ANNOTATED_EXPRESSION) {
++                        return@let true
++                    }
++                    node = node.treeParent
++                }
++                false
++            }
++            ?: false
++
+     private fun isMaxLineLengthSet() = maxLineLength != MAX_LINE_LENGTH_PROPERTY_OFF
+ 
+     private fun List<ASTNode>.collectLeavesRecursively(): List<ASTNode> = flatMap { it.collectLeavesRecursively() }
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt
+index 661faffd..6b9621b5 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt
+@@ -1092,6 +1092,20 @@ class FunctionSignatureRuleTest {
+             .hasNoLintViolations()
+     }
+ 
++    @Test
++    fun `Issue 2028 - Given a function signature with a body expression that starts with an annotated expression, do not merge it with the function signature`() {
++        val code =
++            """
++            // $MAX_LINE_LENGTH_MARKER                                                      $EOL_CHAR
++            private fun getErrorMessage(value: String): String =
++                @Suppress("DEPRECATION")
++                customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT, value)
++            """.trimIndent()
++        functionSignatureWrappingRuleAssertThat(code)
++            .setMaxLineLength()
++            .hasNoLintViolations()
++    }
++
+     @Nested
+     inner class `Issue 1773 - Given a unction signature without parameters exceeding the max line length` {
+         @Test
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

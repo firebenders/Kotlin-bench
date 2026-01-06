@@ -1,0 +1,271 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 95757cc736..814e950843 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -238,12 +238,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+diff --git a/AnkiDroid/src/main/assets/scripts/js-api.js b/AnkiDroid/src/main/assets/scripts/js-api.js
+index a33010525f..1d2b0585d7 100644
+--- a/AnkiDroid/src/main/assets/scripts/js-api.js
++++ b/AnkiDroid/src/main/assets/scripts/js-api.js
+@@ -72,6 +72,8 @@ const jsApiList = {
+     ankiSttStart: "sttStart",
+     ankiSttStop: "sttStop",
+     ankiAddTagToNote: "addTagToNote",
++    ankiSetNoteTags: "setNoteTags",
++    ankiGetNoteTags: "getNoteTags",
+ };
+ 
+ class AnkiDroidJS {
+@@ -125,6 +127,22 @@ Object.keys(jsApiList).forEach(method => {
+         };
+         return;
+     }
++    if (method === "ankiSetNoteTags") {
++        AnkiDroidJS.prototype[method] = async function (noteId, tags) {
++            const endpoint = jsApiList[method];
++            const data = JSON.stringify({ noteId, tags });
++            return await this.handleRequest(endpoint, data);
++        };
++        return;
++    }
++    if (method === "ankiGetNoteTags") {
++        AnkiDroidJS.prototype[method] = async function (noteId) {
++            const endpoint = jsApiList[method];
++            const data = JSON.stringify({ noteId });
++            return await this.handleRequest(endpoint, data);
++        };
++        return;
++    }
+     if (method === "ankiTtsSpeak") {
+         AnkiDroidJS.prototype[method] = async function (text, queueMode = 0) {
+             const endpoint = jsApiList[method];
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
+index f4ec2dc7d0..ec65d37f36 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
+@@ -47,12 +47,14 @@ import com.ichi2.libanki.Collection
+ import com.ichi2.libanki.Decks
+ import com.ichi2.libanki.SortOrder
+ import com.ichi2.utils.NetworkUtils
++import com.ichi2.utils.stringIterable
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ import kotlinx.serialization.builtins.ListSerializer
+ import kotlinx.serialization.builtins.serializer
+ import kotlinx.serialization.json.Json
++import org.json.JSONArray
+ import org.json.JSONException
+ import org.json.JSONObject
+ import timber.log.Timber
+@@ -373,6 +375,25 @@ open class AnkiDroidJsAPI(
+                 getColUnsafe.updateNote(note)
+                 convertToByteArray(apiContract, true)
+             }
++
++            "setNoteTags" -> {
++                val jsonObject = JSONObject(apiParams)
++                val noteId = jsonObject.getLong("noteId")
++                val tags = jsonObject.getJSONArray("tags")
++                val note = getColUnsafe.getNote(noteId).apply {
++                    setTagsFromStr(getColUnsafe, tags.stringIterable().joinToString(" "))
++                }
++                getColUnsafe.updateNote(note)
++                convertToByteArray(apiContract, true)
++            }
++
++            "getNoteTags" -> {
++                val jsonObject = JSONObject(apiParams)
++                val noteId = jsonObject.getLong("noteId")
++                val note = getColUnsafe.getNote(noteId)
++                convertToByteArray(apiContract, JSONArray(note.tags).toString())
++            }
++
+             "sttSetLanguage" -> convertToByteArray(apiContract, speechRecognizer.setLanguage(apiParams))
+             "sttStart" -> {
+                 val callback =
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITest.kt
+index 4221277b30..8c5f7e78a9 100644
+--- a/AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITest.kt
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITest.kt
+@@ -27,6 +27,7 @@ import com.ichi2.utils.BASIC_MODEL_NAME
+ import net.ankiweb.rsdroid.withoutUnicodeIsolation
+ import org.hamcrest.CoreMatchers.equalTo
+ import org.hamcrest.MatcherAssert.assertThat
++import org.json.JSONArray
+ import org.json.JSONObject
+ import org.junit.Ignore
+ import org.junit.Test
+@@ -417,6 +418,133 @@ class AnkiDroidJsAPITest : RobolectricTest() {
+             assertEquals(CardType.New, cardAfterReset.type, "Card type after reset")
+         }
+ 
++    @Test
++    fun ankiGetNoteTagsTest() =
++        runTest {
++            val models = col.notetypes
++            val didA = addDeck("Test", setAsSelected = true)
++            val basic = models.byName(BASIC_MODEL_NAME)
++            basic!!.put("did", didA)
++            val note = addBasicNote("foo", "bar")
++            note.addTag("testTag1")
++            note.addTag("testTag2")
++            col.updateNote(note)
++
++            val reviewer: Reviewer = startReviewer()
++            val jsapi = reviewer.jsApi
++
++            waitForAsyncTasksToComplete()
++
++            val noteId = reviewer.currentCard!!.nid
++            val data = JSONObject().apply {
++                put("noteId", noteId)
++            }.toString()
++
++            val result = getDataFromRequest("getNoteTags", jsapi, data)
++            val jsonResult = JSONObject(result)
++            assertThat(jsonResult.getBoolean(SUCCESS_KEY), equalTo(true))
++
++            val tagsJson = JSONArray(jsonResult.getString(VALUE_KEY))
++            val tags = (0 until tagsJson.length()).map { tagsJson.getString(it) }
++            assertThat(tags.contains("testTag1"), equalTo(true))
++            assertThat(tags.contains("testTag2"), equalTo(true))
++        }
++
++    @Test
++    fun ankiSetNoteTagsTest() =
++        runTest {
++            val models = col.notetypes
++            val didA = addDeck("Test", setAsSelected = true)
++            val basic = models.byName(BASIC_MODEL_NAME)
++            basic!!.put("did", didA)
++            val note = addBasicNote("foo", "bar")
++            note.addTag("oldTag")
++            col.updateNote(note)
++
++            val reviewer: Reviewer = startReviewer()
++            val jsapi = reviewer.jsApi
++
++            waitForAsyncTasksToComplete()
++
++            val noteId = reviewer.currentCard!!.nid
++
++            // Verify old tag exists
++            var noteCheck = col.getNote(noteId)
++            assertThat(noteCheck.tags.contains("oldTag"), equalTo(true))
++
++            // Set new tags (replacing old ones)
++            val newTags = JSONArray().apply {
++                put("newTag1")
++                put("newTag2")
++            }
++            val data = JSONObject().apply {
++                put("noteId", noteId)
++                put("tags", newTags)
++            }.toString()
++
++            val result = getDataFromRequest("setNoteTags", jsapi, data)
++            assertThat(result, equalTo(formatApiResult(true)))
++
++            waitForAsyncTasksToComplete()
++
++            // Verify tags were replaced
++            noteCheck = col.getNote(noteId)
++            assertThat(noteCheck.tags.contains("oldTag"), equalTo(false))
++            assertThat(noteCheck.tags.contains("newTag1"), equalTo(true))
++            assertThat(noteCheck.tags.contains("newTag2"), equalTo(true))
++        }
++
++    @Test
++    fun ankiRemoveTagBySettingTagsTest() =
++        runTest {
++            // Test the use case: remove a tag by getting tags, filtering, and setting
++            val models = col.notetypes
++            val didA = addDeck("Test", setAsSelected = true)
++            val basic = models.byName(BASIC_MODEL_NAME)
++            basic!!.put("did", didA)
++            val note = addBasicNote("foo", "bar")
++            note.addTag("keepTag")
++            note.addTag("removeTag")
++            col.updateNote(note)
++
++            val reviewer: Reviewer = startReviewer()
++            val jsapi = reviewer.jsApi
++
++            waitForAsyncTasksToComplete()
++
++            val noteId = reviewer.currentCard!!.nid
++
++            // Get current tags
++            val getTagsData = JSONObject().apply {
++                put("noteId", noteId)
++            }.toString()
++            val getResult = getDataFromRequest("getNoteTags", jsapi, getTagsData)
++            val jsonGetResult = JSONObject(getResult)
++            val currentTagsJson = JSONArray(jsonGetResult.getString(VALUE_KEY))
++            val currentTags = (0 until currentTagsJson.length()).map { currentTagsJson.getString(it) }
++
++            // Filter out the tag to remove
++            val filteredTags = currentTags.filter { it != "removeTag" }
++
++            // Set the filtered tags
++            val newTagsArray = JSONArray().apply {
++                filteredTags.forEach { put(it) }
++            }
++            val setTagsData = JSONObject().apply {
++                put("noteId", noteId)
++                put("tags", newTagsArray)
++            }.toString()
++            val setResult = getDataFromRequest("setNoteTags", jsapi, setTagsData)
++            assertThat(setResult, equalTo(formatApiResult(true)))
++
++            waitForAsyncTasksToComplete()
++
++            // Verify removeTag is gone and keepTag remains
++            val noteCheck = col.getNote(noteId)
++            assertThat(noteCheck.tags.contains("keepTag"), equalTo(true))
++            assertThat(noteCheck.tags.contains("removeTag"), equalTo(false))
++        }
++
+     companion object {
+         fun jsApiContract(data: String = ""): ByteArray =
+             JSONObject()
+diff --git a/gradle.properties b/gradle.properties
+index 509de8a9e4..e257a70586 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 2f64680e40..f8202bcc26 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -17,4 +17,4 @@ dependencyResolutionManagement {
+     }
+ }
+ 
+-include(":lint-rules", ":api", ":AnkiDroid", ":testlib", ":common")
+\ No newline at end of file
++include(":lint-rules", ":api", ":AnkiDroid", ":testlib", ":common")

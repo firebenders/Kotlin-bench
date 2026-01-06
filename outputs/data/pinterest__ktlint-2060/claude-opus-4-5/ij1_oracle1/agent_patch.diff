@@ -1,0 +1,73 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 862b4428..9f27229e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -39,6 +39,7 @@ At this point in time, it is not yet decided what the next steps will be. Ktlint
+ * Do not flag a (potential) mutable extension property in case the getter is annotated or prefixed with a modifier `property-naming` ([#2024](https://github.com/pinterest/ktlint/issues/2024))
+ * Do not merge an annotated expression body with the function signature even if it fits on a single line ([#2043](https://github.com/pinterest/ktlint/issues/2043))
+ * Ignore property with name `serialVersionUID` in `property-naming` ([#2045](https://github.com/pinterest/ktlint/issues/2045))
++* Do not report "Unnecessary newline before '('" for opening parenthesis of function type in nullable type after wrapping `parameter-list-wrapping` ([#1324](https://github.com/pinterest/ktlint/issues/1324))
+ 
+ ### Changed
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
+index ae7573bd..ab96beed 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
+@@ -229,9 +229,18 @@ public class ParameterListWrappingRule :
+             LPAR -> {
+                 val prevLeaf = child.prevLeaf()
+                 if (prevLeaf is PsiWhiteSpace && prevLeaf.textContains('\n')) {
+-                    emit(child.startOffset, errorMessage(child), true)
+-                    if (autoCorrect) {
+-                        prevLeaf.delete()
++                    // Check if this whitespace is part of nullable type wrapping.
++                    // In that case, the structure is: NULLABLE_TYPE -> LPAR -> WHITESPACE -> FUNCTION_TYPE -> VALUE_PARAMETER_LIST -> LPAR
++                    // The whitespace is between the outer LPAR and FUNCTION_TYPE, so we shouldn't flag the inner LPAR.
++                    val prevPrevLeaf = prevLeaf.prevLeaf()
++                    val isNullableTypeWrapping =
++                        prevPrevLeaf?.elementType == LPAR &&
++                            prevPrevLeaf.treeParent?.elementType == NULLABLE_TYPE
++                    if (!isNullableTypeWrapping) {
++                        emit(child.startOffset, errorMessage(child), true)
++                        if (autoCorrect) {
++                            prevLeaf.delete()
++                        }
+                     }
+                 }
+             }
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleTest.kt
+index 304c8675..2e4b1c58 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleTest.kt
+@@ -542,6 +542,22 @@ class ParameterListWrappingRuleTest {
+             ).isFormattedAs(formattedCode)
+     }
+ 
++    @Test
++    fun `Issue 1324 - Given an already wrapped nullable function type then do not report unnecessary newline before opening parenthesis`() {
++        // After wrapping a nullable function type, the inner opening parenthesis should not be flagged
++        // as having an unnecessary newline before it. The whitespace before the inner '(' belongs to
++        // the nullable type wrapping, not to the parameter list.
++        val code =
++            """
++            var changesListener: (
++                (width: Double?, depth: Double?, length: Double?, area: Double?) -> Unit
++            )? = null
++            """.trimIndent()
++        parameterListWrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 80)
++            .hasNoLintViolations()
++    }
++
+     @Nested
+     inner class `Given a single line function signature with an annotated parameter` {
+         @Test
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

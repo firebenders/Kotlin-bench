@@ -1,0 +1,137 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/reader/utils/ReaderTopBarMenuHelper.kt b/WordPress/src/main/java/org/wordpress/android/ui/reader/utils/ReaderTopBarMenuHelper.kt
+index ba94c014f5c..b206aa5e346 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/reader/utils/ReaderTopBarMenuHelper.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/reader/utils/ReaderTopBarMenuHelper.kt
+@@ -17,6 +17,10 @@ import javax.inject.Inject
+ class ReaderTopBarMenuHelper @Inject constructor(
+     private val readerTagsFeedFeatureConfig: ReaderTagsFeedFeatureConfig
+ ) {
++    companion object {
++        private const val MAX_LISTS_WITHOUT_SUBMENU = 2
++    }
++
+     fun createMenu(readerTagsList: ReaderTagList): List<MenuElementData> {
+         return mutableListOf<MenuElementData>().apply {
+             readerTagsList.indexOrNull { it.isDiscover }?.let { discoverIndex ->
+@@ -55,7 +59,13 @@ class ReaderTopBarMenuHelper @Inject constructor(
+                 .takeIf { it.isNotEmpty() }
+                 ?.let { customListsArray ->
+                     add(MenuElementData.Divider)
+-                    add(createCustomListsItem(customListsArray))
++                    if (customListsArray.size() <= MAX_LISTS_WITHOUT_SUBMENU) {
++                        customListsArray.forEach { index, readerTag ->
++                            add(createCustomListItem(index, readerTag))
++                        }
++                    } else {
++                        add(createCustomListsSubmenu(customListsArray))
++                    }
+                 }
+         }
+     }
+@@ -114,15 +124,17 @@ class ReaderTopBarMenuHelper @Inject constructor(
+         )
+     }
+ 
+-    private fun createCustomListsItem(customLists: SparseArrayCompat<ReaderTag>): MenuElementData.Item.SubMenu {
++    private fun createCustomListItem(index: Int, readerTag: ReaderTag): MenuElementData.Item.Single {
++        return MenuElementData.Item.Single(
++            id = getMenuItemIdFromReaderTagIndex(index),
++            text = UiString.UiStringText(readerTag.tagTitle),
++        )
++    }
++
++    private fun createCustomListsSubmenu(customLists: SparseArrayCompat<ReaderTag>): MenuElementData.Item.SubMenu {
+         val customListsMenuItems = mutableListOf<MenuElementData.Item.Single>()
+         customLists.forEach { index, readerTag ->
+-            customListsMenuItems.add(
+-                MenuElementData.Item.Single(
+-                    id = getMenuItemIdFromReaderTagIndex(index),
+-                    text = UiString.UiStringText(readerTag.tagTitle),
+-                )
+-            )
++            customListsMenuItems.add(createCustomListItem(index, readerTag))
+         }
+         return MenuElementData.Item.SubMenu(
+             // We don't need this ID since this menu item just opens the sub-menu. It doesn't
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/reader/utils/ReaderTopBarMenuHelperTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/reader/utils/ReaderTopBarMenuHelperTest.kt
+index 03e57616424..864951b132f 100644
+--- a/WordPress/src/test/java/org/wordpress/android/ui/reader/utils/ReaderTopBarMenuHelperTest.kt
++++ b/WordPress/src/test/java/org/wordpress/android/ui/reader/utils/ReaderTopBarMenuHelperTest.kt
+@@ -240,6 +240,77 @@ class ReaderTopBarMenuHelperTest {
+         assertThat(customListsItem).isNull()
+     }
+ 
++    @Test
++    fun `GIVEN only one custom list WHEN createMenu THEN list shown directly in menu without submenu`() {
++        val tags = ReaderTagList().apply {
++            add(mockDiscoverTag()) // item 0
++            add(mockFollowingTag()) // item 1
++            add(createCustomListTag("my-list")) // item 2
++        }
++
++        val menu = helper.createMenu(tags)
++
++        // Should not have a submenu
++        assertThat(menu.findSubMenu()).isNull()
++
++        // Should have divider and list item directly in menu
++        assertThat(menu).contains(MenuElementData.Divider)
++        val customListItem = menu.findSingleItem { it.id == "2" }!!
++        assertThat(customListItem.text).isEqualTo(UiStringText("my-list"))
++    }
++
++    @Test
++    fun `GIVEN two custom lists WHEN createMenu THEN lists shown directly in menu without submenu`() {
++        val tags = ReaderTagList().apply {
++            add(mockDiscoverTag()) // item 0
++            add(mockFollowingTag()) // item 1
++            add(createCustomListTag("list-1")) // item 2
++            add(createCustomListTag("list-2")) // item 3
++        }
++
++        val menu = helper.createMenu(tags)
++
++        // Should not have a submenu
++        assertThat(menu.findSubMenu()).isNull()
++
++        // Should have divider and list items directly in menu
++        assertThat(menu).contains(MenuElementData.Divider)
++
++        val customList1Item = menu.findSingleItem { it.id == "2" }!!
++        assertThat(customList1Item.text).isEqualTo(UiStringText("list-1"))
++
++        val customList2Item = menu.findSingleItem { it.id == "3" }!!
++        assertThat(customList2Item.text).isEqualTo(UiStringText("list-2"))
++    }
++
++    @Test
++    fun `GIVEN three custom lists WHEN createMenu THEN lists shown in submenu`() {
++        val tags = ReaderTagList().apply {
++            add(mockDiscoverTag()) // item 0
++            add(mockFollowingTag()) // item 1
++            add(createCustomListTag("list-1")) // item 2
++            add(createCustomListTag("list-2")) // item 3
++            add(createCustomListTag("list-3")) // item 4
++        }
++
++        val menu = helper.createMenu(tags)
++
++        // Should have a submenu
++        assertThat(menu).contains(MenuElementData.Divider)
++        val customListsItem = menu.findSubMenu()!!
++        assertThat(customListsItem.text).isEqualTo(UiStringRes(R.string.reader_dropdown_menu_lists))
++
++        // Lists should be inside the submenu
++        val customList1Item = customListsItem.children.findSingleItem { it.id == "2" }!!
++        assertThat(customList1Item.text).isEqualTo(UiStringText("list-1"))
++
++        val customList2Item = customListsItem.children.findSingleItem { it.id == "3" }!!
++        assertThat(customList2Item.text).isEqualTo(UiStringText("list-2"))
++
++        val customList3Item = customListsItem.children.findSingleItem { it.id == "4" }!!
++        assertThat(customList3Item.text).isEqualTo(UiStringText("list-3"))
++    }
++
+     @Test
+     fun `GIVEN single menu item built with helper WHEN getReaderTagIndexFromMenuItem then return correct index`() {
+         val tags = ReaderTagList().apply {

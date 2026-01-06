@@ -4,16 +4,18 @@ import os, json
 import argparse
 
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 from ghapi.core import GhApi
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 
 
+load_dotenv()
 gh_token = os.environ.get("GITHUB_TOKEN")
 if not gh_token:
     msg = "Please set the GITHUB_TOKEN environment variable."
     raise ValueError(msg)
-api = GhApi(token="gh_token")
+api = GhApi(token=gh_token)
 
 
 def get_package_stats(data_tasks, f):

@@ -129,8 +129,9 @@ _this_dir = _this_file.parent
 # Load environment variables from .env if present
 load_dotenv()
 
-# Fail early if GITHUB_TOKEN is not set
-if not os.environ.get("GITHUB_TOKEN"):
+# Fail early if GITHUB_TOKEN is not set (only check locally, not in Modal containers)
+# In Modal containers, MODAL_ENVIRONMENT is set and secrets are injected at function runtime
+if not os.environ.get("MODAL_ENVIRONMENT") and not os.environ.get("GITHUB_TOKEN"):
     raise EnvironmentError(
         "GITHUB_TOKEN environment variable is not set.\n"
         "Please either:\n"
@@ -358,6 +359,7 @@ def _create_repo_image(repo_name: str) -> modal.Image:
             context_dir=".",
             add_python="3.11",
         )
+        .pip_install("python-dotenv")
         # Add the Firebender plugin zip to the image for runtime installation
         .add_local_file(FIREBENDER_PLUGIN_ZIP, "/tmp/Firebender.zip", copy=True)
         .add_local_dir(
@@ -416,6 +418,7 @@ github_secret = modal.Secret.from_name("github-token")
 # Lightweight image for utility functions (just needs constants.py)
 util_image = (
     modal.Image.debian_slim(python_version="3.11")
+    .pip_install("python-dotenv")
     .add_local_dir(
         local_path=Path(__file__).parent,
         remote_path="/root/agent-bench",
@@ -1052,16 +1055,19 @@ def start_agent_server(
     env["FIREBENDER_AGENT_SERVER"] = "true"
     env["FIREBENDER_AGENT_SERVER_PORT"] = str(AGENT_PORT)
     env["FIREBENDER_ANDROID_PROJECT"] = "true" if is_android else "false"
+    env["FIREBENDER_BYPASS_AUTH_KEY"] = os.environ.get("FIREBENDER_BYPASS_AUTH_KEY", "firebender-bypass-auth-2025")
     env["DISPLAY"] = ":99"
     
     # JVM options for headless IntelliJ
     # IMPORTANT: Include firebender.agentServer as JVM property because env vars
     # may not propagate correctly through idea.sh to the JVM process.
     # The AgentServer.isEnabled() checks System.getProperty() as fallback.
+    bypass_auth_key = env["FIREBENDER_BYPASS_AUTH_KEY"]
     env["_JAVA_OPTIONS"] = " ".join([
         "-Dfirebender.agentServer=true",
         f"-Dfirebender.agentServerPort={AGENT_PORT}",
         f"-Dfirebender.androidProject={'true' if is_android else 'false'}",
+        f"-Dfirebender.bypassAuthKey={bypass_auth_key}",
         "-Djb.consents.confirmation.enabled=false",
         '-Djb.privacy.policy.text="<!--999.999-->"',
         "-Didea.initially.ask.config=false",
@@ -1083,6 +1089,7 @@ def start_agent_server(
         f"FIREBENDER_AGENT_SERVER=true",
         f"FIREBENDER_AGENT_SERVER_PORT={AGENT_PORT}",
         f"FIREBENDER_ANDROID_PROJECT={'true' if is_android else 'false'}",
+        f"FIREBENDER_BYPASS_AUTH_KEY={bypass_auth_key}",
         "/opt/idea/bin/idea.sh",
         project_path,
     ]

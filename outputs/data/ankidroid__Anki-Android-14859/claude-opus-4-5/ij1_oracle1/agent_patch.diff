@@ -49,44 +49,45 @@ index c7bb17d62d..e9e3f2b8b6 100644
      // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
      // and there's no no-op version for release build. Usage has been disabled for release
 diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
-index 8f8b62c9a3..11c4c516ef 100644
+index 8f8b62c9a3..cc50868694 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
 @@ -256,16 +256,17 @@ open class CardBrowser :
  
      @VisibleForTesting(otherwise = VisibleForTesting.PROTECTED)
      fun changeCardOrder(which: SortType) {
-+        val sortOrderDirectionKey = SortType.getSortOrderDirectionKey(cardsOrNotes)
++        val orderAscKey = if (cardsOrNotes == CARDS) "sortBackwards" else "browserNoteSortBackwards"
          if (which != mOrder) {
              mOrder = which
              mOrderAsc = false
 -            which.save(getColUnsafe.config, baseContext.sharedPrefs())
 -            getColUnsafe.config.set("sortBackwards", mOrderAsc)
 +            which.save(getColUnsafe.config, baseContext.sharedPrefs(), cardsOrNotes)
-+            getColUnsafe.config.set(sortOrderDirectionKey, mOrderAsc)
++            getColUnsafe.config.set(orderAscKey, mOrderAsc)
              searchCards()
          } else if (which != SortType.NO_SORTING) {
              // if the same element is selected again, reverse the order
              mOrderAsc = !mOrderAsc
 -            getColUnsafe.config.set("sortBackwards", mOrderAsc)
-+            getColUnsafe.config.set(sortOrderDirectionKey, mOrderAsc)
++            getColUnsafe.config.set(orderAscKey, mOrderAsc)
              mCards.reverse()
              updateList()
          }
-@@ -466,8 +467,10 @@ open class CardBrowser :
+@@ -466,8 +467,11 @@ open class CardBrowser :
          registerExternalStorageListener()
          val preferences = baseContext.sharedPrefs()
  
 -        mOrder = SortType.fromCol(col.config, preferences)
 -        mOrderAsc = col.config.get("sortBackwards") ?: false
-+        // Must set cardsOrNotes before reading sort order, as they use different config keys
++        // Set cardsOrNotes first as it affects how sorting is loaded
 +        cardsOrNotes = CardsOrNotes.fromCollection(col)
++        val orderAscKey = if (cardsOrNotes == CARDS) "sortBackwards" else "browserNoteSortBackwards"
 +        mOrder = SortType.fromCol(col.config, preferences, cardsOrNotes)
-+        mOrderAsc = col.config.get(SortType.getSortOrderDirectionKey(cardsOrNotes)) ?: false
++        mOrderAsc = col.config.get(orderAscKey) ?: false
          mCards.reset()
          // Create a spinner for column 1
          val cardsColumn1Spinner = findViewById<Spinner>(R.id.browser_column1_spinner)
-@@ -581,7 +584,6 @@ open class CardBrowser :
+@@ -581,7 +585,6 @@ open class CardBrowser :
              alwaysShowDefault = false,
              showFilteredDecks = true
          )
@@ -94,18 +95,25 @@ index 8f8b62c9a3..11c4c516ef 100644
          isTruncated = this.sharedPrefs().getBoolean("isTruncated", false)
          deckSpinnerSelection!!.initializeActionBarDeckSpinner(this.supportActionBar!!)
          selectDeckAndSave(deckId)
-@@ -1198,6 +1200,10 @@ open class CardBrowser :
+@@ -1196,8 +1199,15 @@ open class CardBrowser :
+ 
+     fun switchCardOrNote(newCardsMode: CardsOrNotes) {
          launchCatchingTask {
-             withCol { newCardsMode.saveToCollection(this) }
-             cardsOrNotes = newCardsMode
-+            // Reload sort order from the correct config keys for the new mode
-+            val preferences = baseContext.sharedPrefs()
-+            mOrder = SortType.fromCol(getColUnsafe.config, preferences, cardsOrNotes)
-+            mOrderAsc = getColUnsafe.config.get(SortType.getSortOrderDirectionKey(cardsOrNotes)) ?: false
+-            withCol { newCardsMode.saveToCollection(this) }
+-            cardsOrNotes = newCardsMode
++            withCol {
++                newCardsMode.saveToCollection(this)
++                // Reload sorting settings for the new mode
++                cardsOrNotes = newCardsMode
++                val preferences = baseContext.sharedPrefs()
++                val orderAscKey = if (newCardsMode == CARDS) "sortBackwards" else "browserNoteSortBackwards"
++                mOrder = SortType.fromCol(config, preferences, newCardsMode)
++                mOrderAsc = config.get(orderAscKey) ?: false
++            }
              searchCards()
          }
      }
-@@ -2504,7 +2510,7 @@ suspend fun searchForCards(
+@@ -2504,7 +2514,7 @@ suspend fun searchForCards(
      cardsOrNotes: CardsOrNotes
  ): MutableList<CardBrowser.CardCache> {
      return withCol {
@@ -115,10 +123,19 @@ index 8f8b62c9a3..11c4c516ef 100644
              .toMutableList()
      }
 diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt b/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
-index cc42c2f540..d7aee564e6 100644
+index cc42c2f540..dba5838aa6 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
-@@ -47,10 +47,11 @@ enum class SortType(val ankiSortType: String?, val cardBrowserLabelIndex: Int) {
+@@ -20,6 +20,8 @@ import android.content.SharedPreferences
+ import androidx.core.content.edit
+ import com.ichi2.anki.CardBrowser
+ import com.ichi2.anki.R
++import com.ichi2.anki.model.CardsOrNotes.CARDS
++import com.ichi2.anki.model.CardsOrNotes.NOTES
+ import com.ichi2.libanki.Config
+ import com.ichi2.libanki.SortOrder
+ 
+@@ -47,12 +49,14 @@ enum class SortType(val ankiSortType: String?, val cardBrowserLabelIndex: Int) {
      REVIEWS("cardReps", 8),
      LAPSES("cardLapses", 9);
  
@@ -127,38 +144,36 @@ index cc42c2f540..d7aee564e6 100644
          // in the case of 'no sorting', we still need a sort type.
          // The inverse is handled in `fromCol`
 -        config.set("sortType", this.ankiSortType ?: SORT_FIELD.ankiSortType)
-+        val sortTypeKey = if (cardsOrNotes == CardsOrNotes.CARDS) "sortType" else "noteSortType"
++        val sortTypeKey = if (cardsOrNotes == CARDS) "sortType" else "noteSortType"
 +        config.set(sortTypeKey, this.ankiSortType ?: SORT_FIELD.ankiSortType)
++        val noSortingKey = if (cardsOrNotes == CARDS) "cardBrowserNoSorting" else "noteBrowserNoSorting"
          preferences.edit {
-             putBoolean("cardBrowserNoSorting", this@SortType == NO_SORTING)
+-            putBoolean("cardBrowserNoSorting", this@SortType == NO_SORTING)
++            putBoolean(noSortingKey, this@SortType == NO_SORTING)
          }
-@@ -61,8 +62,9 @@ enum class SortType(val ankiSortType: String?, val cardBrowserLabelIndex: Int) {
+     }
+ 
+@@ -61,10 +65,12 @@ enum class SortType(val ankiSortType: String?, val cardBrowserLabelIndex: Int) {
          if (this == NO_SORTING) SortOrder.NoOrdering() else SortOrder.UseCollectionOrdering()
  
      companion object {
 -        fun fromCol(config: Config, preferences: SharedPreferences): SortType {
 -            val colOrder = config.get<String>("sortType")
 +        fun fromCol(config: Config, preferences: SharedPreferences, cardsOrNotes: CardsOrNotes): SortType {
-+            val sortTypeKey = if (cardsOrNotes == CardsOrNotes.CARDS) "sortType" else "noteSortType"
++            val sortTypeKey = if (cardsOrNotes == CARDS) "sortType" else "noteSortType"
 +            val colOrder = config.get<String>(sortTypeKey)
              val type = entries.firstOrNull { it.ankiSortType == colOrder } ?: NO_SORTING
-             if (type == SORT_FIELD && preferences.getBoolean("cardBrowserNoSorting", false)) {
+-            if (type == SORT_FIELD && preferences.getBoolean("cardBrowserNoSorting", false)) {
++            val noSortingKey = if (cardsOrNotes == CARDS) "cardBrowserNoSorting" else "noteBrowserNoSorting"
++            if (type == SORT_FIELD && preferences.getBoolean(noSortingKey, false)) {
                  return NO_SORTING
-@@ -73,5 +75,9 @@ enum class SortType(val ankiSortType: String?, val cardBrowserLabelIndex: Int) {
-         fun fromCardBrowserLabelIndex(index: Int): SortType {
-             return entries.firstOrNull { it.cardBrowserLabelIndex == index } ?: NO_SORTING
-         }
-+
-+        /** Returns the config key for sort order direction based on the mode */
-+        fun getSortOrderDirectionKey(cardsOrNotes: CardsOrNotes): String =
-+            if (cardsOrNotes == CardsOrNotes.CARDS) "sortBackwards" else "browserNoteSortBackwards"
-     }
- }
+             }
+             return type
 diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt
-index b5a1b2a621..b9f5bd3066 100644
+index b5a1b2a621..f69fa5aa9e 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt
-@@ -409,15 +409,21 @@ open class Collection(
+@@ -409,11 +409,11 @@ open class Collection(
  
      /** Return a list of card ids  */
      @RustCleanup("Remove in V16.") // Not in libAnki
@@ -169,36 +184,9 @@ index b5a1b2a621..b9f5bd3066 100644
  
 -        val noteIds = findNotes(query, SortOrder.NoOrdering())
 +        val noteIds = findNotes(query, order)
-+        if (noteIds.isEmpty()) {
-+            return emptyList()
-+        }
          // select the card with the lowest `ord` to show
--        return db.queryLongList(
-+        // The query result order matches the noteIds order from findNotes
-+        val noteIdToPosition = noteIds.withIndex().associate { it.value to it.index }
-+        // Get card id and note id pairs, then sort by note position to preserve order from findNotes
-+        return db.database.query(
+         return db.queryLongList(
              """
--SELECT c.id
-+SELECT c.id, c.nid
- FROM (
-   SELECT nid, MIN(ord) AS ord
-   FROM cards
-@@ -426,7 +432,13 @@ FROM (
- ) AS card_with_min_ord
- JOIN cards AS c ON card_with_min_ord.nid = c.nid AND card_with_min_ord.ord = c.ord;
-             """.trimMargin()
--        )
-+        ).use { cursor ->
-+            generateSequence { if (cursor.moveToNext()) cursor else null }
-+                .map { it.getLong(0) to it.getLong(1) } // (cardId, noteId)
-+                .sortedBy { noteIdToPosition[it.second] ?: Int.MAX_VALUE }
-+                .map { it.first }
-+                .toList()
-+        }
-     }
- 
-     @RustCleanup("Calling code should handle returned OpChanges")
 diff --git a/gradle.properties b/gradle.properties
 index 13992ecd31..b06b0f2c12 100644
 --- a/gradle.properties

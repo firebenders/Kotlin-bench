@@ -1,0 +1,373 @@
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt
+index 98f113c3..3453b072 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt
+@@ -23,6 +23,18 @@ public class Code private constructor(
+             fileName.orEmpty()
+         }
+ 
++    /**
++     * Creates a new [Code] instance with updated [content] while keeping all other properties unchanged.
++     */
++    public fun copy(content: String = this.content): Code =
++        Code(
++            content = content,
++            fileName = fileName,
++            filePath = filePath,
++            script = script,
++            isStdIn = isStdIn,
++        )
++
+     public companion object {
+         /**
+          * Create [Code] from a [file] containing valid Kotlin code or script. The '.editorconfig' files on the path to [file] are taken
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+index eec63c77..9b48b17f 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+@@ -132,83 +132,121 @@ public class KtLintRuleEngine(
+     ): String {
+         LOGGER.debug { "Starting with formatting file '${code.fileNameOrStdin()}'" }
+ 
+-        val hasUTF8BOM = code.content.startsWith(UTF8_BOM)
+-        val ruleExecutionContext = createRuleExecutionContext(this, code)
++        data class FormatRunResult(
++            val formattedCode: String,
++            val errors: Set<Pair<LintError, Boolean>>, // Pair: (lintError, corrected)
++        )
+ 
+-        var tripped = false
+-        var mutated = false
+-        val errors = mutableSetOf<Pair<LintError, Boolean>>()
+-        val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+-        visitorProvider
+-            .visitor()
+-            .invoke { rule ->
+-                ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
+-                    tripped = true
+-                    if (canBeAutoCorrected) {
+-                        mutated = true
+-                        /**
+-                         * Rebuild the suppression locator after each change in the AST as the offsets of the
+-                         * suppression hints might have changed.
+-                         */
+-                        ruleExecutionContext.rebuildSuppressionLocator()
+-                    }
+-                    val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+-                    errors.add(
+-                        Pair(
+-                            LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
+-                            // It is assumed that a rule that emits that an error can be autocorrected, also
+-                            // does correct the error.
+-                            canBeAutoCorrected,
+-                        ),
+-                    )
+-                    // In trace mode report the violation immediately. The order in which violations are actually found might be different
+-                    // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
+-                    // violations are being solved.
+-                    LOGGER.trace {
+-                        "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
+-                            canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
+-                    }
+-                }
+-            }
+-        if (tripped) {
++        fun formatSingleRun(codeToFormat: Code): FormatRunResult {
++            val hasUTF8BOM = codeToFormat.content.startsWith(UTF8_BOM)
++            val ruleExecutionContext = createRuleExecutionContext(this, codeToFormat)
++
++            var tripped = false
++            var mutated = false
++            val errors = mutableSetOf<Pair<LintError, Boolean>>()
++            val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+             visitorProvider
+                 .visitor()
+                 .invoke { rule ->
+-                    ruleExecutionContext.executeRule(
+-                        rule,
+-                        false,
+-                    ) { offset, errorMessage, canBeAutoCorrected ->
++                    ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
++                        tripped = true
++                        if (canBeAutoCorrected) {
++                            mutated = true
++                            /**
++                             * Rebuild the suppression locator after each change in the AST as the offsets of the
++                             * suppression hints might have changed.
++                             */
++                            ruleExecutionContext.rebuildSuppressionLocator()
++                        }
+                         val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+                         errors.add(
+                             Pair(
+                                 LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
+-                                // It is assumed that a rule only corrects an error after it has emitted an
+-                                // error and indicating that it actually can be autocorrected.
+-                                false,
++                                // It is assumed that a rule that emits that an error can be autocorrected, also
++                                // does correct the error.
++                                canBeAutoCorrected,
+                             ),
+                         )
++                        // In trace mode report the violation immediately. The order in which violations are actually found might be
++                        // different from the order in which they are reported. For debugging purposes it cn be helpful to know the exact
++                        // order in which violations are being solved.
++                        LOGGER.trace {
++                            "Format violation: ${codeToFormat.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
++                                canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
++                        }
+                     }
+                 }
++
++            if (tripped) {
++                visitorProvider
++                    .visitor()
++                    .invoke { rule ->
++                        ruleExecutionContext.executeRule(
++                            rule,
++                            false,
++                        ) { offset, errorMessage, canBeAutoCorrected ->
++                            val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
++                            errors.add(
++                                Pair(
++                                    LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
++                                    // It is assumed that a rule only corrects an error after it has emitted an
++                                    // error and indicating that it actually can be autocorrected.
++                                    false,
++                                ),
++                            )
++                        }
++                    }
++            }
++
++            if (!mutated) {
++                return FormatRunResult(codeToFormat.content, errors)
++            }
++
++            val formattedCode =
++                ruleExecutionContext
++                    .rootNode
++                    .text
++                    .replace("\n", ruleExecutionContext.determineLineSeparator(codeToFormat.content))
++
++            return FormatRunResult(
++                formattedCode =
++                    if (hasUTF8BOM) {
++                        UTF8_BOM + formattedCode
++                    } else {
++                        formattedCode
++                    },
++                errors = errors,
++            )
+         }
+ 
+-        errors
+-            .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
+-            .forEach { (e, corrected) -> callback(e, corrected) }
++        val maxNumberOfReruns = 3
++        var numberOfReruns = 0
++
++        var codeToFormat = code
++        var lastRunResult = formatSingleRun(codeToFormat)
+ 
+-        if (!mutated) {
+-            return code.content
++        while (numberOfReruns < maxNumberOfReruns) {
++            val containsUncorrectedAutoCorrectableLintViolations =
++                lastRunResult.errors.any { (lintError, corrected) -> lintError.canBeAutoCorrected && !corrected }
++
++            if (!containsUncorrectedAutoCorrectableLintViolations) {
++                break
++            }
++
++            numberOfReruns++
++            LOGGER.debug {
++                "Rerun formatting file '${code.fileNameOrStdin()}' ($numberOfReruns/$maxNumberOfReruns) as previous run still reported " +
++                    "lint violations that can be autocorrected"
++            }
++            codeToFormat = codeToFormat.copy(content = lastRunResult.formattedCode)
++            lastRunResult = formatSingleRun(codeToFormat)
+         }
+ 
+-        val formattedCode =
+-            ruleExecutionContext
+-                .rootNode
+-                .text
+-                .replace("\n", ruleExecutionContext.determineLineSeparator(code.content))
+-        return if (hasUTF8BOM) {
+-            UTF8_BOM + formattedCode
+-        } else {
+-            formattedCode
+-        }.also {
++        lastRunResult.errors
++            .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
++            .forEach { (e, corrected) -> callback(e, corrected) }
++
++        return lastRunResult.formattedCode.also {
+             LOGGER.debug("Finished with formatting file '${code.fileNameOrStdin()}'")
+         }
+     }
+
+diff --git a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/FormatRerunTest.kt b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/FormatRerunTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/FormatRerunTest.kt
+@@ -0,0 +1,150 @@
++package com.pinterest.ktlint.rule.engine.api
++
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.REGULAR_STRING_PART
++import com.pinterest.ktlint.rule.engine.core.api.Rule
++import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAsLateAsPossible
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
++import org.assertj.core.api.Assertions.assertThat
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafElement
++import org.junit.jupiter.api.Test
++
++class FormatRerunTest {
++    @Test
++    fun `format reruns until no uncorrected auto-correctable lint violations remain and only returns the last run violations`() {
++        val callbacks = mutableListOf<Pair<LintError, Boolean>>()
++
++        val actualFormattedCode =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider { FixBarToBazRule() },
++                        RuleProvider { LateIntroduceBarRule() },
++                    ),
++            ).format(
++                Code.fromSnippet("val foo = \"foo\""),
++            ) { e, corrected ->
++                callbacks.add(e to corrected)
++            }
++
++        assertThat(actualFormattedCode).isEqualTo("val foo = \"baz\"")
++        assertThat(callbacks).containsExactly(
++            LintError(
++                line = 1,
++                col = 12,
++                ruleId = FixBarToBazRule.RULE_ID,
++                detail = FixBarToBazRule.ERROR_MESSAGE,
++                canBeAutoCorrected = true,
++            ) to true,
++        )
++    }
++
++    @Test
++    fun `format does not rerun more than three times`() {
++        ToggleStringValueRule.beforeFirstNodeCalls = 0
++
++        val actualFormattedCode =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider { ToggleStringValueRule() },
++                    ),
++            ).format(Code.fromSnippet("val foo = \"a\""))
++
++        // Initial run + max 3 reruns => max 4 runs. Each run traverses the AST twice (format and lint) because the rule emits a violation.
++        assertThat(ToggleStringValueRule.beforeFirstNodeCalls).isEqualTo(8)
++
++        // 4 runs causes the string to toggle back to the original value.
++        assertThat(actualFormattedCode).isEqualTo("val foo = \"a\"")
++    }
++}
++
++private class LateIntroduceBarRule : Rule(
++    ruleId = LateIntroduceBarRule.RULE_ID,
++    about = About(),
++    visitorModifiers = setOf(RunAsLateAsPossible),
++) {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType == REGULAR_STRING_PART && node.text == "foo") {
++            emit(node.startOffset, ERROR_MESSAGE, true)
++            if (autoCorrect) {
++                (node as LeafElement).rawReplaceWithText("bar")
++            }
++        }
++    }
++
++    companion object {
++        val RULE_ID = RuleId("test:late-introduce-bar")
++        const val ERROR_MESSAGE = "String value 'foo' is not allowed and will be changed to 'bar'"
++    }
++}
++
++private class FixBarToBazRule : Rule(
++    ruleId = FixBarToBazRule.RULE_ID,
++    about = About(),
++) {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType == REGULAR_STRING_PART && node.text == "bar") {
++            emit(node.startOffset, ERROR_MESSAGE, true)
++            if (autoCorrect) {
++                (node as LeafElement).rawReplaceWithText("baz")
++            }
++        }
++    }
++
++    companion object {
++        val RULE_ID = RuleId("test:fix-bar-to-baz")
++        const val ERROR_MESSAGE = "String value 'bar' is not allowed and will be changed to 'baz'"
++    }
++}
++
++private class ToggleStringValueRule : Rule(
++    ruleId = ToggleStringValueRule.RULE_ID,
++    about = About(),
++) {
++    override fun beforeFirstNode(editorConfig: EditorConfig) {
++        beforeFirstNodeCalls++
++    }
++
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType != REGULAR_STRING_PART) {
++            return
++        }
++
++        when (node.text) {
++            "a" -> {
++                emit(node.startOffset, "Toggle 'a' to 'b'", true)
++                if (autoCorrect) {
++                    (node as LeafElement).rawReplaceWithText("b")
++                }
++            }
++
++            "b" -> {
++                emit(node.startOffset, "Toggle 'b' to 'a'", true)
++                if (autoCorrect) {
++                    (node as LeafElement).rawReplaceWithText("a")
++                }
++            }
++        }
++    }
++
++    companion object {
++        val RULE_ID = RuleId("test:toggle-string")
++        var beforeFirstNodeCalls: Int = 0
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

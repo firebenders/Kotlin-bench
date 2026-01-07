@@ -1,0 +1,104 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt b/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt
+index 8d25b5d32a7..54202284511 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt
+@@ -178,9 +178,10 @@ class DashboardCardPersonalizationViewModelSlice @Inject constructor(
+     }
+ 
+     private fun updateCardState(cardType: CardType, enabled: Boolean) {
+-        val currentCards: MutableList<DashboardCardState> = _uiState.value!!.toMutableList()
+-        val updated = currentCards.find { it.cardType == cardType }!!.copy(enabled = enabled)
+-        currentCards[cardType.order] = updated
++        val currentCards: MutableList<DashboardCardState> = _uiState.value?.toMutableList() ?: return
++        val index = currentCards.indexOfFirst { it.cardType == cardType }
++        if (index == -1) return
++        currentCards[index] = currentCards[index].copy(enabled = enabled)
+         _uiState.postValue(currentCards)
+     }
+ 
+
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSliceRegressionTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSliceRegressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSliceRegressionTest.kt
+@@ -0,0 +1,80 @@
++package org.wordpress.android.ui.mysite.personalization
++
++import junit.framework.TestCase.assertTrue
++import kotlinx.coroutines.ExperimentalCoroutinesApi
++import kotlinx.coroutines.flow.flowOf
++import org.junit.Before
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.mockito.Mock
++import org.mockito.junit.MockitoJUnitRunner
++import org.mockito.kotlin.whenever
++import org.wordpress.android.BaseUnitTest
++import org.wordpress.android.fluxc.model.BloggingRemindersModel
++import org.wordpress.android.fluxc.model.SiteModel
++import org.wordpress.android.fluxc.store.BloggingRemindersStore
++import org.wordpress.android.ui.blaze.BlazeFeatureUtils
++import org.wordpress.android.ui.bloggingprompts.BloggingPromptsSettingsHelper
++import org.wordpress.android.ui.mysite.SelectedSiteRepository
++import org.wordpress.android.ui.prefs.AppPrefsWrapper
++import org.wordpress.android.util.analytics.AnalyticsTrackerWrapper
++
++@ExperimentalCoroutinesApi
++@RunWith(MockitoJUnitRunner::class)
++class DashboardCardPersonalizationViewModelSliceRegressionTest : BaseUnitTest() {
++    @Mock lateinit var appPrefsWrapper: AppPrefsWrapper
++    @Mock lateinit var selectedSiteRepository: SelectedSiteRepository
++    @Mock lateinit var bloggingRemindersStore: BloggingRemindersStore
++    @Mock lateinit var analyticsTrackerWrapper: AnalyticsTrackerWrapper
++    @Mock lateinit var blazeFeatureUtils: BlazeFeatureUtils
++    @Mock lateinit var bloggingPromptsSettingsHelper: BloggingPromptsSettingsHelper
++
++    private lateinit var viewModelSlice: DashboardCardPersonalizationViewModelSlice
++
++    private val site = SiteModel().apply { siteId = 123L }
++    private val localSiteId = 456
++
++    private val uiStateList = mutableListOf<List<DashboardCardState>>()
++
++    private val bloggingRemindersModel =
++        BloggingRemindersModel(localSiteId, setOf(BloggingRemindersModel.Day.MONDAY), 5, 43, false)
++
++    @Before
++    fun setUp() {
++        whenever(selectedSiteRepository.getSelectedSite()).thenReturn(site)
++        whenever(selectedSiteRepository.getSelectedSiteLocalId()).thenReturn(localSiteId)
++        whenever(bloggingRemindersStore.bloggingRemindersModel(localSiteId)).thenReturn(flowOf(bloggingRemindersModel))
++
++        // Ensure ACTIVITY_LOG, BLAZE and BLOGGING_PROMPTS are present, while PAGES is omitted.
++        site.hasCapabilityManageOptions = true
++        site.setIsWpForTeamsSite(false)
++        whenever(blazeFeatureUtils.isSiteBlazeEligible(site)).thenReturn(true)
++        test {
++            whenever(bloggingPromptsSettingsHelper.shouldShowPromptsFeature()).thenReturn(true)
++        }
++
++        viewModelSlice = DashboardCardPersonalizationViewModelSlice(
++            bgDispatcher = testDispatcher(),
++            appPrefsWrapper = appPrefsWrapper,
++            selectedSiteRepository = selectedSiteRepository,
++            bloggingRemindersStore = bloggingRemindersStore,
++            analyticsTrackerWrapper = analyticsTrackerWrapper,
++            blazeFeatureUtils = blazeFeatureUtils,
++            bloggingPromptsSettingsHelper = bloggingPromptsSettingsHelper
++        )
++
++        viewModelSlice.uiState.observeForever { uiStateList.add(it) }
++        viewModelSlice.initialize(testScope())
++    }
++
++    @Test
++    fun `when a lower-order card is missing, toggling a later card updates ui state without crashing`() {
++        viewModelSlice.start(site.siteId)
++
++        viewModelSlice.onCardToggled(CardType.BLOGGING_PROMPTS, true)
++
++        val promptsState = uiStateList.last().find { it.cardType == CardType.BLOGGING_PROMPTS }
++        assertTrue(promptsState!!.enabled)
++    }
++}
++

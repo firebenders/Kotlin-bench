@@ -1,74 +1,151 @@
-diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 0695bd9c..6d22ce96 100644
---- a/CHANGELOG.md
-+++ b/CHANGELOG.md
-@@ -11,6 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
- ### Fixed
- * Do not enable the experimental rules by default when `.editorconfig` properties `disabled_rules` or `ktlint_disabled_rules` are set. ([#1771](https://github.com/pinterest/ktlint/issues/1771))
- * A function signature not having any parameters which exceeds the `max-line-length` should be ignored by rule `function-signature` ([#1773](https://github.com/pinterest/ktlint/issues/1773))
-+* Fix false positive `Missing newline after "{"` for lambda in raw string literal `wrapping` ([#1796](https://github.com/pinterest/ktlint/issues/1796))
- 
- ### Changed
- 
 diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
-index 167cc132..f84b58f4 100644
+index 167cc132..5f5365f9 100644
 --- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
 +++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
-@@ -26,6 +26,7 @@ import com.pinterest.ktlint.core.ast.ElementType.LAMBDA_EXPRESSION
- import com.pinterest.ktlint.core.ast.ElementType.LBRACE
- import com.pinterest.ktlint.core.ast.ElementType.LBRACKET
- import com.pinterest.ktlint.core.ast.ElementType.LITERAL_STRING_TEMPLATE_ENTRY
-+import com.pinterest.ktlint.core.ast.ElementType.LONG_STRING_TEMPLATE_ENTRY
- import com.pinterest.ktlint.core.ast.ElementType.LPAR
- import com.pinterest.ktlint.core.ast.ElementType.LT
- import com.pinterest.ktlint.core.ast.ElementType.OBJECT_LITERAL
-@@ -44,6 +45,7 @@ import com.pinterest.ktlint.core.ast.ElementType.WHEN_ENTRY
- import com.pinterest.ktlint.core.ast.ElementType.WHITE_SPACE
+@@ -45,6 +45,7 @@ import com.pinterest.ktlint.core.ast.ElementType.WHITE_SPACE
  import com.pinterest.ktlint.core.ast.children
  import com.pinterest.ktlint.core.ast.firstChildLeafOrSelf
-+import com.pinterest.ktlint.core.ast.isPartOf
  import com.pinterest.ktlint.core.ast.isPartOfComment
++import com.pinterest.ktlint.core.ast.isPartOfString
  import com.pinterest.ktlint.core.ast.isWhiteSpace
  import com.pinterest.ktlint.core.ast.isWhiteSpaceWithNewline
-@@ -141,7 +143,7 @@ public class WrappingRule :
-                     // A multiline block should always be wrapped unless it starts with an EOL comment
-                     node.firstChildLeafOrSelf().elementType != EOL_COMMENT
-                 }
--                maxLineLength > 0 -> {
-+                maxLineLength > 0 && !node.isPartOf(LONG_STRING_TEMPLATE_ENTRY) -> {
-                     val startOfLine = node.prevLeaf { it.isWhiteSpaceWithNewline() }
-                     val endOfLine = node.nextLeaf { it.isWhiteSpaceWithNewline() }
-                     val line =
-diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleTest.kt
-index 6fbbf99f..6651d88b 100644
---- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleTest.kt
-+++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleTest.kt
-@@ -1715,6 +1715,25 @@ internal class WrappingRuleTest {
-             """.trimIndent()
-         wrappingRuleAssertThat(code).hasNoLintViolations()
-     }
+ import com.pinterest.ktlint.core.ast.isWhiteSpaceWithoutNewline
+@@ -127,6 +128,16 @@ public class WrappingRule :
+     ) {
+         require(node.elementType == BLOCK)
+ 
++        if (node.treeParent.isPartOfString()) {
++            // It is not possible to wrap the block when it is part of a string template. For example, in below code
++            // sample, the `let` block can only be wrapped inside the raw string literal, but then it is unclear what
++            // the resulting indentation should be.
++            //     """
++            //     ${foo.let { bar }}
++            //     """
++            return
++        }
++
+         val startOfBlock = node.prevLeaf { !it.isPartOfComment() && !it.isWhiteSpace() }
+         if (startOfBlock?.elementType != LBRACE) {
+             return
+@@ -568,6 +579,10 @@ public class WrappingRule :
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+     ) {
+         if (node.elementType == BLOCK) {
++            if (node.treeParent.isPartOfString()) {
++                // It is not possible to wrap the block when it is part of a string template
++                return
++            }
+             val startOfBlock = node.prevLeaf { !it.isPartOfComment() && !it.isWhiteSpace() }
+             if (startOfBlock?.elementType != LBRACE) {
+                 return
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleRawStringTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleRawStringTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleRawStringTest.kt
+@@ -0,0 +1,102 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for string template blocks inside raw string literals.
++ *
++ * See https://github.com/pinterest/ktlint/issues/1776
++ */
++internal class WrappingRuleRawStringTest {
++    private val wrappingRuleAssertThat = assertThatRule { WrappingRule() }
 +
 +    @Test
-+    fun `Issue 1796 - Given a lambda in a raw string literal exceeding the max line length then do not wrap`() {
-+        // Interpret "$." in code sample below as "$". It is used here as otherwise the indentation in the code sample
-+        // is disapproved when running ktlint on the unit tests during the build process.
++    fun `Issue 1776 - Given a let block inside a raw string literal with a long line then do not report a false positive`() {
 +        val code =
 +            """
-+            // $MAX_LINE_LENGTH_MARKER          $EOL_CHAR
-+            val q = $MULTILINE_STRING_QUOTE
-+                SELECT *
-+                FROM table_name_that_is_long
-+                $.{foo?.let { "bar" } ?: ""}
-+            $MULTILINE_STRING_QUOTE
++            class QueryGenerator {
++                fun getQueryString(query: QueryRequest): String {
++                    val q = ${"\"\"\""}
++                        SELECT *
++                        FROM table_name_long_enough_so_max_line_length_is_met_and_wrapping_rule_is_violated_and_generates_an_error
++                        WHERE 1 = 1
++                        ${"$"}{query.gameId?.let { "AND id = ?" } ?: ""}
++                    ${"\"\"\""}
++                    return q
++                }
++            }
++
++            data class QueryRequest(
++                val gameId: String?,
++            )
 +            """.trimIndent()
-+                .replacePlaceholderWithStringTemplate()
-+        wrappingRuleAssertThat(code)
-+            .setMaxLineLength()
-+            .hasNoLintViolations()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
 +    }
- }
- 
- // Replace the "$." placeholder with an actual "$" so that string "$.{expression}" is transformed to a String template
++
++    @Test
++    fun `Issue 1776 - Given a multiline let block inside a raw string literal then do not report a violation`() {
++        val code =
++            """
++            class QueryGenerator {
++                fun getQueryString(query: QueryRequest): String {
++                    val q = ${"\"\"\""}
++                        SELECT *
++                        FROM table
++                        WHERE 1 = 1
++                        ${"$"}{query.gameId?.let {
++                            "AND id = ?"
++                        } ?: ""}
++                    ${"\"\"\""}
++                    return q
++                }
++            }
++
++            data class QueryRequest(
++                val gameId: String?,
++            )
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue 1776 - Given a simple block inside a raw string literal then do not report a violation`() {
++        val code =
++            """
++            val foo = ${"\"\"\""}
++                ${"$"}{ bar { "baz" } }
++            ${"\"\"\""}
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue 1776 - Given a let block inside a raw string literal on a single line then do not report a violation`() {
++        val code =
++            """
++            val foo = ${"\"\"\""}${"$"}{bar?.let { "baz" } ?: ""}${"\"\"\""}
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue 1776 - Given a run block inside a raw string literal then do not report a violation`() {
++        val code =
++            """
++            val foo = ${"\"\"\""}
++                Some text ${"$"}{someValue.run { this.toString() }} more text
++            ${"\"\"\""}
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue 1776 - Given a block inside a regular string template then do not report a violation`() {
++        val code =
++            """
++            val foo = "Some text ${"$"}{someValue.let { it.toString() }} more text"
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
 
 diff --git a/local.properties b/local.properties
 new file mode 100644

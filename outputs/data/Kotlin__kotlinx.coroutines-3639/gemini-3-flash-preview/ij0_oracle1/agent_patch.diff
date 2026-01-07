@@ -1,0 +1,116 @@
+diff --git a/kotlinx-coroutines-core/common/src/CoroutineScope.kt b/kotlinx-coroutines-core/common/src/CoroutineScope.kt
+index b0928d5c5..edfc45306 100644
+--- a/kotlinx-coroutines-core/common/src/CoroutineScope.kt
++++ b/kotlinx-coroutines-core/common/src/CoroutineScope.kt
+@@ -127,11 +127,9 @@ public fun MainScope(): CoroutineScope = ContextScope(SupervisorJob() + Dispatch
+  * }
+  * ```
+  *
+- * This property is a shortcut for `coroutineContext.isActive` in the scope when
+- * [CoroutineScope] is available.
+- * See [coroutineContext][kotlin.coroutines.coroutineContext],
+- * [isActive][kotlinx.coroutines.isActive] and [Job.isActive].
+- */
++ * This property is a shortcut for `coroutineContext[Job]?.isActive ?: true`.
++ * See [coroutineContext][kotlin.coroutines.coroutineContext] and [Job.isActive].
++*/
+ @Suppress("EXTENSION_SHADOWED_BY_MEMBER")
+ public val CoroutineScope.isActive: Boolean
+     get() = coroutineContext[Job]?.isActive ?: true
+diff --git a/kotlinx-coroutines-core/common/src/Job.kt b/kotlinx-coroutines-core/common/src/Job.kt
+index 65646dc59..1db148518 100644
+--- a/kotlinx-coroutines-core/common/src/Job.kt
++++ b/kotlinx-coroutines-core/common/src/Job.kt
+@@ -539,7 +539,8 @@ public fun Job.cancelChildren(cause: Throwable? = null) {
+ 
+ /**
+  * Returns `true` when the [Job] of the coroutine in this context is still active
+- * (has not completed and was not cancelled yet).
++ * (has not completed and was not cancelled yet) or if there is no job in the context.
++ * It is a shortcut for `coroutineContext[Job]?.isActive ?: true`.
+  *
+  * Check this property in long-running computation loops to support cancellation
+  * when [CoroutineScope.isActive] is not available:
+@@ -549,12 +550,14 @@ public fun Job.cancelChildren(cause: Throwable? = null) {
+  *     // do some computation
+  * }
+  * ```
+- *
+- * The `coroutineContext.isActive` expression is a shortcut for `coroutineContext[Job]?.isActive == true`.
+- * See [Job.isActive].
+  */
++@Deprecated(
++    message = "CoroutineContext.isActive is deprecated in favor of CoroutineScope.isActive",
++    level = DeprecationLevel.WARNING,
++    replaceWith = ReplaceWith("this[Job]?.isActive ?: true")
++)
+ public val CoroutineContext.isActive: Boolean
+-    get() = this[Job]?.isActive == true
++    get() = this[Job]?.isActive ?: true
+ 
+ /**
+  * Cancels [Job] of this context with an optional cancellation cause.
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/common/test/IsActiveTest.kt b/kotlinx-coroutines-core/common/test/IsActiveTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/IsActiveTest.kt
+@@ -0,0 +1,43 @@
++/*
++ * Copyright 2016-2022 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines
++
++import kotlin.coroutines.*
++import kotlin.test.*
++
++class IsActiveTest : TestBase() {
++    @Test
++    fun testContextIsActiveWithoutJob() {
++        val context = EmptyCoroutineContext
++        // New behavior: returns true if no job is present
++        @Suppress("DEPRECATION")
++        assertTrue(context.isActive)
++    }
++
++    @Test
++    fun testScopeIsActiveWithoutJob() {
++        val scope = CoroutineScope(EmptyCoroutineContext)
++        // GlobalScope and scopes created without Job (though CoroutineScope(ctx) adds one if missing)
++        // Let's check GlobalScope
++        assertTrue(GlobalScope.isActive)
++        
++        val manualScope = object : CoroutineScope {
++            override val coroutineContext: CoroutineContext = EmptyCoroutineContext
++        }
++        assertTrue(manualScope.isActive)
++    }
++
++    @Test
++    fun testContextIsActiveWithJob() {
++        val job = Job()
++        val context = job
++        @Suppress("DEPRECATION")
++        assertTrue(context.isActive)
++        job.cancel()
++        @Suppress("DEPRECATION")
++        assertFalse(context.isActive)
++    }
++}
++

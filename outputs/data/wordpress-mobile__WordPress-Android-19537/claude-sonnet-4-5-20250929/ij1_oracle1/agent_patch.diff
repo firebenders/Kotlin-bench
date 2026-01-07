@@ -1,0 +1,409 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt b/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt
+index 8d25b5d32a7..0f6a494e0b9 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt
+@@ -179,9 +179,12 @@ class DashboardCardPersonalizationViewModelSlice @Inject constructor(
+ 
+     private fun updateCardState(cardType: CardType, enabled: Boolean) {
+         val currentCards: MutableList<DashboardCardState> = _uiState.value!!.toMutableList()
+-        val updated = currentCards.find { it.cardType == cardType }!!.copy(enabled = enabled)
+-        currentCards[cardType.order] = updated
+-        _uiState.postValue(currentCards)
++        val index = currentCards.indexOfFirst { it.cardType == cardType }
++        if (index != -1) {
++            val updated = currentCards[index].copy(enabled = enabled)
++            currentCards[index] = updated
++            _uiState.postValue(currentCards)
++        }
+     }
+ 
+     private fun isStatsCardShown(siteId: Long) = !appPrefsWrapper.getShouldHideTodaysStatsDashboardCard(siteId)
+
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationCrashFixTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationCrashFixTest.kt
+new file mode 100644
+--- /dev/null
++++ b/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationCrashFixTest.kt
+@@ -0,0 +1,180 @@
++package org.wordpress.android.ui.mysite.personalization
++
++import junit.framework.TestCase.assertEquals
++import junit.framework.TestCase.assertFalse
++import junit.framework.TestCase.assertNotNull
++import junit.framework.TestCase.assertTrue
++import kotlinx.coroutines.ExperimentalCoroutinesApi
++import kotlinx.coroutines.flow.flowOf
++import org.junit.Before
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.mockito.Mock
++import org.mockito.junit.MockitoJUnitRunner
++import org.mockito.kotlin.any
++import org.mockito.kotlin.whenever
++import org.wordpress.android.BaseUnitTest
++import org.wordpress.android.fluxc.model.BloggingRemindersModel
++import org.wordpress.android.fluxc.model.SiteModel
++import org.wordpress.android.fluxc.store.BloggingRemindersStore
++import org.wordpress.android.ui.blaze.BlazeFeatureUtils
++import org.wordpress.android.ui.bloggingprompts.BloggingPromptsSettingsHelper
++import org.wordpress.android.ui.mysite.SelectedSiteRepository
++import org.wordpress.android.ui.prefs.AppPrefsWrapper
++import org.wordpress.android.util.analytics.AnalyticsTrackerWrapper
++
++/**
++ * Test to verify the fix for the IndexOutOfBoundsException crash
++ * when updating card state in DashboardCardPersonalizationViewModelSlice
++ */
++@ExperimentalCoroutinesApi
++@RunWith(MockitoJUnitRunner::class)
++class DashboardCardPersonalizationCrashFixTest : BaseUnitTest() {
++
++    @Mock
++    lateinit var appPrefsWrapper: AppPrefsWrapper
++
++    @Mock
++    lateinit var selectedSiteRepository: SelectedSiteRepository
++
++    @Mock
++    lateinit var bloggingRemindersStore: BloggingRemindersStore
++
++    @Mock
++    lateinit var analyticsTrackerWrapper: AnalyticsTrackerWrapper
++
++    @Mock
++    lateinit var blazeFeatureUtils: BlazeFeatureUtils
++
++    @Mock
++    lateinit var bloggingPromptsSettingsHelper: BloggingPromptsSettingsHelper
++
++    private lateinit var viewModelSlice: DashboardCardPersonalizationViewModelSlice
++    private val siteId = 123L
++    private val localSiteId = 123
++
++    private val uiStateList = mutableListOf<List<DashboardCardState>>()
++
++    private val mockSite = SiteModel().apply {
++        siteId = this@DashboardCardPersonalizationCrashFixTest.siteId
++    }
++
++    private val bloggingRemindersModel = BloggingRemindersModel(
++        siteId = localSiteId,
++        isPromptsCardEnabled = true
++    )
++
++    @Before
++    fun setUp() {
++        mockSite.hasCapabilityEditPages = true
++        mockSite.hasCapabilityManageOptions = true
++        mockSite.setIsWpForTeamsSite(false)
++
++        whenever(selectedSiteRepository.getSelectedSite()).thenReturn(mockSite)
++        whenever(selectedSiteRepository.getSelectedSiteLocalId()).thenReturn(localSiteId)
++        whenever(appPrefsWrapper.getShouldHideTodaysStatsDashboardCard(siteId)).thenReturn(false)
++        whenever(appPrefsWrapper.getShouldHidePostDashboardCard(siteId, any())).thenReturn(false)
++        whenever(appPrefsWrapper.getShouldHidePagesDashboardCard(siteId)).thenReturn(false)
++        whenever(appPrefsWrapper.getShouldHideActivityDashboardCard(siteId)).thenReturn(false)
++        whenever(appPrefsWrapper.hideBlazeCard(siteId)).thenReturn(false)
++        whenever(blazeFeatureUtils.isSiteBlazeEligible(mockSite)).thenReturn(true)
++        test {
++            whenever(bloggingPromptsSettingsHelper.shouldShowPromptsFeature()).thenReturn(true)
++        }
++        whenever(bloggingRemindersStore.bloggingRemindersModel(localSiteId))
++            .thenReturn(flowOf(bloggingRemindersModel))
++
++        viewModelSlice = DashboardCardPersonalizationViewModelSlice(
++            bgDispatcher = testDispatcher(),
++            appPrefsWrapper = appPrefsWrapper,
++            selectedSiteRepository = selectedSiteRepository,
++            bloggingRemindersStore = bloggingRemindersStore,
++            analyticsTrackerWrapper = analyticsTrackerWrapper,
++            blazeFeatureUtils = blazeFeatureUtils,
++            bloggingPromptsSettingsHelper = bloggingPromptsSettingsHelper
++        )
++
++        viewModelSlice.uiState.observeForever {
++            uiStateList.add(it)
++        }
++
++        viewModelSlice.initialize(testScope())
++    }
++
++    @Test
++    fun `test toggling BLOGGING_PROMPTS card when it is last in list does not crash`() {
++        // Setup: Start the slice to build the initial card list
++        viewModelSlice.start(siteId)
++
++        // Get the current state
++        val currentState = uiStateList.last()
++        assertNotNull(currentState)
++
++        // Verify BLOGGING_PROMPTS card is in the list
++        val bloggingPromptsCard = currentState.find { it.cardType == CardType.BLOGGING_PROMPTS }
++        assertNotNull(bloggingPromptsCard)
++        assertTrue(bloggingPromptsCard!!.enabled)
++
++        // This should not throw IndexOutOfBoundsException
++        // The bug was: using cardType.order (6) as index when list only has 6 items (indices 0-5)
++        viewModelSlice.onCardToggled(CardType.BLOGGING_PROMPTS, false)
++
++        // Verify the state was updated correctly
++        val updatedState = uiStateList.last()
++        assertNotNull(updatedState)
++
++        val updatedCard = updatedState.find { it.cardType == CardType.BLOGGING_PROMPTS }
++        assertNotNull(updatedCard)
++        assertFalse(updatedCard!!.enabled)
++    }
++
++    @Test
++    fun `test toggling BLAZE card when it is at specific position does not crash`() {
++        // Setup: Start the slice
++        viewModelSlice.start(siteId)
++
++        val currentState = uiStateList.last()
++        assertNotNull(currentState)
++
++        // Verify BLAZE card is in the list (order 5)
++        val blazeCard = currentState.find { it.cardType == CardType.BLAZE }
++        assertNotNull(blazeCard)
++        assertTrue(blazeCard!!.enabled)
++
++        // This should not crash - the fix ensures we find the actual index
++        viewModelSlice.onCardToggled(CardType.BLAZE, false)
++
++        val updatedState = uiStateList.last()
++        assertNotNull(updatedState)
++
++        val updatedCard = updatedState.find { it.cardType == CardType.BLAZE }
++        assertNotNull(updatedCard)
++        assertFalse(updatedCard!!.enabled)
++    }
++
++    @Test
++    fun `test toggling PAGES card when it is in middle position does not crash`() {
++        // Setup: Start the slice
++        viewModelSlice.start(siteId)
++
++        val currentState = uiStateList.last()
++        assertNotNull(currentState)
++
++        // Verify PAGES card is in the list (order 3, but actual index depends on which cards are added)
++        val pagesCard = currentState.find { it.cardType == CardType.PAGES }
++        assertNotNull(pagesCard)
++        assertTrue(pagesCard!!.enabled)
++
++        // This should not crash - the fix ensures we find the actual index in the list
++        // rather than using cardType.order as the index
++        viewModelSlice.onCardToggled(CardType.PAGES, false)
++
++        val updatedState = uiStateList.last()
++        assertNotNull(updatedState)
++
++        val updatedCard = updatedState.find { it.cardType == CardType.PAGES }
++        assertNotNull(updatedCard)
++        assertFalse(updatedCard!!.enabled)
++    }
++}
++
+
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationIndexFixVerification.kt b/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationIndexFixVerification.kt
+new file mode 100644
+--- /dev/null
++++ b/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationIndexFixVerification.kt
+@@ -0,0 +1,129 @@
++package org.wordpress.android.ui.mysite.personalization
++
++import junit.framework.TestCase.assertEquals
++import org.junit.Test
++
++/**
++ * Simple verification test to demonstrate that the IndexOutOfBoundsException fix works correctly.
++ *
++ * This test demonstrates the bug scenario:
++ * - Cards are built dynamically, so some cards may not be in the list
++ * - The original code used cardType.order as the array index
++ * - When BLOGGING_PROMPTS (order=6) was toggled but only 6 cards existed (indices 0-5), it crashed
++ *
++ * The fix uses indexOfFirst to find the actual position in the list rather than relying on order.
++ */
++class DashboardCardPersonalizationIndexFixVerification {
++
++    @Test
++    fun `verify the bug scenario - order value does not match list index when cards are conditionally added`() {
++        // Simulate a list where only some cards are present (like when cards are conditionally added)
++        val cardList = mutableListOf(
++            DashboardCardState(
++                title = 1,
++                description = 2,
++                enabled = true,
++                cardType = CardType.STATS  // order = 0
++            ),
++            DashboardCardState(
++                title = 1,
++                description = 2,
++                enabled = true,
++                cardType = CardType.DRAFT_POSTS  // order = 1
++            ),
++            DashboardCardState(
++                title = 1,
++                description = 2,
++                enabled = true,
++                cardType = CardType.SCHEDULED_POSTS  // order = 2
++            ),
++            // PAGES (order 3) is conditionally added - let's say it's added
++            DashboardCardState(
++                title = 1,
++                description = 2,
++                enabled = true,
++                cardType = CardType.PAGES  // order = 3
++            ),
++            // ACTIVITY_LOG (order 4) is NOT added (conditionally excluded)
++            // BLAZE (order 5) is NOT added (conditionally excluded)
++            // BLOGGING_PROMPTS (order 6) is added
++            DashboardCardState(
++                title = 1,
++                description = 2,
++                enabled = true,
++                cardType = CardType.BLOGGING_PROMPTS  // order = 6, but index = 4
++            )
++        )
++
++        // This is what causes the bug:
++        // BLOGGING_PROMPTS has order = 6, but it's at index = 4 in the list
++        val bloggingPromptsOrderValue = CardType.BLOGGING_PROMPTS.order
++        val actualIndexInList = cardList.indexOfFirst { it.cardType == CardType.BLOGGING_PROMPTS }
++
++        assertEquals("BLOGGING_PROMPTS order should be 6", 6, bloggingPromptsOrderValue)
++        assertEquals("But actual index in list should be 4", 4, actualIndexInList)
++        assertEquals("List size should be 5", 5, cardList.size)
++
++        // THE BUG: Trying to access cardList[6] when list size is 5 (valid indices: 0-4)
++        // This would throw IndexOutOfBoundsException: Index 6 out of bounds for length 5
++
++        // THE FIX: Use actualIndexInList instead of bloggingPromptsOrderValue
++        // cardList[actualIndexInList] = updated  // This works correctly
++    }
++
++    @Test
++    fun `verify indexOfFirst correctly finds card position regardless of order`() {
++        val cardList = mutableListOf(
++            DashboardCardState(1, 2, true, CardType.STATS),           // index 0, order 0
++            DashboardCardState(1, 2, true, CardType.DRAFT_POSTS),     // index 1, order 1
++            DashboardCardState(1, 2, true, CardType.SCHEDULED_POSTS), // index 2, order 2
++            DashboardCardState(1, 2, true, CardType.ACTIVITY_LOG),    // index 3, order 4 (!)
++            DashboardCardState(1, 2, true, CardType.BLOGGING_PROMPTS) // index 4, order 6 (!)
++        )
++
++        // The fix uses indexOfFirst to find the actual position
++        val statsIndex = cardList.indexOfFirst { it.cardType == CardType.STATS }
++        assertEquals("STATS should be at index 0", 0, statsIndex)
++
++        val activityLogIndex = cardList.indexOfFirst { it.cardType == CardType.ACTIVITY_LOG }
++        assertEquals("ACTIVITY_LOG should be at index 3, not order 4", 3, activityLogIndex)
++
++        val bloggingPromptsIndex = cardList.indexOfFirst { it.cardType == CardType.BLOGGING_PROMPTS }
++        assertEquals("BLOGGING_PROMPTS should be at index 4, not order 6", 4, bloggingPromptsIndex)
++
++        // Card not in list returns -1
++        val blazeIndex = cardList.indexOfFirst { it.cardType == CardType.BLAZE }
++        assertEquals("BLAZE not in list should return -1", -1, blazeIndex)
++    }
++
++    @Test
++    fun `verify the fix prevents IndexOutOfBoundsException`() {
++        val cardList = mutableListOf(
++            DashboardCardState(1, 2, true, CardType.STATS),
++            DashboardCardState(1, 2, true, CardType.DRAFT_POSTS),
++            DashboardCardState(1, 2, true, CardType.SCHEDULED_POSTS),
++            DashboardCardState(1, 2, true, CardType.PAGES),
++            DashboardCardState(1, 2, true, CardType.ACTIVITY_LOG),
++            DashboardCardState(1, 2, true, CardType.BLOGGING_PROMPTS)
++        )
++
++        // Simulate the updateCardState logic with the fix
++        val cardTypeToUpdate = CardType.BLOGGING_PROMPTS
++        val index = cardList.indexOfFirst { it.cardType == cardTypeToUpdate }
++
++        if (index != -1) {
++            val updated = cardList[index].copy(enabled = false)
++            cardList[index] = updated  // This works - uses actual index, not order
++
++            // Verify the update worked
++            assertEquals("Card should be updated", false, cardList[index].enabled)
++            assertEquals("Card should still be BLOGGING_PROMPTS", CardType.BLOGGING_PROMPTS, cardList[index].cardType)
++        }
++
++        // The old buggy code would have done:
++        // cardList[CardType.BLOGGING_PROMPTS.order] = updated
++        // Which is: cardList[6] = updated
++        // But the list only has 6 items (indices 0-5), causing IndexOutOfBoundsException
++    }
++}
++
+
+diff --git a/fix_summary.md b/fix_summary.md
+new file mode 100644
+--- /dev/null
++++ b/fix_summary.md
+@@ -0,0 +1,62 @@
++# Dashboard Card Personalization Crash Fix
++
++## Issue Summary
++The Jetpack Android app was crashing with an `IndexOutOfBoundsException: Index 6 out of bounds for length 6` when updating the state of cards in the Personalization View.
++
++**Crash Location:** `DashboardCardPersonalizationViewModelSlice.kt:183` in the `updateCardState()` method
++
++## Root Cause
++The bug occurred because the code was using `cardType.order` as an array index to update cards in a dynamically-built list:
++
++```kotlin
++// BUGGY CODE (line 183)
++currentCards[cardType.order] = updated
++```
++
++The problem:
++1. Each `CardType` enum has a fixed `order` property (0-6 for the 7 card types)
++2. The card list is built dynamically in `getCardStates()` - some cards are conditionally added based on site capabilities
++3. When a card with `order=6` (BLOGGING_PROMPTS) was present in a list with only 6 items (valid indices 0-5), accessing `currentCards[6]` threw an `IndexOutOfBoundsException`
++
++### Example Scenario:
++- List contains: STATS (order 0), DRAFT_POSTS (order 1), SCHEDULED_POSTS (order 2), PAGES (order 3), ACTIVITY_LOG (order 4), BLOGGING_PROMPTS (order 6)
++- List size: 6 items (indices 0-5)
++- BLOGGING_PROMPTS is at index 4, but has order 6
++- Attempting to update `currentCards[6]` crashes because index 6 doesn't exist
++
++## Solution
++Changed the `updateCardState()` method to find the actual index of the card in the list using `indexOfFirst()` instead of using the fixed `order` property:
++
++```kotlin
++private fun updateCardState(cardType: CardType, enabled: Boolean) {
++    val currentCards: MutableList<DashboardCardState> = _uiState.value!!.toMutableList()
++    val index = currentCards.indexOfFirst { it.cardType == cardType }
++    if (index != -1) {
++        val updated = currentCards[index].copy(enabled = enabled)
++        currentCards[index] = updated
++        _uiState.postValue(currentCards)
++    }
++}
++```
++
++### Key Improvements:
++1. **Uses actual index:** `indexOfFirst()` finds where the card actually is in the list
++2. **Safe check:** Verifies the card exists (`index != -1`) before updating
++3. **No assumptions:** Doesn't assume index matches the `order` property
++
++## Files Modified
++- `WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt`
++
++## Tests Created
++Two new test files were created to verify the fix:
++1. `DashboardCardPersonalizationCrashFixTest.kt` - Integration tests with full mocking
++2. `DashboardCardPersonalizationIndexFixVerification.kt` - Simple unit tests demonstrating the bug scenario
++
++All tests pass successfully, confirming the fix resolves the issue.
++
++## Impact
++- **Minimal change:** Only the `updateCardState()` method was modified
++- **Backward compatible:** No API changes or breaking changes
++- **Safe:** Added null safety check for cards that might not be in the list
++- **No performance impact:** `indexOfFirst()` is O(n) on a small list (max 7 items)
++

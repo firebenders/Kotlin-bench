@@ -1,0 +1,282 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundColonRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundColonRule.kt
+index a3a8c61a..1b41052c 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundColonRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundColonRule.kt
+@@ -37,7 +37,7 @@ public class SpacingAroundColonRule : StandardRule("colon-spacing") {
+         if (node.elementType == COLON) {
+             val psiParent = node.psi.parent
+             if (node.isPartOf(ANNOTATION) || node.isPartOf(ANNOTATION_ENTRY)) {
+-                // TODO: https://github.com/pinterest/ktlint/issues/2093 Enforce no spacing
++                removeUnexpectedSpacingAround(node, emit, autoCorrect)
+                 return
+             }
+             val prevLeaf = node.prevLeaf()
+@@ -157,6 +157,36 @@ public class SpacingAroundColonRule : StandardRule("colon-spacing") {
+         }
+     }
+ 
++    private fun removeUnexpectedSpacingAround(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        val unexpectedSpacingBefore = node.prevSibling().isWhiteSpace()
++        val unexpectedSpacingAfter = node.nextSibling().isWhiteSpace()
++        when {
++            unexpectedSpacingBefore && unexpectedSpacingAfter -> {
++                emit(node.startOffset, "Unexpected spacing around \":\"", true)
++                if (autoCorrect) {
++                    node.prevSibling()?.let { it.treeParent.removeChild(it) }
++                    node.nextSibling()?.let { it.treeParent.removeChild(it) }
++                }
++            }
++            unexpectedSpacingBefore -> {
++                emit(node.startOffset, "Unexpected spacing before \":\"", true)
++                if (autoCorrect) {
++                    node.prevSibling()?.let { it.treeParent.removeChild(it) }
++                }
++            }
++            unexpectedSpacingAfter -> {
++                emit(node.startOffset + 1, "Unexpected spacing after \":\"", true)
++                if (autoCorrect) {
++                    node.nextSibling()?.let { it.treeParent.removeChild(it) }
++                }
++            }
++        }
++    }
++
+     private inline val ASTNode.removeSpacingBefore: Boolean
+         get() =
+             psi
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundColonInAnnotationRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundColonInAnnotationRuleTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundColonInAnnotationRuleTest.kt
+@@ -0,0 +1,218 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Nested
++import org.junit.jupiter.api.Test
++
++/**
++ * Additional tests for SpacingAroundColonRule specifically for annotation use-site targets.
++ * https://github.com/pinterest/ktlint/issues/2093
++ */
++class SpacingAroundColonInAnnotationRuleTest {
++    private val spacingAroundColonRuleAssertThat = assertThatRule { SpacingAroundColonRule() }
++
++    @Nested
++    inner class `Given a file annotation with use-site target` {
++        @Test
++        fun `Given a file annotation with no spacing around colon then do not report a violation`() {
++            val code =
++                """
++                @file:JvmName("Foo")
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a file annotation with space before colon then report a violation and fix it`() {
++            val code =
++                """
++                @file :JvmName("Foo")
++                """.trimIndent()
++            val formattedCode =
++                """
++                @file:JvmName("Foo")
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code)
++                .hasLintViolation(1, 7, "Unexpected spacing before \":\"")
++                .isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given a file annotation with space after colon then report a violation and fix it`() {
++            val code =
++                """
++                @file: JvmName("Foo")
++                """.trimIndent()
++            val formattedCode =
++                """
++                @file:JvmName("Foo")
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code)
++                .hasLintViolation(1, 7, "Unexpected spacing after \":\"")
++                .isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given a file annotation with space around colon then report a violation and fix it`() {
++            val code =
++                """
++                @file : JvmName("Foo")
++                """.trimIndent()
++            val formattedCode =
++                """
++                @file:JvmName("Foo")
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code)
++                .hasLintViolation(1, 7, "Unexpected spacing around \":\"")
++                .isFormattedAs(formattedCode)
++        }
++    }
++
++    @Nested
++    inner class `Given a set annotation with use-site target and annotation list` {
++        @Test
++        fun `Given a set annotation with no spacing around colon then do not report a violation`() {
++            val code =
++                """
++                class Example {
++                    @set:[Inject VisibleForTesting]
++                    public var collaborator: Collaborator
++                }
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a set annotation with space before colon then report a violation and fix it`() {
++            val code =
++                """
++                class Example {
++                    @set :[Inject VisibleForTesting]
++                    public var collaborator: Collaborator
++                }
++                """.trimIndent()
++            val formattedCode =
++                """
++                class Example {
++                    @set:[Inject VisibleForTesting]
++                    public var collaborator: Collaborator
++                }
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code)
++                .hasLintViolation(2, 10, "Unexpected spacing before \":\"")
++                .isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given a set annotation with space after colon then report a violation and fix it`() {
++            val code =
++                """
++                class Example {
++                    @set: [Inject VisibleForTesting]
++                    public var collaborator: Collaborator
++                }
++                """.trimIndent()
++            val formattedCode =
++                """
++                class Example {
++                    @set:[Inject VisibleForTesting]
++                    public var collaborator: Collaborator
++                }
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code)
++                .hasLintViolation(2, 10, "Unexpected spacing after \":\"")
++                .isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given a set annotation with space around colon then report a violation and fix it`() {
++            val code =
++                """
++                class Example {
++                    @set : [Inject VisibleForTesting]
++                    public var collaborator: Collaborator
++                }
++                """.trimIndent()
++            val formattedCode =
++                """
++                class Example {
++                    @set:[Inject VisibleForTesting]
++                    public var collaborator: Collaborator
++                }
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code)
++                .hasLintViolation(2, 10, "Unexpected spacing around \":\"")
++                .isFormattedAs(formattedCode)
++        }
++    }
++
++    @Nested
++    inner class `Given various annotation use-site targets` {
++        @Test
++        fun `Given a field annotation with space before colon then report a violation and fix it`() {
++            val code =
++                """
++                class Example(@field :Ann val foo: String)
++                """.trimIndent()
++            val formattedCode =
++                """
++                class Example(@field:Ann val foo: String)
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code)
++                .hasLintViolation(1, 22, "Unexpected spacing before \":\"")
++                .isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given a get annotation with space after colon then report a violation and fix it`() {
++            val code =
++                """
++                class Example(@get: Ann val bar: String)
++                """.trimIndent()
++            val formattedCode =
++                """
++                class Example(@get:Ann val bar: String)
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code)
++                .hasLintViolation(1, 20, "Unexpected spacing after \":\"")
++                .isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given a receiver annotation with space around colon then report a violation and fix it`() {
++            val code =
++                """
++                fun @receiver : Fancy String.myExtension() { }
++                """.trimIndent()
++            val formattedCode =
++                """
++                fun @receiver:Fancy String.myExtension() { }
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code)
++                .hasLintViolation(1, 15, "Unexpected spacing around \":\"")
++                .isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given multiple annotations with use-site targets with spacing violations then report all violations and fix them`() {
++            val code =
++                """
++                @file :JvmName("Foo")
++                class Example(@field : Ann val foo: String, @get : Ann val bar: String)
++                """.trimIndent()
++            val formattedCode =
++                """
++                @file:JvmName("Foo")
++                class Example(@field:Ann val foo: String, @get:Ann val bar: String)
++                """.trimIndent()
++            spacingAroundColonRuleAssertThat(code)
++                .hasLintViolations(
++                    LintViolation(1, 7, "Unexpected spacing before \":\""),
++                    LintViolation(2, 22, "Unexpected spacing around \":\""),
++                    LintViolation(2, 50, "Unexpected spacing around \":\""),
++                ).isFormattedAs(formattedCode)
++        }
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

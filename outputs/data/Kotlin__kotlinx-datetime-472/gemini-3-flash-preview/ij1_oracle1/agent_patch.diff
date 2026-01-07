@@ -1,0 +1,166 @@
+diff --git a/core/common/src/format/UtcOffsetFormat.kt b/core/common/src/format/UtcOffsetFormat.kt
+index 1310626..553fd61 100644
+--- a/core/common/src/format/UtcOffsetFormat.kt
++++ b/core/common/src/format/UtcOffsetFormat.kt
+@@ -133,6 +133,7 @@ private object OffsetFields {
+     }
+     val totalHoursAbs = UnsignedFieldSpec(
+         PropertyAccessor(UtcOffsetFieldContainer::totalHoursAbs),
++        name = "offsetHours",
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 18,
+@@ -140,6 +141,7 @@ private object OffsetFields {
+     )
+     val minutesOfHour = UnsignedFieldSpec(
+         PropertyAccessor(UtcOffsetFieldContainer::minutesOfHour),
++        name = "offsetMinutesOfHour",
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 59,
+@@ -147,6 +149,7 @@ private object OffsetFields {
+     )
+     val secondsOfMinute = UnsignedFieldSpec(
+         PropertyAccessor(UtcOffsetFieldContainer::secondsOfMinute),
++        name = "offsetSecondsOfMinute",
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 59,
+diff --git a/core/common/src/internal/format/FormatStructure.kt b/core/common/src/internal/format/FormatStructure.kt
+index 16f2317..74ec27d 100644
+--- a/core/common/src/internal/format/FormatStructure.kt
++++ b/core/common/src/internal/format/FormatStructure.kt
+@@ -12,6 +12,7 @@ import kotlinx.datetime.internal.isAsciiDigit
+ internal sealed interface FormatStructure<in T> {
+     fun parser(): ParserStructure<T>
+     fun formatter(): FormatterStructure<T>
++    fun isFormattable(obj: T): Boolean
+ }
+ 
+ internal class BasicFormatStructure<in T>(
+@@ -24,6 +25,7 @@ internal class BasicFormatStructure<in T>(
+ 
+     override fun parser(): ParserStructure<T> = directive.parser()
+     override fun formatter(): FormatterStructure<T> = directive.formatter()
++    override fun isFormattable(obj: T): Boolean = directive.field.accessor.getter(obj) != null
+ }
+ 
+ internal class ConstantFormatStructure<in T>(
+@@ -62,6 +64,7 @@ internal class ConstantFormatStructure<in T>(
+     )
+ 
+     override fun formatter(): FormatterStructure<T> = ConstantStringFormatterStructure(string)
++    override fun isFormattable(obj: T): Boolean = true
+ }
+ 
+ internal class SignedFormatStructure<in T>(
+@@ -120,6 +123,8 @@ internal class SignedFormatStructure<in T>(
+             withPlusSign
+         )
+     }
++
++    override fun isFormattable(obj: T): Boolean = format.isFormattable(obj)
+ }
+ 
+ internal class AlternativesParsingFormatStructure<in T>(
+@@ -140,7 +145,28 @@ internal class AlternativesParsingFormatStructure<in T>(
+         }
+     })
+ 
+-    override fun formatter(): FormatterStructure<T> = mainFormat.formatter()
++    override fun formatter(): FormatterStructure<T> {
++        val main = mainFormat.formatter()
++        val alternatives = formats.map { it.formatter() }
++        return object : FormatterStructure<T> {
++            override fun format(obj: T, builder: Appendable, minusNotRequired: Boolean) {
++                if (mainFormat.isFormattable(obj)) {
++                    main.format(obj, builder, minusNotRequired)
++                } else {
++                    for (i in formats.indices) {
++                        if (formats[i].isFormattable(obj)) {
++                            alternatives[i].format(obj, builder, minusNotRequired)
++                            return
++                        }
++                    }
++                    main.format(obj, builder, minusNotRequired)
++                }
++            }
++        }
++    }
++
++    override fun isFormattable(obj: T): Boolean =
++        mainFormat.isFormattable(obj) || formats.any { it.isFormattable(obj) }
+ }
+ 
+ internal class OptionalFormatStructure<in T>(
+@@ -152,6 +178,7 @@ internal class OptionalFormatStructure<in T>(
+     private val fields = basicFormats(format).map { it.field }.distinct().map { field ->
+         PropertyWithDefault.fromField(field)
+     }
++    private val isDefaultPredicate = conjunctionPredicate(fields.map { it.isDefaultComparisonPredicate() })
+ 
+     override fun equals(other: Any?): Boolean =
+         other is OptionalFormatStructure<*> && onZero == other.onZero && format == other.format
+@@ -184,22 +211,26 @@ internal class OptionalFormatStructure<in T>(
+ 
+     override fun formatter(): FormatterStructure<T> {
+         val formatter = format.formatter()
+-        val predicate = conjunctionPredicate(fields.map { it.isDefaultComparisonPredicate() })
+-        return if (predicate is Truth) {
++        return if (isDefaultPredicate is Truth) {
+             ConstantStringFormatterStructure(onZero)
+         } else {
+             ConditionalFormatter(
+                 listOf(
+-                    predicate::test to ConstantStringFormatterStructure(onZero),
++                    isDefaultPredicate::test to ConstantStringFormatterStructure(onZero),
+                     Truth::test to formatter
+                 )
+             )
+         }
+     }
+ 
++    override fun isFormattable(obj: T): Boolean {
++        if (isDefaultPredicate.test(obj)) return true
++        return format.isFormattable(obj)
++    }
++
+     private class PropertyWithDefault<in T, E> private constructor(
+-        private val accessor: Accessor<T, E>,
+-        private val defaultValue: E
++        val accessor: Accessor<T, E>,
++        val defaultValue: E
+     ) {
+         companion object {
+             fun <T, E> fromField(field: FieldSpec<T, E>): PropertyWithDefault<T, E> {
+@@ -240,6 +271,8 @@ internal open class ConcatenatedFormatStructure<in T>(
+             ConcatenatedFormatter(formatters)
+         }
+     }
++
++    override fun isFormattable(obj: T): Boolean = formats.all { it.isFormattable(obj) }
+ }
+ 
+ internal class CachedFormatStructure<in T>(formats: List<NonConcatenatedFormatStructure<T>>) :
+@@ -250,6 +283,8 @@ internal class CachedFormatStructure<in T>(formats: List<NonConcatenatedFormatSt
+     override fun formatter(): FormatterStructure<T> = cachedFormatter
+ 
+     override fun parser(): ParserStructure<T> = cachedParser
++
++    override fun isFormattable(obj: T): Boolean = super.isFormattable(obj)
+ }
+ 
+ private fun <T> basicFormats(format: FormatStructure<T>): List<FieldFormatDirective<T>> = buildList {
+diff --git a/core/common/src/internal/format/Predicate.kt b/core/common/src/internal/format/Predicate.kt
+index 096e332..f89b4a1 100644
+--- a/core/common/src/internal/format/Predicate.kt
++++ b/core/common/src/internal/format/Predicate.kt
+@@ -17,7 +17,7 @@ internal class ComparisonPredicate<in T, E>(
+     private val expectedValue: E,
+     private val getter: (T) -> E?
+ ): Predicate<T> {
+-    override fun test(value: T): Boolean = getter(value) == expectedValue
++    override fun test(value: T): Boolean = (getter(value) ?: expectedValue) == expectedValue
+ }
+ 
+ private class ConjunctionPredicate<in T>(

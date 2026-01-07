@@ -1,0 +1,168 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+index 79f1e477..f1906ad7 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+@@ -1,5 +1,6 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS_BODY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONST_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE
+@@ -11,6 +12,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OVERRIDE_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIVATE_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY_ACCESSOR
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VAL_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.Rule
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+@@ -51,9 +53,10 @@ public class PropertyNamingRule :
+                     property.isBackingProperty() -> {
+                         visitBackingProperty(identifier, emit)
+                     }
+-                    property.hasConstModifier() ||
++                    (property.hasConstModifier() ||
+                         property.isTopLevelValue() ||
+-                        property.isObjectValue() -> {
++                        property.isObjectValue()) &&
++                        !property.isMutableCollectionProperty() -> {
+                         visitConstProperty(identifier, emit)
+                     }
+                     else -> {
+@@ -129,6 +132,26 @@ public class PropertyNamingRule :
+             containsValKeyword() &&
+             !hasModifier(OVERRIDE_KEYWORD)
+ 
++    private fun ASTNode.isMutableCollectionProperty(): Boolean {
++        val typeName =
++            findChildByType(TYPE_REFERENCE)
++                ?.text
++                ?.substringBefore("<")
++                ?.substringAfterLast('.')
++                ?.removeSuffix("?")
++        if (typeName != null && typeName in MUTABLE_COLLECTION_TYPE_NAMES) {
++            return true
++        }
++
++        val calleeName =
++            findChildByType(CALL_EXPRESSION)
++                ?.text
++                ?.substringBefore('(')
++                ?.substringBefore('<')
++                ?.substringAfterLast('.')
++        return calleeName != null && calleeName in MUTABLE_COLLECTION_FACTORY_FUNCTION_NAMES
++    }
++
+     private fun ASTNode.isBackingProperty() =
+         takeIf { hasModifier(PRIVATE_KEYWORD) }
+             ?.findChildByType(IDENTIFIER)
+@@ -149,6 +172,37 @@ public class PropertyNamingRule :
+         val LOWER_CAMEL_CASE_REGEXP = "[a-z][a-zA-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
+         val SCREAMING_SNAKE_CASE_REGEXP = "[A-Z][_A-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
+         val BACKING_PROPERTY_LOWER_CAMEL_CASE_REGEXP = "_[a-z][a-zA-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
++
++        val MUTABLE_COLLECTION_TYPE_NAMES =
++            setOf(
++                "MutableCollection",
++                "MutableList",
++                "MutableSet",
++                "MutableMap",
++                // Common mutable implementations
++                "ArrayList",
++                "LinkedList",
++                "HashSet",
++                "LinkedHashSet",
++                "TreeSet",
++                "HashMap",
++                "LinkedHashMap",
++                "TreeMap",
++                "ConcurrentHashMap",
++            )
++
++        val MUTABLE_COLLECTION_FACTORY_FUNCTION_NAMES =
++            setOf(
++                "mutableListOf",
++                "mutableSetOf",
++                "mutableMapOf",
++                "arrayListOf",
++                "hashSetOf",
++                "hashMapOf",
++                "linkedSetOf",
++                "linkedMapOf",
++            )
++
+         const val SERIAL_VERSION_UID_PROPERTY_NAME = "serialVersionUID"
+     }
+ }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt
+@@ -0,0 +1,57 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat
++import org.junit.jupiter.api.Test
++
++class PropertyNamingRuleMutableCollectionTest {
++    private val propertyNamingRuleAssertThat =
++        KtLintAssertThat.assertThatRule { PropertyNamingRule() }
++
++    @Test
++    fun `Given a companion object val mutable map property in lower camel case then do not emit`() {
++        val code =
++            """
++            class Foo {
++                companion object {
++                    val someMap: MutableMap<SomeKey, SomeValue> = mutableMapOf()
++                }
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a companion object val mutable map property in screaming snake case then do emit`() {
++        val code =
++            """
++            class Foo {
++                companion object {
++                    val SOME_MAP: MutableMap<SomeKey, SomeValue> = mutableMapOf()
++                }
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code)
++            .hasLintViolationWithoutAutoCorrect(3, 13, "Property name should start with a lowercase letter and use camel case")
++    }
++
++    @Test
++    fun `Given an object val mutable list property without explicit type in lower camel case then do not emit`() {
++        val code =
++            """
++            object Foo {
++                val someList = mutableListOf<Int>()
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a top level val mutable set property in lower camel case then do not emit`() {
++        val code =
++            """
++            val someSet: MutableSet<String> = mutableSetOf()
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

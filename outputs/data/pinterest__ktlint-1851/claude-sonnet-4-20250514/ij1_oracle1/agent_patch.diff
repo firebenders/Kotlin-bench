@@ -1,0 +1,159 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 737e9a62..c5735bbf 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -9,6 +9,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ARROW
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_WITH_TYPE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.CATCH
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK_COMMENT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BODY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
+@@ -26,6 +27,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.DOT_QUALIFIED_EXPRE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELSE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.FINALLY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUNCTION_LITERAL
+@@ -61,11 +63,13 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.SUPER_TYPE_CALL_ENT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.SUPER_TYPE_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.SUPER_TYPE_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.THEN
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_ARGUMENT_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_CONSTRAINT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_CONSTRAINT_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PARAMETER_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPEALIAS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.USER_TYPE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER
+@@ -311,6 +315,12 @@ public class IndentationRule :
+ 
+             node.elementType == DESTRUCTURING_DECLARATION -> visitDestructuringDeclaration(node)
+ 
++            node.elementType == TRY ->
++                visitTry(node)
++
++            node.elementType == TYPEALIAS ->
++                visitTypeAlias(node)
++
+             else -> {
+                 LOGGER.trace { "No processing for ${node.elementType}: ${node.textWithEscapedTabAndNewline()}" }
+             }
+@@ -1016,6 +1026,48 @@ public class IndentationRule :
+         }
+     }
+ 
++    private fun visitTry(node: ASTNode) {
++        // Similar to if-else handling - handle the complex parts in reverse order
++        var nextToAstNode = node.lastChildLeafOrSelf()
++
++        // Handle finally block first (if present)
++        node
++            .findChildByType(FINALLY)
++            ?.let { finallyNode ->
++                nextToAstNode = startIndentContext(
++                    fromAstNode = finallyNode,
++                    toAstNode = nextToAstNode,
++                ).prevCodeLeaf()
++            }
++
++        // Handle catch blocks (there can be multiple, process in reverse order)
++        val catchNodes = node.children().filter { it.elementType == CATCH }.toList()
++        for (catchNode in catchNodes.reversed()) {
++            nextToAstNode = startIndentContext(
++                fromAstNode = catchNode,
++                toAstNode = nextToAstNode,
++            ).prevCodeLeaf()
++        }
++
++        // Handle the try block itself (main context)
++        startIndentContext(
++            fromAstNode = node,
++            toAstNode = nextToAstNode,
++        )
++    }
++
++    private fun visitTypeAlias(node: ASTNode) {
++        // Handle the type reference after the equals sign - similar to how properties are handled
++        node
++            .findChildByType(EQ)
++            ?.let { fromAstNode ->
++                startIndentContext(
++                    fromAstNode = fromAstNode,
++                    toAstNode = node.lastChildLeafOrSelf(),
++                )
++            }
++    }
++
+     private fun startNoIndentZone(node: ASTNode) =
+         IndentContext(
+             fromASTNode = node,
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
+index 79d0d3a4..66150a2f 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
+@@ -2453,6 +2453,50 @@ internal class IndentationRuleTest {
+             .isFormattedAs(formattedCode)
+     }
+ 
++    @Test
++    fun `Given a try-catch expression as function body with improper indentation`() {
++        val code =
++            """
++            fun test() = try {
++            1
++            }
++            catch(_: Throwable) {
++            2
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun test() = try {
++                1
++            }
++            catch(_: Throwable) {
++                2
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .hasLintViolations(
++                LintViolation(2, 1, "Unexpected indentation (0) (should be 4)"),
++                LintViolation(5, 1, "Unexpected indentation (0) (should be 4)"),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a typealias with improper indentation after equals`() {
++        val code =
++            """
++            typealias Foo =
++            HashMap<Bar, Baz?>
++            """.trimIndent()
++        val formattedCode =
++            """
++            typealias Foo =
++                HashMap<Bar, Baz?>
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .hasLintViolation(2, 1, "Unexpected indentation (0) (should be 4)")
++            .isFormattedAs(formattedCode)
++    }
++
+     @Test
+     fun `Given some call to a function with a lambda as parameter`() {
+         val code =
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

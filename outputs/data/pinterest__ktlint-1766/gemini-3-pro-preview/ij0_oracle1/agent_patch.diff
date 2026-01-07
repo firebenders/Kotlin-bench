@@ -1,0 +1,137 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+index 7fdfdd88..34e3fcda 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+@@ -26,6 +26,7 @@ import org.jetbrains.kotlin.com.intellij.psi.PsiWhiteSpace
+ import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
+ import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.PsiWhiteSpaceImpl
+ import org.jetbrains.kotlin.descriptors.annotations.AnnotationUseSiteTarget
++import org.jetbrains.kotlin.psi.KtAnnotation
+ import org.jetbrains.kotlin.psi.KtAnnotationEntry
+ import org.jetbrains.kotlin.psi.psiUtil.leaves
+ import org.jetbrains.kotlin.psi.psiUtil.siblings
+@@ -49,6 +50,8 @@ public class AnnotationRule : Rule("annotation") {
+             FILE_ANNOTATION_LIST -> {
+                 visitFileAnnotationList(node, emit, autoCorrect)
+             }
++            ANNOTATION ->
++                visitAnnotation(node, emit, autoCorrect)
+             ANNOTATION_ENTRY ->
+                 visitAnnotationEntry(node, emit, autoCorrect)
+         }
+@@ -62,6 +65,7 @@ public class AnnotationRule : Rule("annotation") {
+         require(node.elementType == ANNOTATION_ENTRY)
+ 
+         if (node.isAnnotationEntryWithValueArgumentList() &&
++            node.treeParent.elementType != ANNOTATION &&
+             node.treeParent.treeParent.elementType != VALUE_PARAMETER && // fun fn(@Ann("blah") a: String)
+             node.treeParent.treeParent.elementType != VALUE_ARGUMENT && // fn(@Ann("blah") "42")
+             !node.isPartOf(TYPE_ARGUMENT_LIST) && // val property: Map<@Ann("blah") String, Int>
+@@ -84,6 +88,35 @@ public class AnnotationRule : Rule("annotation") {
+         }
+     }
+ 
++    private fun visitAnnotation(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        if (node.treeParent.elementType == FILE_ANNOTATION_LIST ||
++            node.treeParent.treeParent.elementType == VALUE_PARAMETER ||
++            node.treeParent.treeParent.elementType == VALUE_ARGUMENT ||
++            node.isPartOf(TYPE_ARGUMENT_LIST) ||
++            !node.isNotReceiverTargetAnnotation()
++        ) {
++            return
++        }
++
++        if (node.isOnSameLineAsAnnotatedConstruct()) {
++            emit(
++                node.startOffset,
++                "Annotation must be placed on separate line",
++                true,
++            )
++            if (autoCorrect) {
++                node
++                    .lastChildLeafOrSelf()
++                    .nextLeaf()
++                    ?.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++            }
++        }
++    }
++
+     private fun checkForAnnotationWithParameterToBePlacedOnSeparateLine(
+         node: ASTNode,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+@@ -188,10 +221,11 @@ public class AnnotationRule : Rule("annotation") {
+         getAnnotationUseSiteTarget() != AnnotationUseSiteTarget.RECEIVER
+ 
+     private fun ASTNode.getAnnotationUseSiteTarget() =
+-        psi
+-            .safeAs<KtAnnotationEntry>()
+-            ?.useSiteTarget
+-            ?.getAnnotationUseSiteTarget()
++        when (val psi = this.psi) {
++            is KtAnnotationEntry -> psi.useSiteTarget?.getAnnotationUseSiteTarget()
++            is KtAnnotation -> psi.useSiteTarget?.getAnnotationUseSiteTarget()
++            else -> null
++        }
+ 
+     private fun ASTNode.isAnnotationEntryWithValueArgumentList() =
+         getAnnotationEntryValueArgumentList() != null
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRuleArraySyntaxTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRuleArraySyntaxTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRuleArraySyntaxTest.kt
+@@ -0,0 +1,42 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++class AnnotationRuleArraySyntaxTest {
++    private val annotationRuleAssertThat = assertThatRule { AnnotationRule() }
++
++    @Test
++    fun `Given an array annotation on the same line as the annotated construct`() {
++        val code =
++            """
++            @[Suppress("DEPRECATION")] fun foo() {}
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[Suppress("DEPRECATION")]
++            fun foo() {}
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given an array annotation with multiple entries on the same line as the annotated construct`() {
++        val code =
++            """
++            @[Foo Bar] fun foo() {}
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[Foo Bar]
++            fun foo() {}
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

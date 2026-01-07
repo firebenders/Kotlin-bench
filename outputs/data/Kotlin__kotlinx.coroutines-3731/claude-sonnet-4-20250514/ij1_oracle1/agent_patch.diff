@@ -1,0 +1,108 @@
+diff --git a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+index de1522526..787e50339 100644
+--- a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
++++ b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+@@ -21,6 +21,32 @@ private val ctorCache = try {
+     WeakMapCtorCache
+ }
+ 
++/**
++ * Comparator that prioritizes constructors based on their suitability for copying exceptions.
++ * For constructors with the same parameter count, prefers Throwable parameter over String parameter.
++ */
++private val constructorComparator = Comparator<Constructor<*>> { a, b ->
++    val aParams = a.parameterTypes
++    val bParams = b.parameterTypes
++    
++    // If different parameter counts, this comparator doesn't apply (handled by primary sort)
++    if (aParams.size != bParams.size) return@Comparator 0
++    
++    // For 1-parameter constructors, prefer Throwable over String
++    if (aParams.size == 1) {
++        val aIsThrowable = aParams[0] == Throwable::class.java
++        val bIsThrowable = bParams[0] == Throwable::class.java
++        
++        when {
++            aIsThrowable && !bIsThrowable -> -1  // a is better
++            !aIsThrowable && bIsThrowable -> 1   // b is better
++            else -> 0  // both are Throwable or both are not
++        }
++    } else {
++        0  // For other parameter counts, no preference
++    }
++}
++
+ @Suppress("UNCHECKED_CAST")
+ internal fun <E : Throwable> tryCopyException(exception: E): E? {
+     // Fast path for CopyableThrowable
+@@ -38,7 +64,7 @@ private fun <E : Throwable> createConstructor(clz: Class<E>): Ctor {
+     * Try to reflectively find constructor(), constructor(message, cause), constructor(cause) or constructor(message).
+     * Exceptions are shared among coroutines, so we should copy exception before recovering current stacktrace.
+     */
+-    val constructors = clz.constructors.sortedByDescending { it.parameterTypes.size }
++    val constructors = clz.constructors.sortedWith(compareByDescending<Constructor<*>> { it.parameterTypes.size }.then(constructorComparator))
+     for (constructor in constructors) {
+         val result = createSafeConstructor(constructor)
+         if (result != null) return result
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+diff --git a/kotlinx-coroutines-core/jvm/test/exceptions/StackTraceRecoveryCustomExceptionsTest.kt b/kotlinx-coroutines-core/jvm/test/exceptions/StackTraceRecoveryCustomExceptionsTest.kt
+index d4e19040a..23b0ac0a3 100644
+--- a/kotlinx-coroutines-core/jvm/test/exceptions/StackTraceRecoveryCustomExceptionsTest.kt
++++ b/kotlinx-coroutines-core/jvm/test/exceptions/StackTraceRecoveryCustomExceptionsTest.kt
+@@ -142,4 +142,42 @@ class StackTraceRecoveryCustomExceptionsTest : TestBase() {
+ 
+         assertSame(e, result.exceptionOrNull())
+     }
++
++    @Test
++    fun testNestedException() = runTest {
++        val result = runCatching {
++            coroutineScope<Unit> {
++                throw NestedException(IllegalStateException("ERROR"))
++            }
++        }
++        val ex = result.exceptionOrNull() ?: error("Expected to fail")
++        assertTrue(ex is NestedException)
++        assertTrue(ex.cause is IllegalStateException)
++        assertEquals("ERROR", (ex.cause as IllegalStateException).message)
++    }
++
++    @Test
++    fun testNestedExceptionReversedConstructorOrder() = runTest {
++        val result = runCatching {
++            coroutineScope<Unit> {
++                throw NestedExceptionReversed(IllegalStateException("ERROR"))
++            }
++        }
++        val ex = result.exceptionOrNull() ?: error("Expected to fail")
++        assertTrue(ex is NestedExceptionReversed)
++        assertTrue(ex.cause is IllegalStateException)
++        assertEquals("ERROR", (ex.cause as IllegalStateException).message)
++    }
++
++    class NestedException : RuntimeException {
++        constructor(message: String) : super(message)
++        constructor(cause: Throwable) : super(cause)
++        constructor() : super()
++    }
++
++    class NestedExceptionReversed : RuntimeException {
++        constructor(cause: Throwable) : super(cause)
++        constructor(message: String) : super(message)
++        constructor() : super()
++    }
+ }

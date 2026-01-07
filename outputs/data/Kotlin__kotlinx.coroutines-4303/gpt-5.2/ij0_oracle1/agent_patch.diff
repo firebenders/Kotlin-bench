@@ -1,0 +1,51 @@
+diff --git a/kotlinx-coroutines-core/common/src/internal/Scopes.kt b/kotlinx-coroutines-core/common/src/internal/Scopes.kt
+index 7e561c83d..e1251f3ad 100644
+--- a/kotlinx-coroutines-core/common/src/internal/Scopes.kt
++++ b/kotlinx-coroutines-core/common/src/internal/Scopes.kt
+@@ -13,6 +13,14 @@ internal open class ScopeCoroutine<in T>(
+     @JvmField val uCont: Continuation<T> // unintercepted continuation
+ ) : AbstractCoroutine<T>(context, true, true), CoroutineStackFrame {
+ 
++    /**
++     * Invoked when this coroutine is started undispatched and completes *without suspending*.
++     *
++     * In this case, [resumeWith] (and therefore [afterResume]) is never called, so platform-specific
++     * undispatched bookkeeping must be cleaned up explicitly.
++     */
++    internal open fun onUndispatchedCompletion() {}
++
+     final override val callerFrame: CoroutineStackFrame? get() = uCont as? CoroutineStackFrame
+     final override fun getStackTraceElement(): StackTraceElement? = null
+ 
+diff --git a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+index 254182b38..978f38baa 100644
+--- a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
++++ b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+@@ -79,6 +79,10 @@ private inline fun <T> ScopeCoroutine<T>.undispatchedResult(
+     if (result === COROUTINE_SUSPENDED) return COROUTINE_SUSPENDED // (1)
+     val state = makeCompletingOnce(result)
+     if (state === COMPLETING_WAITING_CHILDREN) return COROUTINE_SUSPENDED // (2)
++
++    // If we completed without suspension, resumeWith/afterResume won't be called, so clean up undispatched bookkeeping.
++    onUndispatchedCompletion()
++
+     return if (state is CompletedExceptionally) { // (3)
+         when {
+             shouldThrow(state.cause) -> throw recoverStackTrace(state.cause, uCont)
+diff --git a/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt b/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
+index ae8275f86..67b987e17 100644
+--- a/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
++++ b/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
+@@ -242,6 +242,12 @@ internal actual class UndispatchedCoroutine<in T>actual constructor (
+         }
+     }
+ 
++    override fun onUndispatchedCompletion() {
++        // If this undispatched coroutine completes without suspending, afterResume is never invoked.
++        // Remove the thread-local state eagerly to avoid leaking coroutine context via ThreadLocalMap.
++        if (threadLocalIsSet) threadStateToRecover.remove()
++    }
++
+     fun saveThreadContext(context: CoroutineContext, oldValue: Any?) {
+         threadLocalIsSet = true // Specify that thread-local is touched at all
+         threadStateToRecover.set(context to oldValue)

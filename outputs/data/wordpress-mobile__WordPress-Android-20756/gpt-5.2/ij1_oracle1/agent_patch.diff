@@ -1,0 +1,148 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt b/WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt
+index ceed1dbb5b1..c3078e9c8ae 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt
+@@ -14,12 +14,14 @@ import org.wordpress.android.ui.deeplinks.DeepLinkingIntentReceiverViewModel.Com
+ import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureRemovalPhaseHelper
+ import org.wordpress.android.ui.stats.StatsTimeframe
+ import org.wordpress.android.util.UriWrapper
++import org.wordpress.android.util.config.StatsTrafficSubscribersTabFeatureConfig
+ import javax.inject.Inject
+ 
+ class StatsLinkHandler
+ @Inject constructor(
+     private val deepLinkUriUtils: DeepLinkUriUtils,
+-    private val jetpackFeatureRemovalPhaseHelper: JetpackFeatureRemovalPhaseHelper
++    private val jetpackFeatureRemovalPhaseHelper: JetpackFeatureRemovalPhaseHelper,
++    private val statsTrafficSubscribersTabFeatureConfig: StatsTrafficSubscribersTabFeatureConfig
+ ) : DeepLinkHandler {
+     /**
+      * Builds navigate action from URL like:
+@@ -29,21 +31,17 @@ class StatsLinkHandler
+      * wordpress://stats
+      */
+     override fun buildNavigateAction(uri: UriWrapper): NavigateAction {
+-        val pathSegments = uri.pathSegments
+-        val length = pathSegments.size
+-        val site = pathSegments.getOrNull(length - 1)?.toSite()
+-        val statsTimeframe = pathSegments.getOrNull(length - 2)?.toStatsTimeframe()
++        val statsPathSegments = uri.pathSegments.toStatsSegments(uri.host)
++
++        val site = statsPathSegments.lastOrNull()?.toSite()
++        val timeframeSegments = if (site != null) statsPathSegments.dropLast(1) else statsPathSegments
++        val statsTimeframe = timeframeSegments.toStatsTimeframe()
++
+         return when {
+             jetpackFeatureRemovalPhaseHelper.shouldShowStaticPage() -> OpenJetpackStaticPosterView
+-            site != null && statsTimeframe != null -> {
+-                OpenStatsForSiteAndTimeframe(site, statsTimeframe)
+-            }
+-            site != null -> {
+-                OpenStatsForSite(site)
+-            }
+-            statsTimeframe != null -> {
+-                OpenStatsForTimeframe(statsTimeframe)
+-            }
++            site != null && statsTimeframe != null -> OpenStatsForSiteAndTimeframe(site, statsTimeframe)
++            site != null -> OpenStatsForSite(site)
++            statsTimeframe != null -> OpenStatsForTimeframe(statsTimeframe)
+             else -> {
+                 // In other cases, launch stats with the current selected site.
+                 OpenStats
+@@ -72,11 +70,32 @@ class StatsLinkHandler
+             append(STATS_PATH)
+             val pathSegments = uri.pathSegments
+             val size = pathSegments.size
+-            val statsTimeframe = if (size > offset) pathSegments.getOrNull(offset) else null
+-            val hasSiteUrl = if (size > offset + 1) pathSegments.getOrNull(offset + 1) != null else false
+-            if (statsTimeframe != null) {
+-                append("/$statsTimeframe")
++
++            val first = if (size > offset) pathSegments.getOrNull(offset) else null
++            val second = if (size > offset + 1) pathSegments.getOrNull(offset + 1) else null
++            val third = if (size > offset + 2) pathSegments.getOrNull(offset + 2) else null
++
++            val firstLower = first?.lowercase()
++            val secondLower = second?.lowercase()
++
++            val isTraffic = firstLower == "traffic"
++            val isTrafficWithGranularity = isTraffic && secondLower in setOf("day", "week", "month", "year")
++
++            when {
++                isTrafficWithGranularity -> {
++                    append("/$first")
++                    append("/$second")
++                }
++                first != null -> {
++                    append("/$first")
++                }
++            }
++
++            val hasSiteUrl = when {
++                isTrafficWithGranularity -> third != null
++                else -> second != null
+             }
++
+             if (hasSiteUrl) {
+                 append("/$SITE_DOMAIN")
+             }
+@@ -91,17 +110,56 @@ class StatsLinkHandler
+         return deepLinkUriUtils.hostToSite(this)
+     }
+ 
+-    private fun String.toStatsTimeframe(): StatsTimeframe? {
+-        return when (this) {
++    private fun String.toGranularityTimeframe(): StatsTimeframe? {
++        return when (this.lowercase()) {
+             "day" -> StatsTimeframe.DAY
+             "week" -> StatsTimeframe.WEEK
+             "month" -> StatsTimeframe.MONTH
+             "year" -> StatsTimeframe.YEAR
+-            "insights" -> StatsTimeframe.INSIGHTS
+             else -> null
+         }
+     }
+ 
++    private fun List<String>.toStatsSegments(host: String?): List<String> {
++        // `wordpress://stats/...`
++        if (host == STATS_PATH) return this
++
++        // `https://wordpress.com/stats/...`
++        val statsIndex = indexOf(STATS_PATH)
++        return if (statsIndex > -1) drop(statsIndex + 1) else emptyList()
++    }
++
++    private fun List<String>.toStatsTimeframe(): StatsTimeframe? {
++        if (isEmpty()) return null
++
++        // Prefer a granularity-based timeframe (day/week/month/year) when present.
++        lastOrNull { it.toGranularityTimeframe() != null }?.let { return it.toGranularityTimeframe() }
++
++        val tokens = map { it.lowercase() }
++
++        if (tokens.contains("insights")) {
++            return StatsTimeframe.INSIGHTS
++        }
++
++        if (tokens.contains("subscribers") || tokens.contains("followers")) {
++            return if (statsTrafficSubscribersTabFeatureConfig.isEnabled()) {
++                StatsTimeframe.SUBSCRIBERS
++            } else {
++                StatsTimeframe.INSIGHTS
++            }
++        }
++
++        if (tokens.contains("traffic")) {
++            return if (statsTrafficSubscribersTabFeatureConfig.isEnabled()) {
++                StatsTimeframe.TRAFFIC
++            } else {
++                StatsTimeframe.INSIGHTS
++            }
++        }
++
++        return null
++    }
++
+     companion object {
+         private const val STATS_PATH = "stats"
+     }

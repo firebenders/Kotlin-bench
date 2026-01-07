@@ -1,0 +1,197 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+index bdddca08..c27886be 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+@@ -18,10 +18,12 @@ import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRu
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.children
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf
++import com.pinterest.ktlint.rule.engine.core.api.indent
+ import com.pinterest.ktlint.rule.engine.core.api.isCodeLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpace
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+@@ -78,10 +80,11 @@ public class AnnotationRule :
+         id = "annotation",
+         usesEditorConfigProperties =
+             setOf(
++                CODE_STYLE_PROPERTY,
+                 INDENT_SIZE_PROPERTY,
+                 INDENT_STYLE_PROPERTY,
+             ),
+-        visitorModifiers =
++visitorModifiers =
+             setOf(
+                 RunAfterRule(
+                     ruleId = ENUM_WRAPPING_RULE_ID,
+@@ -143,9 +146,33 @@ public class AnnotationRule :
+             checkForAnnotationWithParameterToBePlacedOnSeparateLine(node, emit, autoCorrect)
+         }
+ 
++        if (codeStyle == ktlint_official &&
++            node.isPrecededByOtherAnnotationEntryOnTheSameLine() &&
++            node.treeParent.treeParent.elementType != VALUE_PARAMETER &&
++            node.treeParent.treeParent.elementType != VALUE_ARGUMENT &&
++            node.typeProjectionOrNull() == null &&
++            node.isNotReceiverTargetAnnotation()
++        ) {
++            emit(node.startOffset, "Annotation should be on a separate line", true)
++            if (autoCorrect) {
++                node.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++            }
++        }
++
+         if (node.isOnSameLineAsAnnotatedConstruct()) {
++            if (codeStyle == ktlint_official &&
++                node.treeParent.treeParent.elementType == ElementType.PRIMARY_CONSTRUCTOR &&
++                node.isFirstAnnotationEntry() &&
++                !node.isPrecededByNewline()
++            ) {
++                emit(node.startOffset, "Annotation should be on a separate line", true)
++                if (autoCorrect) {
++                    node.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                }
++            }
++
+             if (node.isPrecededByAnnotationOnAnotherLine()) {
+-                // Code below is disallowed
++// Code below is disallowed
+                 //   @Foo1
+                 //   @Foo2 fun foo() {}
+                 emit(
+@@ -164,7 +191,10 @@ public class AnnotationRule :
+             if (node.treeParent.elementType != ANNOTATION &&
+                 node.treeParent.treeParent.elementType != VALUE_PARAMETER &&
+                 node.treeParent.treeParent.elementType != VALUE_ARGUMENT &&
+-                node.isPrecededByOtherAnnotationEntryOnTheSameLine() &&
++                (
++                    node.isPrecededByOtherAnnotationEntryOnTheSameLine() ||
++                        (codeStyle == ktlint_official && node.treeParent.treeParent.elementType == ElementType.PRIMARY_CONSTRUCTOR)
++                    ) &&
+                 node.isLastAnnotationEntry()
+             ) {
+                 // Code below is disallowed
+@@ -172,9 +202,15 @@ public class AnnotationRule :
+                 // But following is allowed:
+                 //   @[Foo1 Foo2] fun foo() {}
+                 //   fun foo(@Bar1 @Bar2 bar) {}
++                val errorMessage =
++                    if (node.isPrecededByOtherAnnotationEntryOnTheSameLine()) {
++                        "Multiple annotations should not be placed on the same line as the annotated construct"
++                    } else {
++                        "Annotation should be on a separate line"
++                    }
+                 emit(
+                     node.findAnnotatedConstruct().startOffset,
+-                    "Multiple annotations should not be placed on the same line as the annotated construct",
++                    errorMessage,
+                     true,
+                 )
+                 if (autoCorrect) {
+@@ -188,7 +224,7 @@ public class AnnotationRule :
+                                 },
+                         )
+                 }
+-            }
++}
+ 
+             node.typeProjectionOrNull()
+                 ?.prevCodeLeaf()
+@@ -198,10 +234,10 @@ public class AnnotationRule :
+                     // But following is allowed:
+                     //   var foo: List<@[Foo1 Foo2] String>
+                     //   fun foo(@Bar1 @Bar2 bar) {}
+-                    if (node.isFollowedByOtherAnnotationEntryOnTheSameLine() &&
++                    if ((node.isFollowedByOtherAnnotationEntryOnTheSameLine() || node.isAnnotationEntryWithValueArgumentList()) &&
+                         node.isFirstAnnotationEntry()
+                     ) {
+-                        emit(startOfList.startOffset, "Expected newline after '${startOfList.text}'", true)
++emit(startOfList.startOffset, "Expected newline after '${startOfList.text}'", true)
+                         if (autoCorrect) {
+                             startOfList
+                                 .upsertWhitespaceAfterMe(
+@@ -245,8 +281,15 @@ public class AnnotationRule :
+         }
+     }
+ 
++    private fun ASTNode.isPrecededByNewline() =
++        firstChildLeafOrSelf()
++            .leaves(forward = false)
++            .drop(1)
++            .takeWhile { it.isWhiteSpace() }
++            .any { it.isWhiteSpaceWithNewline() }
++
+     private fun ASTNode.typeProjectionOrNull() =
+-        takeIf { elementType == ANNOTATION_ENTRY }
++takeIf { elementType == ANNOTATION_ENTRY }
+             ?.takeIf { it.treeParent.elementType == MODIFIER_LIST }
+             ?.treeParent
+             ?.takeIf { it.treeParent.elementType == TYPE_REFERENCE }
+@@ -275,7 +318,7 @@ public class AnnotationRule :
+             if (autoCorrect) {
+                 node
+                     .firstChildLeafOrSelf()
+-                    .upsertWhitespaceBeforeMe(" ")
++                    .upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
+             }
+         }
+ 
+@@ -295,17 +338,18 @@ public class AnnotationRule :
+                     .nextLeaf()
+                     .safeAs<LeafPsiElement>()
+                     ?.let {
++                        val newlineWithIndent = getNewlineWithIndent(node.treeParent)
+                         if (it.elementType == WHITE_SPACE) {
+-                            it.replaceWithText(getNewlineWithIndent(node.treeParent))
++                            it.replaceWithText(newlineWithIndent)
+                         } else {
+                             it.rawInsertBeforeMe(
+-                                PsiWhiteSpaceImpl(getNewlineWithIndent(node.treeParent)),
++                                PsiWhiteSpaceImpl(newlineWithIndent),
+                             )
+                         }
+                     }
+             }
+         }
+-    }
++}
+ 
+     private fun ASTNode.isNotReceiverTargetAnnotation() = getAnnotationUseSiteTarget() != AnnotationUseSiteTarget.RECEIVER
+ 
+@@ -436,17 +480,13 @@ public class AnnotationRule :
+     }
+ 
+     private fun getNewlineWithIndent(modifierListRoot: ASTNode): String {
+-        val nodeBeforeAnnotations =
+-            modifierListRoot
+-                .treeParent
+-                .treePrev
+-        // Make sure we only insert a single newline
+-        val indentWithoutNewline =
+-            nodeBeforeAnnotations
+-                ?.text
+-                .orEmpty()
+-                .substringAfterLast('\n')
+-        return "\n".plus(indentWithoutNewline)
++        val treeParent = modifierListRoot.treeParent
++        return if (treeParent.elementType == ElementType.PRIMARY_CONSTRUCTOR) {
++            "\n" + treeParent.treeParent.indent() + indentConfig.indent
++        } else {
++            val nodeBeforeAnnotations = treeParent.treePrev
++            "\n" + nodeBeforeAnnotations?.text.orEmpty().substringAfterLast('\n')
++        }
+     }
+ }
+ 
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

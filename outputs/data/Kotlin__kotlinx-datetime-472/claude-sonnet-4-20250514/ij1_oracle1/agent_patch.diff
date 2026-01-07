@@ -1,0 +1,95 @@
+diff --git a/core/common/src/internal/format/FieldSpec.kt b/core/common/src/internal/format/FieldSpec.kt
+index cbb2d76..085cf3c 100644
+--- a/core/common/src/internal/format/FieldSpec.kt
++++ b/core/common/src/internal/format/FieldSpec.kt
+@@ -8,6 +8,19 @@ package kotlinx.datetime.internal.format
+ import kotlinx.datetime.internal.format.parser.AssignableField
+ import kotlin.reflect.KMutableProperty1
+ 
++/**
++ * Maps internal field names to user-friendly names for better error messages.
++ */
++internal fun getUserFriendlyFieldName(internalName: String): String = when (internalName) {
++    "totalHoursAbs" -> "offsetHours (use setOffset() or setDateTimeOffset() to set this field)"
++    "minutesOfHour" -> "offsetMinutesOfHour (use setOffset() or setDateTimeOffset() to set this field)"
++    "secondsOfMinute" -> "offsetSecondsOfMinute (use setOffset() or setDateTimeOffset() to set this field)"
++    "isNegative" -> "offsetIsNegative (use setOffset() or setDateTimeOffset() to set this field)"
++    "fractionOfSecond" -> "nanosecond (use setDateTime() or setTime() to set this field)"
++    "isoDayOfWeek" -> "dayOfWeek (use setDateTime() or setDate() to set this field)"
++    else -> internalName
++}
++
+ /**
+  * A lens-like interface for accessing fields of objects.
+  */
+@@ -24,7 +37,7 @@ internal interface Accessor<in Object, Field>: AssignableField<Object, Field> {
+      * This function is used to access fields during formatting.
+      */
+     fun getterNotNull(container: Object): Field =
+-        getter(container) ?: throw IllegalStateException("Field $name is not set")
++        getter(container) ?: throw IllegalStateException("Field ${getUserFriendlyFieldName(name)} is not set")
+ }
+ 
+ /**
+diff --git a/core/common/test/format/DateTimeComponentsFormatTest.kt b/core/common/test/format/DateTimeComponentsFormatTest.kt
+index 07973d7..40569c7 100644
+--- a/core/common/test/format/DateTimeComponentsFormatTest.kt
++++ b/core/common/test/format/DateTimeComponentsFormatTest.kt
+@@ -206,6 +206,57 @@ class DateTimeComponentsFormatTest {
+         }
+         format.parse("2023-01-20T23:53:16.312+03:30[Asia/Tehran]")
+     }
++    
++    @Test
++    fun testBetterErrorMessageForMissingOffsetFields() {
++        // Reproduces the issue described in the GitHub issue
++        val readableFormat = DateTimeComponents.Format {
++            year()
++            char('-')
++            monthNumber()
++            char('-')
++            dayOfMonth()
++            char(' ')
++            hour()
++            char(':')
++            minute()
++            char(':')
++            second()
++            alternativeParsing({}) {
++                char(' ')
++            }
++            alternativeParsing(
++                { timeZoneId() },
++                { offset(UtcOffset.Formats.ISO) }
++            ) {
++                offsetHours()
++                char(':')
++                offsetMinutesOfHour()
++                optional {
++                    char(':')
++                    offsetSecondsOfMinute()
++                }
++            }
++        }
++        
++        // This should fail with a user-friendly error message, not "Field totalHoursAbs is not set"
++        val exception = assertFailsWith<IllegalStateException> {
++            readableFormat.format {
++                setDateTime(Instant.fromEpochSeconds(1609459200).toLocalDateTime(TimeZone.UTC)) // 2021-01-01T00:00:00Z
++                timeZoneId = "UTC"
++                // Note: we deliberately don't call setOffset() to trigger the error
++            }
++        }
++        
++        // The error message should be user-friendly and provide helpful guidance
++        assertTrue(exception.message?.contains("offsetHours") == true, 
++            "Error message should mention 'offsetHours', but was: ${exception.message}")
++        assertTrue(exception.message?.contains("setOffset()") == true || exception.message?.contains("setDateTimeOffset()") == true,
++            "Error message should provide helpful guidance, but was: ${exception.message}")
++        // Ensure the old cryptic message is not present
++        assertFalse(exception.message?.contains("totalHoursAbs") == true,
++            "Error message should not contain internal field name 'totalHoursAbs', but was: ${exception.message}")
++    }
+ 
+     private fun test(strings: Map<DateTimeComponents, Pair<String, Set<String>>>, format: DateTimeFormat<DateTimeComponents>) {
+         for ((value, stringsForValue) in strings) {

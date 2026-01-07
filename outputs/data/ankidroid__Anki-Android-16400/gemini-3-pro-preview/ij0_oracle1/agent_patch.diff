@@ -1,0 +1,326 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 8eba4324b0..480ed6dbe3 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -248,12 +248,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
+index 5eafcf1578..57635b41e3 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
+@@ -78,6 +78,7 @@ import com.ichi2.anki.reviewer.ActionButtons
+ import com.ichi2.anki.reviewer.AnswerButtons.Companion.getBackgroundColors
+ import com.ichi2.anki.reviewer.AnswerButtons.Companion.getTextColors
+ import com.ichi2.anki.reviewer.AnswerTimer
++import com.ichi2.anki.reviewer.AutomaticAnswer
+ import com.ichi2.anki.reviewer.AutomaticAnswerAction
+ import com.ichi2.anki.reviewer.CardMarker
+ import com.ichi2.anki.reviewer.FullScreenMode
+@@ -433,6 +434,10 @@ open class Reviewer :
+                 // Check permission to record and request if not granted
+                 openOrToggleMicToolbar()
+             }
++            R.id.action_toggle_auto_advance -> {
++                Timber.i("Reviewer:: Toggle auto advance")
++                toggleAutoAdvance()
++            }
+             R.id.action_tag -> {
+                 Timber.i("Reviewer:: Tag button pressed")
+                 showTagsDialog()
+@@ -663,6 +668,15 @@ open class Reviewer :
+         refreshActionBar()
+     }
+ 
++    private fun toggleAutoAdvance() {
++        if (automaticAnswer.isDisabled) {
++            automaticAnswer.enable()
++        } else {
++            automaticAnswer.disable()
++        }
++        refreshActionBar()
++    }
++
+     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+         if (requestCode == REQUEST_AUDIO_PERMISSION &&
+@@ -865,6 +879,18 @@ open class Reviewer :
+             voicePlaybackIcon.setTitle(R.string.menu_enable_voice_playback)
+         }
+ 
++        val autoAdvanceIcon = menu.findItem(R.id.action_toggle_auto_advance)
++        if (automaticAnswer.isEnabled()) {
++            autoAdvanceIcon.isVisible = true
++            if (automaticAnswer.isDisabled) {
++                autoAdvanceIcon.setTitle(R.string.enable_auto_advance)
++            } else {
++                autoAdvanceIcon.setTitle(R.string.disable_auto_advance)
++            }
++        } else {
++            autoAdvanceIcon.isVisible = false
++        }
++
+         onboarding.onCreate()
+ 
+         increaseHorizontalPaddingOfOverflowMenuIcons(menu)
+@@ -1247,6 +1273,10 @@ open class Reviewer :
+                 addNote(fromGesture)
+                 return true
+             }
++            ViewerCommand.TOGGLE_AUTO_ADVANCE -> {
++                toggleAutoAdvance()
++                return true
++            }
+             ViewerCommand.CARD_INFO -> {
+                 openCardInfo(fromGesture)
+                 return true
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
+index 5914cdc59a..47163a91b9 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
+@@ -73,6 +73,7 @@ enum class ViewerCommand(val resourceId: Int) {
+     SHOW_HINT(R.string.gesture_show_hint),
+     SHOW_ALL_HINTS(R.string.gesture_show_all_hints),
+     ADD_NOTE(R.string.menu_add_note),
++    TOGGLE_AUTO_ADVANCE(R.string.menu_toggle_auto_advance),
+ 
+     // TODO: CollectionManager.TR.actionsSetDueDate()
+     RESCHEDULE_NOTE(R.string.card_editor_reschedule_card),
+@@ -190,6 +191,7 @@ enum class ViewerCommand(val resourceId: Int) {
+                 SHOW_HINT -> listOf(keyCode(KeyEvent.KEYCODE_H, CardSide.BOTH))
+                 SHOW_ALL_HINTS -> listOf(keyCode(KeyEvent.KEYCODE_G, CardSide.BOTH))
+                 ADD_NOTE -> listOf(keyCode(KeyEvent.KEYCODE_A, CardSide.BOTH))
++                TOGGLE_AUTO_ADVANCE -> listOf(keyCode(KeyEvent.KEYCODE_A, CardSide.BOTH, shift()))
+                 else -> emptyList()
+             }
+         }
+diff --git a/AnkiDroid/src/main/res/menu/reviewer.xml b/AnkiDroid/src/main/res/menu/reviewer.xml
+index 45ffd00c30..4b06c97e77 100644
+--- a/AnkiDroid/src/main/res/menu/reviewer.xml
++++ b/AnkiDroid/src/main/res/menu/reviewer.xml
+@@ -1,6 +1,5 @@
+ <menu xmlns:android="http://schemas.android.com/apk/res/android"
+     xmlns:ankidroid="http://schemas.android.com/apk/res-auto"
+-    xmlns:tools="http://schemas.android.com/tools"
+     android:layoutDirection="locale">
+ 
+     <item
+@@ -58,7 +57,37 @@
+         android:icon="@drawable/ic_flag_transparent"
+         ankidroid:showAsAction="always" >
+         <menu>
+-            <!-- flags are dynamically added -->
++            <item
++                android:id="@+id/action_flag_zero"
++                android:title="@string/menu_flag_card_zero"/>
++            <item
++                android:id="@+id/action_flag_one"
++                android:title="@string/menu_flag_card_one"
++                android:icon="@drawable/ic_flag_red"/>
++            <item
++                android:id="@+id/action_flag_two"
++                android:title="@string/menu_flag_card_two"
++                android:icon="@drawable/ic_flag_orange"/>
++            <item
++                android:id="@+id/action_flag_three"
++                android:title="@string/menu_flag_card_three"
++                android:icon="@drawable/ic_flag_green"/>
++            <item
++                android:id="@+id/action_flag_four"
++                android:title="@string/menu_flag_card_four"
++                android:icon="@drawable/ic_flag_blue"/>
++            <item
++                android:id="@+id/action_flag_five"
++                android:title="@string/menu_flag_card_five"
++                android:icon="@drawable/ic_flag_pink"/>
++            <item
++                android:id="@+id/action_flag_six"
++                android:title="@string/menu_flag_card_six"
++                android:icon="@drawable/ic_flag_turquoise"/>
++            <item
++                android:id="@+id/action_flag_seven"
++                android:title="@string/menu_flag_card_seven"
++                android:icon="@drawable/ic_flag_purple"/>
+         </menu>
+     </item>
+     <item
+@@ -135,7 +164,7 @@
+         <menu>
+             <item
+                 android:id="@+id/action_reschedule_card"
+-                tools:title="Set due date" />
++                android:title="@string/reschedule_card_dialog_message" />
+             <item
+                 android:id="@+id/action_reset_card_progress"
+                 android:title="@string/card_editor_reset_card" />
+@@ -148,9 +177,14 @@
+         ankidroid:showAsAction="ifRoom"/>
+     <item
+         android:id="@+id/action_toggle_mic_tool_bar"
+-        android:title="@string/menu_enable_voice_playback"
++        android:title="@string/menu_toggle_mic_tool_bar"
+         android:icon="@drawable/ic_action_mic"
+         ankidroid:showAsAction="never"/>
++    <item
++        android:id="@+id/action_toggle_auto_advance"
++        android:title="@string/menu_toggle_auto_advance"
++        android:icon="@drawable/ic_play_circle_white"
++        ankidroid:showAsAction="never"/>
+     <item
+         android:id="@+id/action_select_tts"
+         android:title="@string/select_tts"
+diff --git a/AnkiDroid/src/main/res/values/02-strings.xml b/AnkiDroid/src/main/res/values/02-strings.xml
+index 8650fc5410..e6b3af0947 100644
+--- a/AnkiDroid/src/main/res/values/02-strings.xml
++++ b/AnkiDroid/src/main/res/values/02-strings.xml
+@@ -38,6 +38,10 @@
+     <string name="no_tags">You haven’t added any tags yet</string>
+     <string name="updated_version">Updated to version %s</string>
+ 
++    <string name="menu_toggle_auto_advance">Toggle auto advance</string>
++    <string name="enable_auto_advance">Resume auto advance</string>
++    <string name="disable_auto_advance">Pause auto advance</string>
++
+     <!-- Reviewer.kt -->
+     <string name="save_whiteboard">Save whiteboard</string>
+     <string name="enable_stylus">Enable stylus writing</string>
+@@ -59,6 +63,28 @@
+     <string name="webview_crash_loop_dialog_title">System WebView Rendering Failure</string>
+     <string name="webview_crash_loop_dialog_content">System WebView failed to render card \'%1$s\'.\n %2$s</string>
+ 
++    <!-- Browser -->
++    <string-array name="browser_column1_headings">
++        <item>Question</item>
++        <item>Sort field</item>
++    </string-array>
++    <string-array name="browser_column2_headings">
++        <item>Answer</item>
++        <item>Card</item>
++        <item>Deck</item>
++        <item>Note</item>
++        <item>Question</item>
++        <item>Tags</item>
++        <item>Lapses</item>
++        <item>Reviews</item>
++        <item>Interval</item>
++        <item>Ease</item>
++        <item>Due</item>
++        <item>Card Modified</item>
++        <item>Created</item>
++        <item>Note Modified</item>
++    </string-array>
++
+     <string name="filter_by_flags">Flags</string>
+ 
+     <!-- Custom study options -->
+@@ -74,6 +100,8 @@
+     <string name="cardeditor_title_edit_card">Edit note</string>
+     <string name="discard">Discard</string>
+     <string name="note_editor_no_cards_created">No cards created. Please fill in more fields</string>
++    <string name="note_editor_no_first_field">The first field is empty</string>
++    <string name="note_editor_no_cloze_delations">This note type must contain cloze deletions</string>
+     <string name="note_editor_no_cards_created_all_fields">The current note type did not produce any cards.\nPlease choose another note type, or click ‘Cards’ and add a field substitution</string>
+     <string name="note_editor_insert_cloze_no_cloze_note_type">Cloze deletions will only work on a Cloze note type</string>
+     <string name="saving_facts">Saving note</string>
+@@ -118,7 +146,6 @@
+ 
+     <string name="info_rate">Rate AnkiDroid</string>
+     <string name="import_title">Importing</string>
+-    <string name="import_preparing_file">Preparing file for import&#8230;</string>
+     <string name="import_message_add" comment="Adding a new deck to the collection (import)">Add</string>
+     <string name="import_message_replace_confirm">This will delete your existing collection and replace it with the data of file %s</string>
+     <string name="import_dialog_message_add">Add “%s” to collection? This may take a long time</string>
+@@ -132,7 +159,7 @@
+     <string name="import_interrupted">Import interrupted: AnkiDroid was closed</string>
+     <string name="export_preparation_in_progress">Preparing export…</string>
+     <string name="export_ready_title">Export ready</string>
+-    <string name="export_send_no_handlers">No applications available to handle apkg. Saving…</string>
++    <string name="export_send_no_handlers">No applications available to handle apkg. Saving...</string>
+     <string name="export_save_apkg_successful">Successfully saved Anki package</string>
+     <string name="export_save_apkg_unsuccessful">Save Anki package failed</string>
+     <string name="export_share_title">Send Anki package using</string>
+@@ -149,7 +176,6 @@
+     </string>
+     <string name="export_choice_share">Share</string>
+     <string name="export_choice_save_to">Save to</string>
+-    <string name="export_saving_exported_collection">Saving exported file&#8230;</string>
+     <string name="study_options" comment="Name for a preference category in Filtered deck (aka Cram deck, aka Custom study) options">Options</string>
+     <string name="menu__deck_options">Deck options</string>
+     <string name="menu__study_options" comment="Menu item that opens options for a Filtered deck (aka Cram deck, aka Custom study)">Study options</string>
+@@ -240,9 +266,7 @@
+     <string name="toolbar_item_explain_edit_or_remove">Enter HTML to be inserted before and after the selected text\n\nLong press a toolbar item to edit or remove it</string>
+     <string name="remove_toolbar_item">Remove Toolbar Item?</string>
+ 
+-    <string name="note_editor_image_too_large">The image is too large, please insert the image manually</string>
+-    <string name="note_editor_video_too_large">The video file is too large, please insert the video manually</string>
+-    <string name="note_editor_audio_too_large">The audio file is too large, please insert the audio manually</string>
++    <string name="note_editor_paste_too_large">The image is too large to paste, please insert the image manually</string>
+     <string name="ankidroid_cannot_open_after_backup_try_again"
+         comment="After an Android backup is restored, AnkiDroid opens and shows this message.
+         Opening AnkiDroid again will work correctly">
+@@ -320,7 +344,6 @@
+ 
+     <!-- Manage note types -->
+     <string name="field_editor_model_not_available">Failed to access collection. Please try again!</string>
+-    <string name="cd_manage_notetypes_add">Add a new note type</string>
+ 
+     <!-- App Intro -->
+     <string name="intro_ankidroid_tagline_one">Study less</string>
+@@ -413,20 +436,5 @@ opening the system text to speech settings fails">
+ 
+     <string name="card_browser_unavailable_when_notes_mode">Unavailable in ‘Notes’ mode</string>
+ 
+-    <plurals name="unbury_cards_feedback">
+-        <item quantity="one">%d card unburied</item>
+-        <item quantity="other">%d cards unburied</item>
+-    </plurals>
+-
+     <string name="card_template_reposition_template" comment="move a card template to a new position">Reposition</string>
+-
+-    <string name="start_recording">Record</string>
+-    <string name="stop_recording">Stop</string>
+-    <string name="play_recording">Play</string>
+-    <string name="next_recording">Next</string>
+-
+-    <!--  AlertDialog in the deleteCardTemplate  -->
+-    <string name="orphan_note_title">Cannot Delete Card Type</string>
+-    <string name="orphan_note_message">Deleting this card type will leave some notes without any cards.</string>
+-
+ </resources>
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 2f64680e40..f8202bcc26 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -17,4 +17,4 @@ dependencyResolutionManagement {
+     }
+ }
+ 
+-include(":lint-rules", ":api", ":AnkiDroid", ":testlib", ":common")
+\ No newline at end of file
++include(":lint-rules", ":api", ":AnkiDroid", ":testlib", ":common")

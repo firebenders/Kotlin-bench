@@ -1,0 +1,243 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index b44f38d88b..663f10abe4 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.6'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -226,12 +225,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -246,12 +245,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -361,7 +354,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+index 7fbc60b4f1..ac34c1064f 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+@@ -544,7 +544,7 @@ open class CardBrowser :
+                 // click on whole cell triggers select
+                 val cb = view!!.findViewById<CheckBox>(R.id.card_checkbox)
+                 cb.toggle()
+-                viewModel.selectRowAtPosition(position)
++                viewModel.toggleRowSelectionAtPosition(position)
+             } else {
+                 // load up the card selected on the list
+                 val clickedCardId = viewModel.getCardIdAtPosition(position)
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {
+
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserSelectionToggleTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserSelectionToggleTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserSelectionToggleTest.kt
+@@ -0,0 +1,142 @@
++/*
++ *  Copyright (c) 2026 AnkiDroid Team <ankidroid@gmail.com>
++ *
++ *  This program is free software; you can redistribute it and/or modify it under
++ *  the terms of the GNU General Public License as published by the Free Software
++ *  Foundation; either version 3 of the License, or (at your option) any later
++ *  version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT ANY
++ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
++ *  PARTICULAR PURPOSE. See the GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along with
++ *  this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++package com.ichi2.anki
++
++import androidx.test.ext.junit.runners.AndroidJUnit4
++import com.ichi2.anki.browser.CardBrowserViewModel
++import com.ichi2.anki.model.CardsOrNotes
++import com.ichi2.anki.preferences.SharedPreferencesProvider
++import com.ichi2.testutils.getSharedPrefs
++import org.hamcrest.MatcherAssert.assertThat
++import org.hamcrest.Matchers.equalTo
++import org.hamcrest.Matchers.hasSize
++import org.junit.Test
++import org.junit.runner.RunWith
++
++@RunWith(AndroidJUnit4::class)
++class CardBrowserSelectionToggleTest : RobolectricTest() {
++    
++    /**
++     * Test for the fix of issue: Card remains selected even after unselecting it
++     * 
++     * This test verifies that toggleRowSelectionAtPosition properly toggles
++     * the selection state - selecting when unselected and unselecting when selected.
++     */
++    @Test
++    fun toggleRowSelectionAtPosition_togglesSelectionCorrectly() {
++        val viewModel = createViewModel()
++        val cards = createTestCards(3)
++        viewModel.cards.replaceWith(cards)
++        
++        // Initially, no cards should be selected
++        assertThat(viewModel.selectedRowCount(), equalTo(0))
++        
++        // Select card at position 0
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat(viewModel.selectedRowCount(), equalTo(1))
++        assertThat(viewModel.selectedCardIds, hasSize(1))
++        assertThat(viewModel.selectedCardIds[0], equalTo(cards[0].id))
++        
++        // Select card at position 1
++        viewModel.toggleRowSelectionAtPosition(1)
++        assertThat(viewModel.selectedRowCount(), equalTo(2))
++        assertThat(viewModel.selectedCardIds, hasSize(2))
++        
++        // Toggle (unselect) card at position 0 - this is the key test
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat("Card at position 0 should be unselected", viewModel.selectedRowCount(), equalTo(1))
++        assertThat(viewModel.selectedCardIds, hasSize(1))
++        assertThat("Only card at position 1 should remain selected", viewModel.selectedCardIds[0], equalTo(cards[1].id))
++        
++        // Toggle (unselect) card at position 1
++        viewModel.toggleRowSelectionAtPosition(1)
++        assertThat("All cards should be unselected", viewModel.selectedRowCount(), equalTo(0))
++    }
++    
++    /**
++     * Test that multiple toggle operations work correctly
++     */
++    @Test
++    fun toggleRowSelectionAtPosition_multipleTogglesCycle() {
++        val viewModel = createViewModel()
++        val cards = createTestCards(1)
++        viewModel.cards.replaceWith(cards)
++        
++        // Initially unselected
++        assertThat(viewModel.selectedRowCount(), equalTo(0))
++        
++        // First toggle - should select
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat(viewModel.selectedRowCount(), equalTo(1))
++        
++        // Second toggle - should unselect
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat(viewModel.selectedRowCount(), equalTo(0))
++        
++        // Third toggle - should select again
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat(viewModel.selectedRowCount(), equalTo(1))
++        
++        // Fourth toggle - should unselect again
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat(viewModel.selectedRowCount(), equalTo(0))
++    }
++    
++    /**
++     * Test the scenario described in the bug report:
++     * Select a card, then select another card and unselect the first one.
++     */
++    @Test
++    fun toggleRowSelectionAtPosition_bugReportScenario() {
++        val viewModel = createViewModel()
++        val cards = createTestCards(3)
++        viewModel.cards.replaceWith(cards)
++        
++        // Step 1: Select first card
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat("First card should be selected", viewModel.selectedRowCount(), equalTo(1))
++        
++        // Step 2: Select second card
++        viewModel.toggleRowSelectionAtPosition(1)
++        assertThat("Both cards should be selected", viewModel.selectedRowCount(), equalTo(2))
++        
++        // Step 3: Unselect first card (the bug was that it remained selected)
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat("Only second card should be selected", viewModel.selectedRowCount(), equalTo(1))
++        assertThat(viewModel.selectedCardIds[0], equalTo(cards[1].id))
++    }
++    
++    private fun createViewModel(): CardBrowserViewModel {
++        val preferencesProvider = object : SharedPreferencesProvider {
++            override fun sharedPrefs() = getSharedPrefs()
++        }
++        return CardBrowserViewModel(preferencesProvider)
++    }
++    
++    private fun createTestCards(count: Int): MutableList<CardBrowser.CardCache> {
++        val cards = mutableListOf<CardBrowser.CardCache>()
++        for (i in 0 until count) {
++            cards.add(CardBrowser.CardCache(
++                id = i.toLong(),
++                col = col,
++                position = i,
++                cardsOrNotes = CardsOrNotes.CARDS
++            ))
++        }
++        return cards
++    }
++}
++

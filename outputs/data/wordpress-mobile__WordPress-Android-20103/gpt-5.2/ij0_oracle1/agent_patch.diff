@@ -1,0 +1,159 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefs.java b/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefs.java
+index bfb0ae37d01..b109db060fd 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefs.java
++++ b/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefs.java
+@@ -153,6 +153,10 @@ public class AppPrefs {
+         // Used to delete recommended tags saved as followed tags in tbl_tags
+         // Need to be done just once for a logged out user
+         READER_RECOMMENDED_TAGS_DELETED_FOR_LOGGED_OUT_USER,
++
++        // Whether the user has completed the Discover onboarding flow (Choose your topics)
++        READER_DISCOVER_ONBOARDING_COMPLETED,
++
+         MANUAL_FEATURE_CONFIG,
+         SITE_JETPACK_CAPABILITIES,
+         REMOVED_QUICK_START_CARD_TYPE,
+@@ -1204,6 +1208,14 @@ public class AppPrefs {
+         setBoolean(DeletablePrefKey.READER_RECOMMENDED_TAGS_DELETED_FOR_LOGGED_OUT_USER, deleted);
+     }
+ 
++    public static boolean isReaderDiscoverOnboardingCompleted() {
++        return getBoolean(DeletablePrefKey.READER_DISCOVER_ONBOARDING_COMPLETED, false);
++    }
++
++    public static void setReaderDiscoverOnboardingCompleted(boolean completed) {
++        setBoolean(DeletablePrefKey.READER_DISCOVER_ONBOARDING_COMPLETED, completed);
++    }
++
+     public static void setShouldShowStoriesIntro(boolean shouldShow) {
+         setBoolean(UndeletablePrefKey.SHOULD_SHOW_STORIES_INTRO, shouldShow);
+     }
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefsWrapper.kt b/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefsWrapper.kt
+index 10b8ef20cd0..3d53c7ddb5f 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefsWrapper.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefsWrapper.kt
+@@ -97,6 +97,10 @@ class AppPrefsWrapper @Inject constructor() {
+     fun getReaderCardsRefreshCounter() = AppPrefs.getReaderCardsRefreshCounter()
+     fun incrementReaderCardsRefreshCounter() = AppPrefs.incrementReaderCardsRefreshCounter()
+ 
++    fun isReaderDiscoverOnboardingCompleted(): Boolean = AppPrefs.isReaderDiscoverOnboardingCompleted()
++    fun setReaderDiscoverOnboardingCompleted(completed: Boolean) =
++        AppPrefs.setReaderDiscoverOnboardingCompleted(completed)
++
+     fun getAppWidgetColor(appWidgetId: Int): Color? {
+         return when (AppPrefs.getStatsWidgetColorModeId(appWidgetId)) {
+             LIGHT_MODE_ID -> LIGHT
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt
+index c9b02681ea8..7e3f11217b4 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt
+@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineDispatcher
+ import org.wordpress.android.R
+ import org.wordpress.android.analytics.AnalyticsTracker
+ import org.wordpress.android.models.ReaderPost
++import org.wordpress.android.models.ReaderTagList
+ import org.wordpress.android.models.ReaderTagType.FOLLOWED
+ import org.wordpress.android.models.discover.ReaderDiscoverCard.InterestsYouMayLikeCard
+ import org.wordpress.android.models.discover.ReaderDiscoverCard.ReaderPostCard
+@@ -27,6 +28,7 @@ import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowReade
+ import org.wordpress.android.ui.reader.discover.ReaderNavigationEvents.ShowSitePickerForResult
+ import org.wordpress.android.ui.reader.reblog.ReblogUseCase
+ import org.wordpress.android.ui.reader.repository.ReaderDiscoverCommunication
++import org.wordpress.android.ui.prefs.AppPrefsWrapper
+ import org.wordpress.android.ui.reader.repository.ReaderDiscoverCommunication.Error
+ import org.wordpress.android.ui.reader.repository.ReaderDiscoverCommunication.Started
+ import org.wordpress.android.ui.reader.repository.ReaderDiscoverCommunication.Success
+@@ -50,6 +52,8 @@ const val INITIATE_LOAD_MORE_OFFSET = 3
+ const val PHOTON_WIDTH_QUALITY_RATION = 0.5 // load images in 1/2 screen width to save users' data
+ const val FEATURED_IMAGE_HEIGHT_WIDTH_RATION = 0.56 // 9:16
+ 
++private const val BLOGGING_PROMPTS_TAG_SLUG = "dailyprompt"
++
+ class ReaderDiscoverViewModel @Inject constructor(
+     private val postUiStateBuilder: ReaderPostUiStateBuilder,
+     private val readerPostMoreButtonUiStateBuilder: ReaderPostMoreButtonUiStateBuilder,
+@@ -58,6 +62,7 @@ class ReaderDiscoverViewModel @Inject constructor(
+     private val reblogUseCase: ReblogUseCase,
+     private val readerUtilsWrapper: ReaderUtilsWrapper,
+     private val readerTracker: ReaderTracker,
++    private val appPrefsWrapper: AppPrefsWrapper,
+     displayUtilsWrapper: DisplayUtilsWrapper,
+     private val getFollowedTagsUseCase: GetFollowedTagsUseCase,
+     private val readerImprovementsFeatureConfig: ReaderImprovementsFeatureConfig,
+@@ -149,7 +154,7 @@ class ReaderDiscoverViewModel @Inject constructor(
+         _uiState.addSource(readerDiscoverDataProvider.discoverFeed) { posts ->
+             launch {
+                 val userTags = getFollowedTagsUseCase.get()
+-                if (userTags.isEmpty()) {
++                if (shouldShowDiscoverOnboarding(userTags)) {
+                     _uiState.value = DiscoverUiState.EmptyUiState.ShowNoFollowedTagsUiState {
+                         parentViewModel.onShowReaderInterests()
+                     }
+@@ -174,6 +179,18 @@ class ReaderDiscoverViewModel @Inject constructor(
+         }
+     }
+ 
++    private fun shouldShowDiscoverOnboarding(userTags: ReaderTagList): Boolean {
++        // Keep existing behavior for a truly empty tag list.
++        if (userTags.isEmpty()) return true
++
++        // New accounts are auto-subscribed to Blogging Prompts ("dailyprompt"). Treat that as "no tags" until the
++        // user completes Discover onboarding.
++        val hasNonDefaultTags = userTags.any { !it.tagSlug.equals(BLOGGING_PROMPTS_TAG_SLUG, ignoreCase = true) }
++        if (hasNonDefaultTags) return false
++
++        return !appPrefsWrapper.isReaderDiscoverOnboardingCompleted()
++    }
++
+     private fun observeFollowStatus() {
+         // listen to changes on follow status for updating the reader recommended blogs state immediately
+         _uiState.addSource(readerPostCardActionsHandler.followStatusUpdated) { data ->
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt
+index fc06dca994c..e7d7d9cbe2d 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt
+@@ -12,6 +12,7 @@ import org.wordpress.android.analytics.AnalyticsTracker
+ import org.wordpress.android.models.ReaderTag
+ import org.wordpress.android.models.ReaderTagList
+ import org.wordpress.android.ui.pages.SnackbarMessageHolder
++import org.wordpress.android.ui.prefs.AppPrefsWrapper
+ import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsFragment.EntryPoint
+ import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewModel.DoneButtonUiState.DoneButtonDisabledUiState
+ import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewModel.DoneButtonUiState.DoneButtonEnabledUiState
+@@ -28,9 +29,12 @@ import org.wordpress.android.ui.utils.UiString.UiStringRes
+ import org.wordpress.android.viewmodel.Event
+ import javax.inject.Inject
+ 
++private const val BLOGGING_PROMPTS_TAG_SLUG = "dailyprompt"
++
+ class ReaderInterestsViewModel @Inject constructor(
+     private val readerTagRepository: ReaderTagRepository,
+-    private val readerTracker: ReaderTracker
++    private val readerTracker: ReaderTracker,
++    private val appPrefsWrapper: AppPrefsWrapper,
+ ) : ViewModel() {
+     private var isStarted = false
+     private lateinit var currentLanguage: String
+@@ -92,7 +96,12 @@ class ReaderInterestsViewModel @Inject constructor(
+     }
+ 
+     private fun checkAndLoadInterests(userTags: ReaderTagList) {
+-        if (userTags.isEmpty()) {
++        val shouldLoad = userTags.isEmpty() || (
++            userTags.all { it.tagSlug.equals(BLOGGING_PROMPTS_TAG_SLUG, ignoreCase = true) } &&
++                !appPrefsWrapper.isReaderDiscoverOnboardingCompleted()
++            )
++
++        if (shouldLoad) {
+             loadInterests(userTags)
+         } else {
+             parentViewModel?.onCloseReaderInterests()
+@@ -186,6 +195,8 @@ class ReaderInterestsViewModel @Inject constructor(
+             readerTagRepository.clearTagLastUpdated(ReaderTag.createDiscoverPostCardsTag())
+             when (val result = readerTagRepository.saveInterests(contentUiState.getSelectedInterests())) {
+                 is ReaderRepositoryCommunication.Success -> {
++                    // Mark Discover onboarding as completed once the user successfully saves their selected interests.
++                    appPrefsWrapper.setReaderDiscoverOnboardingCompleted(true)
+                     when (entryPoint) {
+                         EntryPoint.DISCOVER -> parentViewModel?.onCloseReaderInterests()
+                         EntryPoint.SETTINGS -> _closeReaderInterests.value = Event(Unit)

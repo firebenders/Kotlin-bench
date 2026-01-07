@@ -1,0 +1,106 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
+index 167cc132..20ca41d5 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
+@@ -142,15 +142,10 @@ public class WrappingRule :
+                     node.firstChildLeafOrSelf().elementType != EOL_COMMENT
+                 }
+                 maxLineLength > 0 -> {
+-                    val startOfLine = node.prevLeaf { it.isWhiteSpaceWithNewline() }
+-                    val endOfLine = node.nextLeaf { it.isWhiteSpaceWithNewline() }
+-                    val line =
+-                        startOfLine
+-                            ?.leaves()
+-                            ?.takeWhile { it != endOfLine }
+-                            ?.joinToString(separator = "", prefix = startOfLine.text.removePrefix("\n")) { it.text }
+-                            .orEmpty()
+-                    line.length > maxLineLength
++                    // Determine the length of the actual line in the source file. Do not derive this from leaf tokens as
++                    // newlines can be embedded in literal tokens (e.g. raw strings) which would otherwise result in
++                    // measuring multiple physical lines at once.
++                    startOfBlock.lineLengthInContainingFile() > maxLineLength
+                 }
+                 else -> false
+             }
+@@ -497,8 +492,27 @@ public class WrappingRule :
+         }
+     }
+ 
++    private fun ASTNode.lineLengthInContainingFile(): Int {
++        val fileText = psi?.containingFile?.text ?: return 0
++        if (fileText.isEmpty()) {
++            return 0
++        }
++
++        val offset = startOffset.coerceIn(0, fileText.length)
++        val startOfLine =
++            fileText
++                .lastIndexOf('\n', offset - 1)
++                .let { if (it == -1) 0 else it + 1 }
++        val endOfLine =
++            fileText
++                .indexOf('\n', offset)
++                .let { if (it == -1) fileText.length else it }
++
++        return (endOfLine - startOfLine).coerceAtLeast(0)
++    }
++
+     private fun KtStringTemplateExpression.isMultiLine(): Boolean {
+-        for (child in node.children()) {
++for (child in node.children()) {
+             if (child.elementType == LITERAL_STRING_TEMPLATE_ENTRY) {
+                 val v = child.text
+                 if (v == "\n") {
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleRawStringTemplateFalsePositiveTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleRawStringTemplateFalsePositiveTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleRawStringTemplateFalsePositiveTest.kt
+@@ -0,0 +1,39 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.MULTILINE_STRING_QUOTE
++import org.junit.jupiter.api.Test
++
++internal class WrappingRuleRawStringTemplateFalsePositiveTest {
++    private val wrappingRuleAssertThat = assertThatRule { WrappingRule() }
++
++    @Test
++    fun `Given a raw string containing a string template expression with a single line lambda then do not report missing newline after lambda brace when another line in the raw string exceeds max line length`() {
++        val code =
++            """
++            package test
++
++            class QueryGenerator {
++                fun getQueryString(query: QueryRequest): String {
++                    val q = $MULTILINE_STRING_QUOTE
++                        SELECT *
++                        FROM table_name_long_enough_so_max_line_length_is_met_and_wrapping_rule_is_violated_and_generates_an_error
++                        WHERE 1 = 1
++                        ${"$"}{query.gameId?.let { "AND id = ?" } ?: ""}
++                    $MULTILINE_STRING_QUOTE
++                    return q
++                }
++            }
++
++            data class QueryRequest(
++                val gameId: String?,
++            )
++            """.trimIndent()
++
++        wrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 160)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

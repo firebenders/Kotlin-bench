@@ -1,0 +1,197 @@
+diff --git a/core/commonJs/src/Instant.kt b/core/commonJs/src/Instant.kt
+index cfbd3da..e367b2b 100644
+--- a/core/commonJs/src/Instant.kt
++++ b/core/commonJs/src/Instant.kt
+@@ -7,7 +7,6 @@ package kotlinx.datetime
+ 
+ import kotlinx.datetime.format.*
+ import kotlinx.datetime.internal.JSJoda.Instant as jtInstant
+-import kotlinx.datetime.internal.JSJoda.OffsetDateTime as jtOffsetDateTime
+ import kotlinx.datetime.internal.JSJoda.Duration as jtDuration
+ import kotlinx.datetime.internal.JSJoda.Clock as jtClock
+ import kotlinx.datetime.internal.JSJoda.ChronoUnit as jtChronoUnit
+@@ -74,36 +73,15 @@ public actual class Instant internal constructor(internal val value: jtInstant)
+             if (epochMilliseconds > 0) MAX else MIN
+         }
+ 
+-        public actual fun parse(input: CharSequence, format: DateTimeFormat<DateTimeComponents>): Instant =
+-            if (format === DateTimeComponents.Formats.ISO_DATE_TIME_OFFSET) {
+-                try {
+-                    Instant(jsTry { jtOffsetDateTime.parse(fixOffsetRepresentation(input.toString())) }.toInstant())
+-                } catch (e: Throwable) {
+-                    if (e.isJodaDateTimeParseException()) throw DateTimeFormatException(e)
+-                    throw e
+-                }
+-            } else {
+-                try {
+-                    format.parse(input).toInstantUsingOffset()
+-                } catch (e: IllegalArgumentException) {
+-                    throw DateTimeFormatException("Failed to parse an instant from '$input'", e)
+-                }
+-            }
++        public actual fun parse(input: CharSequence, format: DateTimeFormat<DateTimeComponents>): Instant = try {
++            format.parse(input).toInstantUsingOffset()
++        } catch (e: IllegalArgumentException) {
++            throw DateTimeFormatException("Failed to parse an instant from '$input'", e)
++        }
+ 
+         @Deprecated("This overload is only kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+         public fun parse(isoString: String): Instant = parse(input = isoString)
+ 
+-        /** A workaround for the string representations of Instant that have an offset of the form
+-         * "+XX" not being recognized by [jtOffsetDateTime.parse], while "+XX:XX" work fine. */
+-        private fun fixOffsetRepresentation(isoString: String): String {
+-            val time = isoString.indexOf('T', ignoreCase = true)
+-            if (time == -1) return isoString // the string is malformed
+-            val offset = isoString.indexOfLast { c -> c == '+' || c == '-' }
+-            if (offset < time) return isoString // the offset is 'Z' and not +/- something else
+-            val separator = isoString.indexOf(':', offset) // if there is a ':' in the offset, no changes needed
+-            return if (separator != -1) isoString else "$isoString:00"
+-        }
+-
+         public actual fun fromEpochSeconds(epochSeconds: Long, nanosecondAdjustment: Long): Instant = try {
+             /* Performing normalization here because otherwise this fails:
+                assertEquals((Long.MAX_VALUE % 1_000_000_000).toInt(),
+diff --git a/core/jvm/src/Instant.kt b/core/jvm/src/Instant.kt
+index 24dfcbe..85108fd 100644
+--- a/core/jvm/src/Instant.kt
++++ b/core/jvm/src/Instant.kt
+@@ -12,13 +12,11 @@ import kotlinx.datetime.internal.*
+ import kotlinx.datetime.serializers.InstantIso8601Serializer
+ import kotlinx.serialization.Serializable
+ import java.time.DateTimeException
+-import java.time.format.DateTimeParseException
+ import java.time.temporal.ChronoUnit
+ import kotlin.time.*
+ import kotlin.time.Duration.Companion.nanoseconds
+ import kotlin.time.Duration.Companion.seconds
+ import java.time.Instant as jtInstant
+-import java.time.OffsetDateTime as jtOffsetDateTime
+ import java.time.Clock as jtClock
+ 
+ @Serializable(with = InstantIso8601Serializer::class)
+@@ -67,35 +65,15 @@ public actual class Instant internal constructor(internal val value: jtInstant)
+         public actual fun fromEpochMilliseconds(epochMilliseconds: Long): Instant =
+                 Instant(jtInstant.ofEpochMilli(epochMilliseconds))
+ 
+-        public actual fun parse(input: CharSequence, format: DateTimeFormat<DateTimeComponents>): Instant =
+-            if (format === DateTimeComponents.Formats.ISO_DATE_TIME_OFFSET) {
+-                try {
+-                    Instant(jtOffsetDateTime.parse(fixOffsetRepresentation(input)).toInstant())
+-                } catch (e: DateTimeParseException) {
+-                    throw DateTimeFormatException(e)
+-                }
+-            } else {
+-                try {
+-                    format.parse(input).toInstantUsingOffset()
+-                } catch (e: IllegalArgumentException) {
+-                    throw DateTimeFormatException("Failed to parse an instant from '$input'", e)
+-                }
+-            }
++        public actual fun parse(input: CharSequence, format: DateTimeFormat<DateTimeComponents>): Instant = try {
++            format.parse(input).toInstantUsingOffset()
++        } catch (e: IllegalArgumentException) {
++            throw DateTimeFormatException("Failed to parse an instant from '$input'", e)
++        }
+ 
+         @Deprecated("This overload is only kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+         public fun parse(isoString: String): Instant = parse(input = isoString)
+ 
+-        /** A workaround for a quirk of the JDKs older than 11 where the string representations of Instant that have an
+-         * offset of the form "+XX" are not recognized by [jtOffsetDateTime.parse], while "+XX:XX" work fine. */
+-        private fun fixOffsetRepresentation(isoString: CharSequence): CharSequence {
+-            val time = isoString.indexOf('T', ignoreCase = true)
+-            if (time == -1) return isoString // the string is malformed
+-            val offset = isoString.indexOfLast { c -> c == '+' || c == '-' }
+-            if (offset < time) return isoString // the offset is 'Z' and not +/- something else
+-            val separator = isoString.indexOf(':', offset) // if there is a ':' in the offset, no changes needed
+-            return if (separator != -1) isoString else "$isoString:00"
+-        }
+-
+         public actual fun fromEpochSeconds(epochSeconds: Long, nanosecondAdjustment: Long): Instant = try {
+             Instant(jtInstant.ofEpochSecond(epochSeconds, nanosecondAdjustment))
+         } catch (e: Exception) {
+
+diff --git a/core/common/test/InstantParsingConsistencyTest.kt b/core/common/test/InstantParsingConsistencyTest.kt
+new file mode 100644
+--- /dev/null
++++ b/core/common/test/InstantParsingConsistencyTest.kt
+@@ -0,0 +1,78 @@
++/*
++ * Copyright 2019-2024 JetBrains s.r.o. and contributors.
++ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
++ */
++
++package kotlinx.datetime.test
++
++import kotlinx.datetime.*
++import kotlinx.datetime.format.*
++import kotlin.test.*
++
++/**
++ * Tests that verify consistent parsing behavior across all platforms.
++ * 
++ * This addresses the issue where JVM and JS would allow omitting seconds when parsing
++ * with ISO_DATE_TIME_OFFSET (e.g., "2024-03-19T17:50Z"), while Native would fail.
++ * Per the documentation, specifying seconds is NOT optional, so all platforms
++ * should consistently reject such strings.
++ */
++class InstantParsingConsistencyTest {
++
++    @Test
++    fun testParseWithSecondsSucceeds() {
++        // Parsing with seconds should succeed on all platforms
++        val instant = Instant.parse("2024-03-19T17:50:00Z")
++        val expected = LocalDateTime(2024, 3, 19, 17, 50, 0).toInstant(TimeZone.UTC)
++        assertEquals(expected, instant)
++    }
++
++    @Test
++    fun testParseWithSecondsAndFractionSucceeds() {
++        // Parsing with seconds and fraction should succeed
++        val instant = Instant.parse("2024-03-19T17:50:30.123Z")
++        val expected = LocalDateTime(2024, 3, 19, 17, 50, 30, 123000000).toInstant(TimeZone.UTC)
++        assertEquals(expected, instant)
++    }
++
++    @Test
++    fun testParseWithoutSecondsFails() {
++        // Per ISO_DATE_TIME_OFFSET documentation: "specifying the seconds is *not* optional"
++        // This should fail consistently on all platforms
++        assertFailsWith<DateTimeFormatException> {
++            Instant.parse("2024-03-19T17:50Z")
++        }
++    }
++
++    @Test
++    fun testParseWithOffset() {
++        // Parsing with various offsets should work
++        val instant1 = Instant.parse("2024-03-19T17:50:00+00:00")
++        val instant2 = Instant.parse("2024-03-19T17:50:00Z")
++        assertEquals(instant1, instant2)
++
++        val instant3 = Instant.parse("2024-03-19T18:50:00+01:00")
++        assertEquals(instant1, instant3)
++
++        // Offset without minutes (per documentation: "specifying the minutes is optional")
++        val instant4 = Instant.parse("2024-03-19T18:50:00+01")
++        assertEquals(instant1, instant4)
++    }
++
++    @Test
++    fun testParseWithLowercaseT() {
++        // Lowercase 't' should be accepted
++        val instant1 = Instant.parse("2024-03-19T17:50:00Z")
++        val instant2 = Instant.parse("2024-03-19t17:50:00Z")
++        assertEquals(instant1, instant2)
++    }
++
++    @Test
++    fun testParseWithLowercaseZ() {
++        // Lowercase 'z' should be accepted
++        val instant1 = Instant.parse("2024-03-19T17:50:00Z")
++        val instant2 = Instant.parse("2024-03-19T17:50:00z")
++        assertEquals(instant1, instant2)
++    }
++}
++

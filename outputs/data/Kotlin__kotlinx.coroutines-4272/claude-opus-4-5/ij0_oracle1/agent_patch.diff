@@ -1,0 +1,130 @@
+diff --git a/kotlinx-coroutines-core/common/src/CoroutineStart.kt b/kotlinx-coroutines-core/common/src/CoroutineStart.kt
+index c4c4cea72..ce9b65e91 100644
+--- a/kotlinx-coroutines-core/common/src/CoroutineStart.kt
++++ b/kotlinx-coroutines-core/common/src/CoroutineStart.kt
+@@ -346,7 +346,7 @@ public enum class CoroutineStart {
+      * Starts the corresponding block with receiver as a coroutine with this coroutine start strategy.
+      *
+      * - [DEFAULT] uses [startCoroutineCancellable].
+-     * - [ATOMIC] uses [startCoroutine].
++     * - [ATOMIC] uses [startCoroutineAtomic].
+      * - [UNDISPATCHED] uses [startCoroutineUndispatched].
+      * - [LAZY] does nothing.
+      *
+@@ -356,7 +356,7 @@ public enum class CoroutineStart {
+     public operator fun <R, T> invoke(block: suspend R.() -> T, receiver: R, completion: Continuation<T>): Unit =
+         when (this) {
+             DEFAULT -> block.startCoroutineCancellable(receiver, completion)
+-            ATOMIC -> block.startCoroutine(receiver, completion)
++            ATOMIC -> block.startCoroutineAtomic(receiver, completion)
+             UNDISPATCHED -> block.startCoroutineUndispatched(receiver, completion)
+             LAZY -> Unit // will start lazily
+         }
+diff --git a/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt b/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
+index 1e87d767a..39803dfc7 100644
+--- a/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
++++ b/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
+@@ -35,13 +35,24 @@ internal fun Continuation<Unit>.startCoroutineCancellable(fatalCompletion: Conti
+         intercepted().resumeCancellableWith(Result.success(Unit))
+     }
+ 
++/**
++ * Use this function to start coroutine atomically (in a non-cancellable way).
++ * Similar to [startCoroutine] from the standard library, but handles [DispatchException]
++ * properly by resuming completion with an exception if dispatcher throws.
++ */
++internal fun <R, T> (suspend (R) -> T).startCoroutineAtomic(
++    receiver: R, completion: Continuation<T>,
++) = runSafely(completion) {
++    createCoroutineUnintercepted(receiver, completion).intercepted().resume(Unit)
++}
++
+ /**
+  * Runs given block and completes completion with its exception if it occurs.
+  * Rationale: [startCoroutineCancellable] is invoked when we are about to run coroutine asynchronously in its own dispatcher.
+  * Thus if dispatcher throws an exception during coroutine start, coroutine never completes, so we should treat dispatcher exception
+  * as its cause and resume completion.
+  */
+-private inline fun runSafely(completion: Continuation<*>, block: () -> Unit) {
++internal inline fun runSafely(completion: Continuation<*>, block: () -> Unit) {
+     try {
+         block()
+     } catch (e: Throwable) {
+
+diff --git a/kotlinx-coroutines-core/jvm/test/flow/FlowOnDispatcherExceptionTest.kt b/kotlinx-coroutines-core/jvm/test/flow/FlowOnDispatcherExceptionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/flow/FlowOnDispatcherExceptionTest.kt
+@@ -0,0 +1,72 @@
++package kotlinx.coroutines.flow
++
++import kotlinx.coroutines.*
++import kotlinx.coroutines.testing.*
++import org.junit.Test
++import kotlin.coroutines.*
++import kotlin.test.*
++
++class FlowOnDispatcherExceptionTest : TestBase() {
++
++    /**
++     * Tests that flowOn with a throwing dispatcher properly propagates the exception
++     * instead of hanging. This is a regression test for
++     * https://github.com/JetBrains/compose-multiplatform/issues/4835
++     */
++    @Test
++    fun testFlowOnWithThrowingDispatcher() = runTest {
++        val exception = assertFailsWith<IllegalStateException> {
++            flowOf(1, 2, 3)
++                .flowOn(ThrowingDispatcher)
++                .collect {
++                    expectUnreached()
++                }
++        }
++        assertEquals("Dispatcher throws", exception.message)
++    }
++
++    /**
++     * Tests that flowOn with buffer and a throwing dispatcher properly propagates the exception.
++     */
++    @Test
++    fun testFlowOnBufferedWithThrowingDispatcher() = runTest {
++        val exception = assertFailsWith<IllegalStateException> {
++            flowOf(1, 2, 3)
++                .buffer()
++                .flowOn(ThrowingDispatcher)
++                .collect {
++                    expectUnreached()
++                }
++        }
++        assertEquals("Dispatcher throws", exception.message)
++    }
++
++    /**
++     * Tests channelFlow with a throwing dispatcher.
++     */
++    @Test
++    fun testChannelFlowWithThrowingDispatcher() = runTest {
++        val exception = assertFailsWith<IllegalStateException> {
++            channelFlow {
++                send(1)
++            }
++                .flowOn(ThrowingDispatcher)
++                .collect {
++                    expectUnreached()
++                }
++        }
++        assertEquals("Dispatcher throws", exception.message)
++    }
++
++    /**
++     * A dispatcher that always throws when dispatch is called.
++     * This simulates the case when Dispatchers.Main.immediate is used
++     * but Main dispatcher is not available in the classpath.
++     */
++    private object ThrowingDispatcher : CoroutineDispatcher() {
++        override fun dispatch(context: CoroutineContext, block: Runnable) {
++            throw IllegalStateException("Dispatcher throws")
++        }
++    }
++}
++

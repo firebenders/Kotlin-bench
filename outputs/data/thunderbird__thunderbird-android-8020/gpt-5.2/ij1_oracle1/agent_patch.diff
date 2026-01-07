@@ -1,0 +1,110 @@
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+index a14cb14bdb..21b8545e0b 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+@@ -18,11 +18,72 @@ internal class UserInputEmailAddressParser {
+                 when {
+                     address.isIncomplete() -> null
+                     address.isNonAsciiAddress() -> throw NonAsciiEmailAddressException(address.address)
+-                    else -> Address.parse(address.toEncodedString()).firstOrNull()
++                    else -> address.toRfc5321AddressOrNull()
+                 }
+             }
+     }
+ 
++    private fun Address.toRfc5321AddressOrNull(): Address? {
++        val parsedAddress = Address.parse(toEncodedString()).firstOrNull() ?: return null
++        return parsedAddress.takeIf { it.isValidRfc5321Mailbox() }
++    }
++
++    private fun Address.isValidRfc5321Mailbox(): Boolean {
++        val mailbox = address
++        val atIndex = mailbox.lastIndexOf('@')
++
++        if (atIndex <= 0 || atIndex == mailbox.lastIndex) return false
++
++        val localPart = mailbox.substring(0, atIndex)
++        val domain = mailbox.substring(atIndex + 1)
++
++        if (localPart.isBlank() || domain.isBlank()) return false
++
++        // RFC 5321 mailbox should not contain whitespace or control characters.
++        if (mailbox.any { it <= '\u001F' || it == '\u007F' || it.isWhitespace() }) return false
++
++        return isValidRfc5321Domain(domain)
++    }
++
++    private fun isValidRfc5321Domain(domain: String): Boolean {
++        if (domain.length > 255) return false
++
++        if (domain.startsWith("[") && domain.endsWith("]")) {
++            return isValidAddressLiteral(domain)
++        }
++
++        if (domain.startsWith('.') || domain.endsWith('.')) return false
++
++        val labels = domain.split('.')
++        if (labels.any { it.isEmpty() }) return false
++
++        return labels.all { isValidDomainLabel(it) }
++    }
++
++    private fun isValidDomainLabel(label: String): Boolean {
++        if (label.length !in 1..63) return false
++        if (!label.first().isLetterOrDigit() || !label.last().isLetterOrDigit()) return false
++
++        for (c in label) {
++            if (!(c.isLetterOrDigit() || c == '-')) return false
++        }
++
++        return true
++    }
++
++    private fun isValidAddressLiteral(domainLiteral: String): Boolean {
++        // e.g. [127.0.0.1] or [IPv6:2001:db8::1]
++        val inner = domainLiteral.substring(1, domainLiteral.length - 1)
++
++        if (inner.isEmpty()) return false
++        if (inner.any { it <= '\u001F' || it == '\u007F' || it.isWhitespace() }) return false
++
++        // Reject obvious invalid characters for a domain literal.
++        if (inner.contains('/')) return false
++
++        return true
++    }
++
+     private fun Address.isIncomplete() = hostname.isNullOrBlank()
+ 
+     private fun Address.isNonAsciiAddress() = !CharsetUtil.isASCII(address)
+
+diff --git a/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserRfc5321ValidationTest.kt b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserRfc5321ValidationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserRfc5321ValidationTest.kt
+@@ -0,0 +1,26 @@
++package com.fsck.k9.view
++
++import assertk.assertThat
++import assertk.assertions.containsExactly
++import assertk.assertions.isEmpty
++import com.fsck.k9.mail.Address
++import kotlin.test.Test
++
++class UserInputEmailAddressParserRfc5321ValidationTest {
++    private val parser = UserInputEmailAddressParser()
++
++    @Test
++    fun `email address with trailing slash in domain is rejected`() {
++        val addresses = parser.parse("user@domain.example/")
++
++        assertThat(addresses).isEmpty()
++    }
++
++    @Test
++    fun `email address with slash in local part is accepted`() {
++        val addresses = parser.parse("user/name@domain.example")
++
++        assertThat(addresses).containsExactly(Address("user/name@domain.example"))
++    }
++}
++

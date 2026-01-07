@@ -1,0 +1,160 @@
+diff --git a/kotlinx-coroutines-core/jdk8/src/future/Future.kt b/kotlinx-coroutines-core/jdk8/src/future/Future.kt
+index 4d9a01ac7..aaa4fb77b 100644
+--- a/kotlinx-coroutines-core/jdk8/src/future/Future.kt
++++ b/kotlinx-coroutines-core/jdk8/src/future/Future.kt
+@@ -58,10 +58,7 @@ private class CompletableFutureCoroutine<T>(
+     }
+ 
+     override fun onCancelled(cause: Throwable, handled: Boolean) {
+-        if (!future.completeExceptionally(cause) && !handled) {
+-            // prevents loss of exception that was not handled by parent & could not be set to CompletableFuture
+-            handleCoroutineException(context, cause)
+-        }
++        future.completeExceptionally(cause)
+     }
+ }
+ 
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+diff --git a/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureTest.kt b/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureTest.kt
+index 372e79ef1..a0aa5f9e7 100644
+--- a/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureTest.kt
++++ b/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureTest.kt
+@@ -392,19 +392,17 @@ class FutureTest : TestBase() {
+     }
+ 
+     @Test
+-    fun testUnhandledExceptionOnExternalCompletion() = runTest(
+-        unhandled = listOf(
+-            { it -> it is TestException } // exception is unhandled because there is no parent
+-        )
+-    ) {
++    fun testUnhandledExceptionOnExternalCompletion() = runTest {
+         expect(1)
+         // No parent here (NonCancellable), so nowhere to propagate exception
++        // With the fix for #2712, exceptions are delivered via CompletableFuture only,
++        // not via global handler. If the future is already complete, the exception is silently ignored.
+         val result = future(NonCancellable + Dispatchers.Unconfined) {
+             try {
+                 delay(Long.MAX_VALUE)
+             } finally {
+                 expect(2)
+-                throw TestException() // this exception cannot be handled
++                throw TestException() // this exception is silently ignored since future is already complete
+             }
+         }
+         result.complete(Unit)
+
+diff --git a/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureCancellationExceptionTest.kt b/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureCancellationExceptionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureCancellationExceptionTest.kt
+@@ -0,0 +1,95 @@
++/*
++ * Copyright 2016-2021 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines.future
++
++import kotlinx.coroutines.*
++import org.junit.*
++import org.junit.Test
++import java.util.concurrent.*
++import java.util.concurrent.CancellationException as JavaCancellationException
++import kotlin.test.*
++
++class FutureCancellationExceptionTest : TestBase() {
++    
++    /**
++     * Test that future() does not trigger global exception handler when the future
++     * is cancelled externally and the coroutine throws an exception.
++     * See https://github.com/Kotlin/kotlinx.coroutines/issues/2712
++     */
++    @Test
++    fun testExternalCancellationDoesNotTriggerGlobalHandler() = runTest {
++        // This test reproduces the issue from #2712
++        val future = GlobalScope.future {
++            throw TestException("foo")
++        }
++        future.cancel(true) // Cancel externally
++        
++        // The future should be cancelled
++        try {
++            future.get()
++            fail("Expected CancellationException")
++        } catch (e: JavaCancellationException) {
++            // Expected - future was cancelled
++        }
++        
++        // Give time for coroutine to finish - should NOT trigger global handler
++        delay(200)
++    }
++    
++    /**
++     * Test that exceptions in future() are delivered via the CompletableFuture.
++     */
++    @Test
++    fun testExceptionDeliveredViaFuture() = runTest {
++        val future = GlobalScope.future<String> {
++            throw TestException("test")
++        }
++        
++        try {
++            future.get()
++            fail("Expected ExecutionException")
++        } catch (e: ExecutionException) {
++            assertTrue(e.cause is TestException)
++            assertEquals("test", e.cause?.message)
++        }
++    }
++    
++    /**
++     * Test that future() does not trigger global handler when future is already completed
++     * and coroutine encounters an exception.
++     */
++    @Test
++    fun testCompletedFutureDoesNotTriggerHandler() = runTest {
++        val latch = CountDownLatch(1)
++        val future = GlobalScope.future<String> {
++            latch.await() // Wait for external completion
++            throw TestException("This should not trigger global handler")
++        }
++        yield() // Let coroutine start
++        future.complete("external") // Complete externally
++        latch.countDown()
++        assertEquals("external", future.get())
++        delay(100) // Give time for coroutine to finish - should NOT trigger global handler
++    }
++    
++    /**
++     * Test that cancellation exception in future() cancels the CompletableFuture
++     * and does not trigger global handler.
++     */
++    @Test
++    fun testCancellationExceptionCancelsFuture() = runTest {
++        val future = GlobalScope.future {
++            throw kotlinx.coroutines.CancellationException("cancelled")
++        }
++        
++        try {
++            future.get()
++            fail("Expected CancellationException")
++        } catch (e: JavaCancellationException) {
++            // Future is cancelled when coroutine throws CancellationException
++        }
++    }
++}
++

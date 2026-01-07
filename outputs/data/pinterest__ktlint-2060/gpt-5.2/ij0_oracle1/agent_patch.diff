@@ -1,0 +1,146 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
+index ae7573bd..b49fc745 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
+@@ -94,7 +94,7 @@ public class ParameterListWrappingRule :
+             ?.findChildByType(VALUE_PARAMETER_LIST)
+             ?.takeIf { it.findChildByType(VALUE_PARAMETER) != null }
+             ?.takeUnless { it.textContains('\n') }
+-            ?.let {
++?.let {
+                 node
+                     .children()
+                     .forEach {
+@@ -126,7 +126,12 @@ public class ParameterListWrappingRule :
+             codeStyle != ktlint_official && isPartOfFunctionLiteralInNonKtlintOfficialCodeStyle() -> false
+             codeStyle == ktlint_official && isPartOfFunctionLiteralStartingOnSameLineAsClosingParenthesisOfPrecedingReferenceExpression() ->
+                 false
+-            isFunctionTypeWrappedInNullableType() -> false
++            // For nullable function types, prefer wrapping the nullable type instead of wrapping the parameters. Only wrap the
++            // parameters when they still exceed the max line length.
++            isFunctionTypeWrappedInNullableType() ->
++                textContains('\n') ||
++                    (codeStyle == ktlint_official && containsAnnotatedParameter()) ||
++                    exceedsMaxLineLengthWhenWrappedInNullableType()
+             textContains('\n') -> true
+             codeStyle == ktlint_official && containsAnnotatedParameter() -> true
+             exceedsMaxLineLength() -> true
+@@ -161,7 +166,13 @@ public class ParameterListWrappingRule :
+ 
+     private fun ASTNode.isFunctionTypeWrappedInNullableType(): Boolean {
+         require(elementType == VALUE_PARAMETER_LIST)
+-        return treeParent.elementType == FUNCTION_TYPE && treeParent?.treeParent?.elementType == NULLABLE_TYPE
++        val functionType = treeParent.takeIf { it.elementType == FUNCTION_TYPE } ?: return false
++        var parent = functionType.treeParent
++        // Kotlin represents explicit parentheses in types using a PARENTHESIZED node.
++        while (parent != null && parent.elementType == ElementType.PARENTHESIZED) {
++            parent = parent.treeParent
++        }
++        return parent?.elementType == NULLABLE_TYPE
+     }
+ 
+     private fun ASTNode.containsAnnotatedParameter(): Boolean {
+@@ -229,13 +240,17 @@ public class ParameterListWrappingRule :
+             LPAR -> {
+                 val prevLeaf = child.prevLeaf()
+                 if (prevLeaf is PsiWhiteSpace && prevLeaf.textContains('\n')) {
+-                    emit(child.startOffset, errorMessage(child), true)
+-                    if (autoCorrect) {
+-                        prevLeaf.delete()
++                    val allowNewlineBeforeLparInNullableFunctionType =
++                        child.treeParent.isFunctionTypeWrappedInNullableType() && child.prevCodeLeaf()?.elementType == LPAR
++                    if (!allowNewlineBeforeLparInNullableFunctionType) {
++                        emit(child.startOffset, errorMessage(child), true)
++                        if (autoCorrect) {
++                            prevLeaf.delete()
++                        }
+                     }
+                 }
+             }
+-            VALUE_PARAMETER,
++VALUE_PARAMETER,
+             RPAR,
+             -> {
+                 // aiming for
+@@ -274,6 +289,20 @@ public class ParameterListWrappingRule :
+ 
+     private fun ASTNode.exceedsMaxLineLength() = (column - 1 + textLength) > maxLineLength && !textContains('\n')
+ 
++    private fun ASTNode.exceedsMaxLineLengthWhenWrappedInNullableType(): Boolean {
++        require(elementType == VALUE_PARAMETER_LIST)
++        // When a function type is wrapped in a nullable type, the nullable type is wrapped first. Determine whether the
++        // parameter list would still exceed the max line length after it is moved to the next line.
++        val nullableType =
++            generateSequence(treeParent) { it.treeParent }
++                .firstOrNull { it.elementType == NULLABLE_TYPE }
++                ?: return exceedsMaxLineLength()
++
++        val indentText = indentConfig.childIndentOf(nullableType)
++        val indentWidthInSpaces = indentConfig.toNormalizedIndent(indentText).replace("\t", " ".repeat(indentConfig.tabWidth)).length
++        return (indentWidthInSpaces + textLength) > maxLineLength && !textContains('\n')
++    }
++
+     private fun errorMessage(node: ASTNode) =
+         when (node.elementType) {
+             LPAR -> """Unnecessary newline before "(""""
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleIssue1324Test.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleIssue1324Test.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleIssue1324Test.kt
+@@ -0,0 +1,47 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class ParameterListWrappingRuleIssue1324Test {
++    private val parameterListWrappingRuleAssertThat =
++        assertThatRule(
++            provider = { ParameterListWrappingRule() },
++            additionalRuleProviders =
++                setOf(
++                    // Apply the IndentationRule always as additional rule, so that the formattedCode in the unit test looks
++                    // correct.
++                    RuleProvider { IndentationRule() },
++                ),
++        )
++
++    @Test
++    fun `Given a nullable function type with a parameter list which still exceeds the max line length after wrapping the nullable type then wrap the parameters and do not report an unnecessary newline before the opening parenthesis`() {
++        val code =
++            """
++            val foo1: ((s1: VeryVeryVeryVeryVeryLongTypeName, s2: VeryVeryVeryVeryVeryLongTypeName, s3: VeryVeryVeryVeryVeryLongTypeName, s4: VeryVeryVeryVeryVeryLongTypeName) -> Unit)? = null
++            """.trimIndent()
++        val formattedCode =
++            """
++            val foo1: (
++                (
++                    s1: VeryVeryVeryVeryVeryLongTypeName,
++                    s2: VeryVeryVeryVeryVeryLongTypeName,
++                    s3: VeryVeryVeryVeryVeryLongTypeName,
++                    s4: VeryVeryVeryVeryVeryLongTypeName
++                ) -> Unit
++            )? = null
++            """.trimIndent()
++
++        parameterListWrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 80)
++            .isFormattedAs(formattedCode)
++
++        parameterListWrappingRuleAssertThat(formattedCode)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 80)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

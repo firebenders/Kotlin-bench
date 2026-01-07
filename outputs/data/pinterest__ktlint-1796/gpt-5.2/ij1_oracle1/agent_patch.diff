@@ -1,0 +1,159 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt
+index 11d7bf81..605e8cad 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt
+@@ -2,11 +2,14 @@ package com.pinterest.ktlint.ruleset.standard
+ 
+ import com.pinterest.ktlint.core.Rule
+ import com.pinterest.ktlint.core.ast.ElementType.CLASS_BODY
++import com.pinterest.ktlint.core.ast.ElementType.COMMA
+ import com.pinterest.ktlint.core.ast.ElementType.ENUM_ENTRY
+ import com.pinterest.ktlint.core.ast.ElementType.OBJECT_KEYWORD
++import com.pinterest.ktlint.core.ast.ElementType.RBRACE
+ import com.pinterest.ktlint.core.ast.ElementType.SEMICOLON
+ import com.pinterest.ktlint.core.ast.isWhiteSpace
+ import com.pinterest.ktlint.core.ast.lastChildLeafOrSelf
++import com.pinterest.ktlint.core.ast.nextCodeLeaf
+ import com.pinterest.ktlint.core.ast.nextLeaf
+ import com.pinterest.ktlint.core.ast.parent
+ import com.pinterest.ktlint.core.ast.prevCodeLeaf
+@@ -96,6 +99,23 @@ public class NoSemicolonsRule : Rule("no-semi") {
+             return node.isLastCodeLeafBeforeClosingOfClassBody()
+         }
+ 
++        // When rules mutate the AST, the semicolon which separates the enum entries from the rest of the class body can
++        // temporarily be located as a direct child of the class body instead of the enum entry.
++        if (node.treeParent.elementType == CLASS_BODY) {
++            val enumEntryBeforeSemicolon =
++                when (prevCodeLeaf.elementType) {
++                    COMMA -> prevCodeLeaf.prevCodeLeaf()?.parent(ENUM_ENTRY)
++                    else -> prevCodeLeaf.parent(ENUM_ENTRY)
++                }
++
++            if (enumEntryBeforeSemicolon != null) {
++                val nextCodeLeaf = node.nextCodeLeaf()
++                if (nextCodeLeaf != null && nextCodeLeaf.elementType != RBRACE) {
++                    return false
++                }
++            }
++        }
++
+         return true
+     }
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRule.kt
+index 3035e5f2..8aa6ae08 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRule.kt
+@@ -221,9 +221,19 @@ public class TrailingCommaOnDeclarationSiteRule :
+     private fun ASTNode.findNodeAfterTrailingCommaPosition(): ASTNode {
+         val lastEnumEntry = children().last { it.psi is KtEnumEntry }
+ 
+-        val semicolonAfterLastEnumEntry = lastEnumEntry
+-            .children()
+-            .singleOrNull { it.elementType == ElementType.SEMICOLON }
++        // Depending on how the enum is written (and parsed), the semicolon which terminates the enum entries can be a
++        // child of the last enum entry or a direct sibling in the class body.
++        val semicolonAfterLastEnumEntry =
++            lastEnumEntry
++                .children()
++                .singleOrNull { it.elementType == ElementType.SEMICOLON }
++                ?: run {
++                    var leaf = lastEnumEntry.psi.nextLeaf(skipEmptyElements = false)
++                    while (leaf is PsiWhiteSpace) {
++                        leaf = leaf.nextLeaf(skipEmptyElements = false)
++                    }
++                    leaf?.node?.takeIf { it.elementType == ElementType.SEMICOLON }
++                }
+ 
+         return semicolonAfterLastEnumEntry ?: lastChildNode
+     }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRuleEnumWithCompanionObjectRegressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRuleEnumWithCompanionObjectRegressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRuleEnumWithCompanionObjectRegressionTest.kt
+@@ -0,0 +1,75 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.core.KtLintRuleEngine
++import com.pinterest.ktlint.core.LintError
++import com.pinterest.ktlint.core.Rule
++import com.pinterest.ktlint.core.RuleProvider
++import com.pinterest.ktlint.core.api.EditorConfigOverride
++import com.pinterest.ktlint.ruleset.standard.TrailingCommaOnDeclarationSiteRule.Companion.TRAILING_COMMA_ON_DECLARATION_SITE_PROPERTY
++import org.assertj.core.api.Assertions.assertThat
++import org.junit.jupiter.api.Test
++
++class TrailingCommaOnDeclarationSiteRuleEnumWithCompanionObjectRegressionTest {
++    private fun newRuleInstance(fqcn: String): Rule {
++        return Class
++            .forName(fqcn)
++            .getDeclaredConstructor()
++            .newInstance()
++            .let { it as Rule }
++    }
++
++    @Test
++    fun `Given enum entries followed by companion object then formatting adds trailing comma without leaving violations`() {
++val code =
++            """
++            enum class TestEnum() {
++                A,
++                B;
++
++                companion object {
++                    const val A_NUMBER = 1L
++                }
++            }
++            """.trimIndent()
++
++        val formattedCode =
++            """
++            enum class TestEnum() {
++                A,
++                B,
++                ;
++
++                companion object {
++                    const val A_NUMBER = 1L
++                }
++            }
++            """.trimIndent()
++
++        val ruleEngine =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider { TrailingCommaOnDeclarationSiteRule() },
++                        RuleProvider { newRuleInstance("com.pinterest.ktlint.ruleset.standard.WrappingRule") },
++                        RuleProvider { newRuleInstance("com.pinterest.ktlint.ruleset.standard.NoSemicolonsRule") },
++                    ),
++editorConfigOverride = EditorConfigOverride.from(TRAILING_COMMA_ON_DECLARATION_SITE_PROPERTY to true),
++            )
++
++        val uncorrectedErrors = mutableListOf<LintError>()
++        val actualFormattedCode =
++            ruleEngine.format(code) { lintError, corrected ->
++                if (!corrected) {
++                    uncorrectedErrors.add(lintError)
++                }
++            }
++
++        assertThat(uncorrectedErrors).isEmpty()
++        assertThat(actualFormattedCode).isEqualTo(formattedCode)
++
++        val lintErrors = mutableListOf<LintError>()
++        ruleEngine.lint(actualFormattedCode) { lintErrors.add(it) }
++        assertThat(lintErrors).isEmpty()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

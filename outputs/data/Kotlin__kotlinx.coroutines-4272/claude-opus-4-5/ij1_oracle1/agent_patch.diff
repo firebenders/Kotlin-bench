@@ -1,0 +1,154 @@
+diff --git a/kotlinx-coroutines-core/common/src/CoroutineStart.kt b/kotlinx-coroutines-core/common/src/CoroutineStart.kt
+index c4c4cea72..ce9b65e91 100644
+--- a/kotlinx-coroutines-core/common/src/CoroutineStart.kt
++++ b/kotlinx-coroutines-core/common/src/CoroutineStart.kt
+@@ -346,7 +346,7 @@ public enum class CoroutineStart {
+      * Starts the corresponding block with receiver as a coroutine with this coroutine start strategy.
+      *
+      * - [DEFAULT] uses [startCoroutineCancellable].
+-     * - [ATOMIC] uses [startCoroutine].
++     * - [ATOMIC] uses [startCoroutineAtomic].
+      * - [UNDISPATCHED] uses [startCoroutineUndispatched].
+      * - [LAZY] does nothing.
+      *
+@@ -356,7 +356,7 @@ public enum class CoroutineStart {
+     public operator fun <R, T> invoke(block: suspend R.() -> T, receiver: R, completion: Continuation<T>): Unit =
+         when (this) {
+             DEFAULT -> block.startCoroutineCancellable(receiver, completion)
+-            ATOMIC -> block.startCoroutine(receiver, completion)
++            ATOMIC -> block.startCoroutineAtomic(receiver, completion)
+             UNDISPATCHED -> block.startCoroutineUndispatched(receiver, completion)
+             LAZY -> Unit // will start lazily
+         }
+diff --git a/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt b/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
+index 1e87d767a..b7b8f5244 100644
+--- a/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
++++ b/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
+@@ -35,6 +35,21 @@ internal fun Continuation<Unit>.startCoroutineCancellable(fatalCompletion: Conti
+         intercepted().resumeCancellableWith(Result.success(Unit))
+     }
+ 
++/**
++ * Use this function to start coroutine atomically (without cancellation check) while
++ * handling dispatcher exceptions. This is similar to [startCoroutineCancellable], but
++ * the started coroutine cannot be cancelled before it starts executing.
++ *
++ * This is needed because [kotlin.coroutines.intrinsics.startCoroutine] does not handle
++ * exceptions from the dispatcher, which can cause the coroutine to hang silently if
++ * the dispatcher throws (e.g., when Dispatchers.Main is missing).
++ */
++internal fun <R, T> (suspend (R) -> T).startCoroutineAtomic(
++    receiver: R, completion: Continuation<T>,
++) = runSafely(completion) {
++    createCoroutineUnintercepted(receiver, completion).intercepted().resumeWith(Result.success(Unit))
++}
++
+ /**
+  * Runs given block and completes completion with its exception if it occurs.
+  * Rationale: [startCoroutineCancellable] is invoked when we are about to run coroutine asynchronously in its own dispatcher.
+
+diff --git a/kotlinx-coroutines-core/jvm/test/flow/FlowOnDispatcherExceptionTest.kt b/kotlinx-coroutines-core/jvm/test/flow/FlowOnDispatcherExceptionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/flow/FlowOnDispatcherExceptionTest.kt
+@@ -0,0 +1,100 @@
++package kotlinx.coroutines.flow
++
++import kotlinx.coroutines.testing.*
++import kotlinx.coroutines.*
++import kotlinx.coroutines.channels.*
++import kotlin.coroutines.*
++import kotlin.test.*
++
++/**
++ * Tests that flow collection properly propagates exceptions when the dispatcher throws
++ * during dispatch (e.g., when Dispatchers.Main is not available).
++ *
++ * Related issue: https://github.com/JetBrains/compose-multiplatform/issues/4835
++ */
++class FlowOnDispatcherExceptionTest : TestBase() {
++
++    /**
++     * A dispatcher that always throws an exception when dispatch is called.
++     * This simulates what happens when Dispatchers.Main.immediate is not available.
++     */
++    private class FailingDispatcher : CoroutineDispatcher() {
++        override fun dispatch(context: CoroutineContext, block: Runnable) {
++            throw TestException("Dispatcher is not available")
++        }
++    }
++
++    @Test
++    fun testFlowOnWithFailingDispatcher() = runTest {
++        val flow = flowOf(1, 2, 3)
++            .flowOn(FailingDispatcher())
++
++        // Before the fix, this would hang silently.
++        // After the fix, it should throw TestException.
++        assertFailsWith<TestException> {
++            flow.collect {
++                println("collect: $it")
++            }
++        }
++    }
++
++    @Test
++    fun testFlowOnWithFailingDispatcherAndBuffer() = runTest {
++        val flow = flowOf(1, 2, 3)
++            .buffer()
++            .flowOn(FailingDispatcher())
++
++        // Before the fix, this would hang silently.
++        // After the fix, it should throw TestException.
++        assertFailsWith<TestException> {
++            flow.collect {
++                println("collect: $it")
++            }
++        }
++    }
++
++    @Test
++    fun testChannelFlowWithFailingDispatcher() = runTest {
++        val flow = channelFlow {
++            send(1)
++            send(2)
++            send(3)
++        }.flowOn(FailingDispatcher())
++
++        // Before the fix, this would hang silently.
++        // After the fix, it should throw TestException.
++        assertFailsWith<TestException> {
++            flow.collect {
++                println("collect: $it")
++            }
++        }
++    }
++
++    @Test
++    fun testProduceWithFailingDispatcher() = runTest {
++        // This test verifies that produce with ATOMIC start handles dispatcher exceptions correctly.
++        // The produce coroutine uses ATOMIC start mode, which is what flowOn uses internally.
++        assertFailsWith<TestException> {
++            coroutineScope {
++                val channel = produce<Int>(FailingDispatcher()) {
++                    send(1)
++                }
++                channel.receive()
++            }
++        }
++    }
++
++    @Test
++    fun testLaunchAtomicWithFailingDispatcher() = runTest {
++        // Verify that ATOMIC start mode properly propagates dispatcher exceptions
++        assertFailsWith<TestException> {
++            coroutineScope {
++                @OptIn(DelicateCoroutinesApi::class)
++                launch(FailingDispatcher(), start = CoroutineStart.ATOMIC) {
++                    println("This should not be printed")
++                }
++            }
++        }
++    }
++}
++

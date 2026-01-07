@@ -1,0 +1,121 @@
+diff --git a/kotlinx-coroutines-core/common/src/EventLoop.common.kt b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+index 6bfcbf0cb..0530e5106 100644
+--- a/kotlinx-coroutines-core/common/src/EventLoop.common.kt
++++ b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+@@ -283,6 +283,21 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+     final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
+ 
+     open fun enqueue(task: Runnable) {
++        // Move all due delayed tasks to the regular queue before adding the new task.
++        // This ensures proper ordering: delayed tasks that have already expired should be
++        // executed before newly enqueued tasks (important for `yield()` to work correctly).
++        val delayed = _delayed.value
++        if (delayed != null && !delayed.isEmpty) {
++            val now = nanoTime()
++            while (true) {
++                delayed.removeFirstIf {
++                    if (it.timeToExecute(now)) {
++                        enqueueImpl(it)
++                    } else
++                        false
++                } ?: break
++            }
++        }
+         if (enqueueImpl(task)) {
+             // todo: we should unpark only when this delayed task became first in the queue
+             unpark()
+
+diff --git a/kotlinx-coroutines-core/jvm/test/YieldAfterDelayTest.kt b/kotlinx-coroutines-core/jvm/test/YieldAfterDelayTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/YieldAfterDelayTest.kt
+@@ -0,0 +1,89 @@
++package kotlinx.coroutines
++
++import kotlinx.coroutines.testing.*
++import org.junit.*
++
++/**
++ * Tests for yield() behavior when there are tasks that have expired after a delay.
++ * See https://github.com/Kotlin/kotlinx.coroutines/issues/4115
++ */
++class YieldAfterDelayTest : TestBase() {
++
++    /**
++     * Tests that yield() properly yields to a coroutine that is waiting after a delay has expired.
++     * This uses CoroutineStart.UNDISPATCHED to ensure the coroutine starts immediately and then
++     * suspends on delay().
++     */
++    @Test
++    fun testYieldToDelayedCoroutine() = runBlocking {
++        expect(1)
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            expect(2)
++            delay(1)
++            // After the Thread.sleep below, this coroutine's delay has long expired
++            // so it should be resumed before the yield() continuation
++            expect(4)
++        }
++        expect(3)
++        // Wait long enough for the delay to expire
++        Thread.sleep(100)
++        // yield() should allow the launched coroutine to run first
++        yield()
++        finish(5)
++    }
++
++    /**
++     * Tests that yield() properly yields when multiple delayed coroutines are ready.
++     */
++    @Test
++    fun testYieldToMultipleDelayedCoroutines() = runBlocking {
++        expect(1)
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            expect(2)
++            delay(1)
++            expect(5)
++        }
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            expect(3)
++            delay(1)
++            expect(6)
++        }
++        expect(4)
++        // Wait long enough for both delays to expire
++        Thread.sleep(100)
++        // yield() should allow both launched coroutines to run first
++        yield()
++        finish(7)
++    }
++
++    /**
++     * Tests that yield() properly interleaves with non-delayed coroutines as well.
++     */
++    @Test
++    fun testYieldWithDelayedAndNonDelayedCoroutines() = runBlocking {
++        expect(1)
++        // This coroutine will be in the delayed queue initially
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            expect(2)
++            delay(1)
++            expect(5)
++        }
++        expect(3)
++        // Wait for the delay to expire
++        Thread.sleep(100)
++        // Now launch another coroutine without UNDISPATCHED
++        // This one will be added to the regular queue
++        launch {
++            // This should run after the delayed task because the delayed task
++            // was moved to the queue before this launch's dispatch
++            expect(6)
++        }
++        expect(4)
++        // yield() should allow the delayed coroutine to run first
++        yield()
++        // Then the normally launched coroutine runs
++        yield()
++        finish(7)
++    }
++}
++

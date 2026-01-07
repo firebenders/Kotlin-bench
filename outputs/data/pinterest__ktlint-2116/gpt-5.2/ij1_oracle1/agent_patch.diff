@@ -1,0 +1,241 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 39ae35af..812dc8cb 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -17,8 +17,10 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS_BODY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLOSING_QUOTE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.COLON
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.COMMA
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONDITION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONSTRUCTOR_DELEGATION_CALL
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONSTRUCTOR_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONTEXT_RECEIVER_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.DELEGATED_SUPER_TYPE_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.DESTRUCTURING_DECLARATION
+@@ -258,6 +260,9 @@ public class IndentationRule :
+             node.elementType == VALUE_PARAMETER ->
+                 visitValueParameter(node)
+ 
++            node.elementType == COMMA ->
++                visitComma(node)
++
+             node.elementType == FUN ->
+                 visitFun(node)
+ 
+@@ -605,21 +610,22 @@ public class IndentationRule :
+             }
+ 
+         val primaryConstructor = node.findChildByType(PRIMARY_CONSTRUCTOR)
+-        if (codeStyle == ktlint_official && primaryConstructor != null) {
+-            // Indent both constructor and super type list
++        val superTypeList = node.findChildByType(SUPER_TYPE_LIST)
++
++        if (codeStyle == ktlint_official && primaryConstructor.hasExplicitConstructorKeyword()) {
++            // Indent explicit primary constructor (with 'constructor' keyword) and the remainder of the class header.
+             nextToAstNode =
+                 startIndentContext(
+-                    fromAstNode = primaryConstructor.getPrecedingLeadingCommentsAndWhitespaces(),
++                    fromAstNode = primaryConstructor!!.getPrecedingLeadingCommentsAndWhitespaces(),
+                     toAstNode = nextToAstNode,
+                 ).prevCodeLeaf()
+         } else {
+-            node
+-                .findChildByType(SUPER_TYPE_LIST)
+-                ?.let { superTypeList ->
++            superTypeList
++                ?.let { superTypeListNode ->
+                     nextToAstNode =
+                         startIndentContext(
+-                            fromAstNode = superTypeList.getPrecedingLeadingCommentsAndWhitespaces(),
+-                            toAstNode = superTypeList.lastChildLeafOrSelf(),
++                            fromAstNode = superTypeListNode.getPrecedingLeadingCommentsAndWhitespaces(),
++                            toAstNode = superTypeListNode.lastChildLeafOrSelf(),
+                         ).prevCodeLeaf()
+                 }
+         }
+@@ -632,6 +638,92 @@ public class IndentationRule :
+         )
+     }
+ 
++    private fun ASTNode?.hasExplicitConstructorKeyword(): Boolean =
++        this != null && findChildByType(CONSTRUCTOR_KEYWORD) != null
++
++    private fun ASTNode.findCommaAfterEntry(): ASTNode? {
++        var leaf = lastChildLeafOrSelf()
++        while (true) {
++            leaf = leaf.nextLeaf(includeEmpty = true) ?: return null
++            when {
++                leaf.elementType == COMMA -> return leaf
++                leaf.textContains('\n') -> return null
++            }
++        }
++    }
++
++    private fun ASTNode.columnBeforeOnLine(): Int {
++        var width = 0
++        var leaf: ASTNode? = prevLeaf(includeEmpty = true)
++        while (leaf != null) {
++            val text = leaf.text
++            val index = text.lastIndexOf('\n')
++            if (index >= 0) {
++                width += text.substring(index + 1).visualWidth()
++                return width
++            }
++            width += text.visualWidth()
++            leaf = leaf.prevLeaf(includeEmpty = true)
++        }
++        return width
++    }
++
++    private fun String.visualWidth(): Int = replace("\t", " ".repeat(indentConfig.tabWidth)).length
++
++    private fun indentTextOfVisualWidth(width: Int): String =
++        when (indentConfig.indentStyle) {
++            SPACE -> " ".repeat(width)
++            TAB -> "\t".repeat(width / indentConfig.tabWidth)
++        }
++
++    private fun visitComma(node: ASTNode) {
++        if (codeStyle != ktlint_official) {
++            return
++        }
++
++        val superTypeList = node.parent(SUPER_TYPE_LIST) ?: return
++        val containingClass = node.parent(CLASS) ?: return
++        val primaryConstructor = containingClass.findChildByType(PRIMARY_CONSTRUCTOR)
++        if (!primaryConstructor.hasExplicitConstructorKeyword()) {
++            return
++        }
++
++        val firstSuperTypeEntry =
++            superTypeList
++                .children()
++                .firstOrNull {
++                    it.elementType == SUPER_TYPE_CALL_ENTRY ||
++                        it.elementType == SUPER_TYPE_ENTRY ||
++                        it.elementType == DELEGATED_SUPER_TYPE_ENTRY
++                }
++                ?: return
++
++        val commaAfterFirstEntry = firstSuperTypeEntry.findCommaAfterEntry() ?: return
++        if (commaAfterFirstEntry != node) {
++            return
++        }
++        if (node.nextLeaf(includeEmpty = true)?.isWhiteSpaceWithNewline() != true) {
++            return
++        }
++
++        // Align the subsequent entries of a multiline super type list with the start of the first super type entry.
++        val firstEntryColumnWidth = firstSuperTypeEntry.firstChildLeafOrSelf().columnBeforeOnLine()
++        val nodeIndentWidth = currentIndent().visualWidth()
++        val childIndentWidth = firstEntryColumnWidth - nodeIndentWidth
++        if (childIndentWidth <= 0) {
++            return
++        }
++        val childIndent = indentTextOfVisualWidth(childIndentWidth)
++
++        startIndentContext(
++            fromAstNode = node,
++            toAstNode = superTypeList.lastChildLeafOrSelf(),
++            childIndent = childIndent,
++            firstChildIndent = childIndent,
++            lastChildIndent = childIndent,
++        )
++    }
++
+     private fun visitObjectDeclaration(node: ASTNode) {
+         // Inner indent contexts in reversed order
+         var nextToAstNode: ASTNode = node.lastChildLeafOrSelf()
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleSuperTypeListKtlintOfficialTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleSuperTypeListKtlintOfficialTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleSuperTypeListKtlintOfficialTest.kt
+@@ -0,0 +1,78 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++internal class IndentationRuleSuperTypeListKtlintOfficialTest {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Indentation of class body is not impacted by multiline super type list in class header`() {
++        val code =
++            """
++            class Foo(
++                val bar1: Bar,
++                val bar2: Bar,
++            ) : FooBar(bar1, bar2),
++                BarFoo1,
++                BarFoo2 {
++                    // body
++                }
++            """.trimIndent()
++
++        val formattedCode =
++            """
++            class Foo(
++                val bar1: Bar,
++                val bar2: Bar,
++            ) : FooBar(bar1, bar2),
++                BarFoo1,
++                BarFoo2 {
++                // body
++            }
++            """.trimIndent()
++
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasLintViolations(
++                LintViolation(7, 1, "Unexpected indentation (8) (should be 4)"),
++                LintViolation(8, 1, "Unexpected indentation (4) (should be 0)"),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Indentation of explicit constructor with multiline super type list aligns super type list`() {
++        val code =
++            """
++            class Foo
++                constructor(
++                    val bar1: Bar,
++                    val bar2: Bar,
++                ) : FooBar(bar1, bar2),
++                BarFoo1,
++                BarFoo2
++            """.trimIndent()
++
++        val formattedCode =
++            """
++            class Foo
++                constructor(
++                    val bar1: Bar,
++                    val bar2: Bar,
++                ) : FooBar(bar1, bar2),
++                    BarFoo1,
++                    BarFoo2
++            """.trimIndent()
++
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasLintViolations(
++                LintViolation(6, 1, "Unexpected indentation (4) (should be 8)"),
++                LintViolation(7, 1, "Unexpected indentation (4) (should be 8)"),
++            ).isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

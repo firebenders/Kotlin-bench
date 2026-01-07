@@ -1,0 +1,125 @@
+diff --git a/legacy/account/src/main/java/app/k9mail/legacy/account/Account.kt b/legacy/account/src/main/java/app/k9mail/legacy/account/Account.kt
+index 836223c3da..32599d1609 100644
+--- a/legacy/account/src/main/java/app/k9mail/legacy/account/Account.kt
++++ b/legacy/account/src/main/java/app/k9mail/legacy/account/Account.kt
+@@ -311,6 +311,10 @@ class Account(
+     @set:Synchronized
+     var isMarkMessageAsReadOnDelete = false
+ 
++    @get:Synchronized
++    @set:Synchronized
++    var isMarkMessageAsReadOnArchive = true
++
+     @get:Synchronized
+     @set:Synchronized
+     var isAlwaysShowCcBcc = false
+diff --git a/legacy/core/src/main/java/com/fsck/k9/AccountPreferenceSerializer.kt b/legacy/core/src/main/java/com/fsck/k9/AccountPreferenceSerializer.kt
+index 3a3ccc2eab..419c75be6f 100644
+--- a/legacy/core/src/main/java/com/fsck/k9/AccountPreferenceSerializer.kt
++++ b/legacy/core/src/main/java/com/fsck/k9/AccountPreferenceSerializer.kt
+@@ -193,6 +193,7 @@ class AccountPreferenceSerializer(
+ 
+             isMarkMessageAsReadOnView = storage.getBoolean("$accountUuid.markMessageAsReadOnView", true)
+             isMarkMessageAsReadOnDelete = storage.getBoolean("$accountUuid.markMessageAsReadOnDelete", true)
++            isMarkMessageAsReadOnArchive = storage.getBoolean("$accountUuid.markMessageAsReadOnArchive", true)
+             isAlwaysShowCcBcc = storage.getBoolean("$accountUuid.alwaysShowCcBcc", false)
+             lastSyncTime = storage.getLong("$accountUuid.lastSyncTime", 0L)
+             lastFolderListRefreshTime = storage.getLong("$accountUuid.lastFolderListRefreshTime", 0L)
+@@ -347,6 +348,7 @@ class AccountPreferenceSerializer(
+             editor.putBoolean("$accountUuid.uploadSentMessages", isUploadSentMessages)
+             editor.putBoolean("$accountUuid.markMessageAsReadOnView", isMarkMessageAsReadOnView)
+             editor.putBoolean("$accountUuid.markMessageAsReadOnDelete", isMarkMessageAsReadOnDelete)
++            editor.putBoolean("$accountUuid.markMessageAsReadOnArchive", isMarkMessageAsReadOnArchive)
+             editor.putBoolean("$accountUuid.alwaysShowCcBcc", isAlwaysShowCcBcc)
+ 
+             editor.putBoolean("$accountUuid.vibrate", notificationSettings.vibration.isEnabled)
+@@ -454,6 +456,7 @@ class AccountPreferenceSerializer(
+         editor.remove("$accountUuid.enabled")
+         editor.remove("$accountUuid.markMessageAsReadOnView")
+         editor.remove("$accountUuid.markMessageAsReadOnDelete")
++        editor.remove("$accountUuid.markMessageAsReadOnArchive")
+         editor.remove("$accountUuid.alwaysShowCcBcc")
+         editor.remove("$accountUuid.remoteSearchFullText")
+         editor.remove("$accountUuid.remoteSearchNumResults")
+@@ -602,6 +605,7 @@ class AccountPreferenceSerializer(
+             isUploadSentMessages = true
+             isMarkMessageAsReadOnView = true
+             isMarkMessageAsReadOnDelete = true
++            isMarkMessageAsReadOnArchive = true
+             isAlwaysShowCcBcc = false
+             lastSyncTime = 0L
+             lastFolderListRefreshTime = 0L
+diff --git a/legacy/core/src/main/java/com/fsck/k9/controller/ArchiveOperations.kt b/legacy/core/src/main/java/com/fsck/k9/controller/ArchiveOperations.kt
+index 7cfeb16e5e..0cb4a139c5 100644
+--- a/legacy/core/src/main/java/com/fsck/k9/controller/ArchiveOperations.kt
++++ b/legacy/core/src/main/java/com/fsck/k9/controller/ArchiveOperations.kt
+@@ -69,12 +69,18 @@ internal class ArchiveOperations(
+         messages: List<LocalMessage>,
+         archiveFolderId: Long,
+     ) {
++        val flavor = if (account.isMarkMessageAsReadOnArchive) {
++            MoveOrCopyFlavor.MOVE_AND_MARK_AS_READ
++        } else {
++            MoveOrCopyFlavor.MOVE
++        }
++
+         messagingController.moveOrCopyMessageSynchronous(
+             account,
+             sourceFolderId,
+             messages,
+             archiveFolderId,
+-            MoveOrCopyFlavor.MOVE,
++            flavor,
+         )
+     }
+ 
+diff --git a/legacy/core/src/main/java/com/fsck/k9/controller/MessagingController.java b/legacy/core/src/main/java/com/fsck/k9/controller/MessagingController.java
+index 2ff6a25382..2d694d316d 100644
+--- a/legacy/core/src/main/java/com/fsck/k9/controller/MessagingController.java
++++ b/legacy/core/src/main/java/com/fsck/k9/controller/MessagingController.java
+@@ -1754,13 +1754,9 @@ public class MessagingController implements MessagingControllerRegistry, Messagi
+     void moveOrCopyMessageSynchronous(Account account, long srcFolderId, List<LocalMessage> inMessages,
+             long destFolderId, MoveOrCopyFlavor operation) {
+ 
+-        if (operation == MoveOrCopyFlavor.MOVE_AND_MARK_AS_READ) {
+-            throw new UnsupportedOperationException("MOVE_AND_MARK_AS_READ unsupported");
+-        }
+-
+         try {
+             LocalStore localStore = localStoreProvider.getInstance(account);
+-            if (operation == MoveOrCopyFlavor.MOVE && !isMoveCapable(account)) {
++            if ((operation == MoveOrCopyFlavor.MOVE || operation == MoveOrCopyFlavor.MOVE_AND_MARK_AS_READ) && !isMoveCapable(account)) {
+                 return;
+             }
+             if (operation == MoveOrCopyFlavor.COPY && !isCopyCapable(account)) {
+@@ -1815,6 +1811,10 @@ public class MessagingController implements MessagingControllerRegistry, Messagi
+                 } else {
+                     resultIdMapping = messageStore.moveMessages(messageIds, destFolderId);
+ 
++                    if (operation == MoveOrCopyFlavor.MOVE_AND_MARK_AS_READ) {
++                        messageStore.setFlag(resultIdMapping.values(), Flag.SEEN, true);
++                    }
++
+                     unsuppressMessages(account, messages);
+ 
+                     if (unreadCountAffected) {
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/ui/settings/account/AccountSettingsDataStore.kt b/legacy/ui/legacy/src/main/java/com/fsck/k9/ui/settings/account/AccountSettingsDataStore.kt
+index fcc8f3500c..c0cd84e0c3 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/ui/settings/account/AccountSettingsDataStore.kt
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/ui/settings/account/AccountSettingsDataStore.kt
+@@ -27,6 +27,7 @@ class AccountSettingsDataStore(
+         return when (key) {
+             "mark_message_as_read_on_view" -> account.isMarkMessageAsReadOnView
+             "mark_message_as_read_on_delete" -> account.isMarkMessageAsReadOnDelete
++            "mark_message_as_read_on_archive" -> account.isMarkMessageAsReadOnArchive
+             "account_sync_remote_deletetions" -> account.isSyncRemoteDeletions
+             "always_show_cc_bcc" -> account.isAlwaysShowCcBcc
+             "message_read_receipt" -> account.isMessageReadReceipt
+@@ -52,6 +53,7 @@ class AccountSettingsDataStore(
+         when (key) {
+             "mark_message_as_read_on_view" -> account.isMarkMessageAsReadOnView = value
+             "mark_message_as_read_on_delete" -> account.isMarkMessageAsReadOnDelete = value
++            "mark_message_as_read_on_archive" -> account.isMarkMessageAsReadOnArchive = value
+             "account_sync_remote_deletetions" -> account.isSyncRemoteDeletions = value
+             "always_show_cc_bcc" -> account.isAlwaysShowCcBcc = value
+             "message_read_receipt" -> account.isMessageReadReceipt = value

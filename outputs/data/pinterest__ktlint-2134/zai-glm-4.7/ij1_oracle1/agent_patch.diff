@@ -1,0 +1,107 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+index dbed1796..3b7504f9 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+@@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.LAMBDA_ARGUMENT
+@@ -25,6 +26,7 @@ import com.pinterest.ktlint.rule.engine.core.api.nextCodeSibling
+ import com.pinterest.ktlint.rule.engine.core.api.nextSibling
+ import com.pinterest.ktlint.rule.engine.core.api.noNewLineInClosedRange
+ import com.pinterest.ktlint.rule.engine.core.api.parent
++import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevSibling
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceBeforeMe
+ import com.pinterest.ktlint.ruleset.standard.StandardRule
+@@ -118,7 +120,10 @@ public class BinaryExpressionWrappingRule :
+                 binaryExpression.parent { it.elementType == LONG_STRING_TEMPLATE_ENTRY } == null
+             }?.takeIf { it.isOnLineExceedingMaxLineLength() }
+             ?.let { operationReference ->
+-                if (node.isCallExpressionFollowedByLambdaArgument() || cannotBeWrappedAtOperationReference(operationReference)) {
++                if (node.isCallExpressionFollowedByLambdaArgument() ||
++                    cannotBeWrappedAtOperationReference(operationReference) ||
++                    shouldNotWrapAfterElvisOperator(operationReference)
++                ) {
+                     // Wrapping after operation reference might not be the best place in case of a call expression or just won't work as
+                     // the left hand side still does not fit on a single line
+                     emit(operationReference.startOffset, "Line is exceeding max line length", false)
+@@ -158,6 +163,41 @@ public class BinaryExpressionWrappingRule :
+             }
+             ?: false
+ 
++    /**
++     * Checks whether wrapping should be avoided after an elvis operator.
++     *
++     * When the right-hand side of an elvis operator is already on a new line, wrapping after the operator
++     * would cause the line to end with the elvis operator. This creates an endless loop because:
++     * 1. BinaryExpressionWrappingRule wraps after the elvis operator
++     * 2. ChainWrappingRule detects the line ending with elvis operator and moves it to the next line
++     * 3. This causes the line to exceed max_line_length again
++     * 4. BinaryExpressionWrappingRule wraps again
++     * 5. Endless loop
++     */
++    private fun shouldNotWrapAfterElvisOperator(operationReference: ASTNode): Boolean {
++        // Check if this is an elvis operator
++        if (operationReference.firstChildLeafOrSelf().elementType != ELVIS) {
++            return false
++        }
++
++        // Check if the right-hand side is already on a new line
++        val nextSibling = operationReference.nextSibling() ?: return false
++        val nextSiblingFirstLeaf = nextSibling.firstChildLeafOrSelf()
++
++        // Look for whitespace before the next sibling
++        var node: ASTNode? = nextSiblingFirstLeaf
++        while (node != null && node != operationReference) {
++            if (node.textContains('\n')) {
++                // The right-hand side is already on a new line, so wrapping after the elvis operator
++                // would cause the line to end with the elvis operator
++                return true
++            }
++            node = node.prevLeaf()
++        }
++
++        return false
++    }
++
+     private fun ASTNode.isOnLineExceedingMaxLineLength() = leavesOnLine().lengthWithoutNewlinePrefix() > maxLineLength
+ 
+     private fun Sequence<ASTNode>.lengthWithoutNewlinePrefix() =
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
+index c8e3a9f7..732fefed 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
+@@ -309,4 +309,20 @@ class BinaryExpressionWrappingRuleTest {
+             .addAdditionalRuleProvider { WrappingRule() }
+             .hasLintViolationWithoutAutoCorrect(3, 17, "Line is exceeding max line length")
+     }
++
++    @Test
++    fun `Given an elvis operator with right-hand side on new line, and it exceeds max line length, then do not wrap after elvis operator to avoid endless loop`() {
++        val code =
++            """
++            // $MAX_LINE_LENGTH_MARKER                         $EOL_CHAR
++            val foo =
++                bar
++                    ?:
++                    throw UnsupportedOperationException("xxxxxxxxxxx")
++            """.trimIndent()
++        binaryExpressionWrappingRuleAssertThat(code)
++            .setMaxLineLength()
++            .addAdditionalRuleProvider { ChainWrappingRule() }
++            .hasLintViolationWithoutAutoCorrect(4, 21, "Line is exceeding max line length")
++    }
+ }
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

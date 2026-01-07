@@ -1,0 +1,118 @@
+diff --git a/kotlinx-coroutines-core/common/src/Job.kt b/kotlinx-coroutines-core/common/src/Job.kt
+index 65646dc59..e19ed335a 100644
+--- a/kotlinx-coroutines-core/common/src/Job.kt
++++ b/kotlinx-coroutines-core/common/src/Job.kt
+@@ -539,7 +539,7 @@ public fun Job.cancelChildren(cause: Throwable? = null) {
+ 
+ /**
+  * Returns `true` when the [Job] of the coroutine in this context is still active
+- * (has not completed and was not cancelled yet).
++ * (has not completed and was not cancelled yet) or the context does not have a [Job] in it.
+  *
+  * Check this property in long-running computation loops to support cancellation
+  * when [CoroutineScope.isActive] is not available:
+@@ -550,11 +550,11 @@ public fun Job.cancelChildren(cause: Throwable? = null) {
+  * }
+  * ```
+  *
+- * The `coroutineContext.isActive` expression is a shortcut for `coroutineContext[Job]?.isActive == true`.
++ * The `coroutineContext.isActive` expression is a shortcut for `coroutineContext[Job]?.isActive ?: true`.
+  * See [Job.isActive].
+  */
+ public val CoroutineContext.isActive: Boolean
+-    get() = this[Job]?.isActive == true
++    get() = this[Job]?.isActive ?: true
+ 
+ /**
+  * Cancels [Job] of this context with an optional cancellation cause.
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/common/test/CoroutineContextIsActiveTest.kt b/kotlinx-coroutines-core/common/test/CoroutineContextIsActiveTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/CoroutineContextIsActiveTest.kt
+@@ -0,0 +1,70 @@
++/*
++ * Copyright 2016-2021 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines
++
++import kotlin.coroutines.*
++import kotlin.test.*
++
++/**
++ * Tests for [CoroutineContext.isActive] extension property.
++ */
++class CoroutineContextIsActiveTest : TestBase() {
++
++    @Test
++    fun testEmptyContextIsActive() {
++        // Empty context should be considered active since it has not been cancelled
++        assertTrue(EmptyCoroutineContext.isActive)
++    }
++
++    @Test
++    fun testContextWithoutJobIsActive() {
++        // Context without Job should be considered active since it cannot be cancelled
++        val context = CoroutineName("test")
++        assertTrue(context.isActive)
++    }
++
++    @Test
++    fun testContextWithActiveJobIsActive() {
++        val job = Job()
++        val context = job + CoroutineName("test")
++        assertTrue(context.isActive)
++        job.cancel()
++    }
++
++    @Test
++    fun testContextWithCancelledJobIsNotActive() {
++        val job = Job()
++        job.cancel()
++        val context = job + CoroutineName("test")
++        assertFalse(context.isActive)
++    }
++
++    @Test
++    fun testContextWithCompletedJobIsNotActive() {
++        val job = Job()
++        job.complete()
++        val context = job + CoroutineName("test")
++        assertFalse(context.isActive)
++    }
++
++    @Test
++    fun testCoroutineScopeIsActiveConsistency() {
++        // CoroutineScope.isActive and CoroutineContext.isActive should behave consistently
++        // when there's no Job
++        val scope = object : CoroutineScope {
++            override val coroutineContext: CoroutineContext = EmptyCoroutineContext
++        }
++        assertEquals(scope.isActive, scope.coroutineContext.isActive)
++    }
++
++    @Test
++    fun testWithEmptyContextIsActive() = runTest {
++        withEmptyContext {
++            // Within empty context, coroutineContext.isActive should be true
++            assertTrue(coroutineContext.isActive)
++        }
++    }
++}
++

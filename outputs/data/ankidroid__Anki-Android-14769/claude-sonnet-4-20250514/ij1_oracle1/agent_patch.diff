@@ -1,0 +1,210 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index a275f03b41..91b51abaf1 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.6'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -161,9 +160,6 @@ android {
+         play {
+             dimension "appStore"
+         }
+-        amazon {
+-            dimension "appStore"
+-        }
+         // A 'full' build has no restrictions on storage/camera. Distributed on GitHub/F-Droid
+         full {
+             dimension "appStore"
+@@ -226,12 +222,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -246,12 +242,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ task installGitHook(type: Copy) {
+@@ -360,7 +350,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+     implementation 'com.github.AppIntro:AppIntro:6.3.1'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
+index f13e3c77a2..2e050980a8 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
+@@ -234,7 +234,8 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+         super.onCollectionLoaded(col)
+         if (mNoteEditorBundle != null) {
+             mAllFieldsNull = false
+-            // loading from the note editor
++            // loading from the note editor - set cardIndex based on mOrdinal
++            cardIndex = indexFromOrdinal(col, mOrdinal, getBundleEditFields(mNoteEditorBundle))
+             val toPreview = setCurrentCardFromNoteEditorBundle(col)
+             if (toPreview != null) {
+                 cardCount = toPreview.note().numberOfCardsEphemeral()
+@@ -273,6 +274,32 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+         return PreviewerCard(col, cardListIndex)
+     }
+ 
++    /**
++     * Convert an ordinal to a card index for the edited note type
++     * For regular note types: ordinal == index
++     * For cloze note types: find the index of (ordinal + 1) in the cloze numbers
++     */
++    private fun indexFromOrdinal(col: Collection, ordinal: Int, fieldValues: MutableList<String>): Int {
++        if (mEditedNotetype == null || ordinal < 0) {
++            return 0
++        }
++        
++        return when (mEditedNotetype!!.isCloze) {
++            true -> {
++                val noteWithContent = col.newNote(mEditedNotetype!!)
++                // Set the field values to get the actual cloze numbers
++                for (i in 0 until minOf(fieldValues.size, noteWithContent.fields.size)) {
++                    noteWithContent.setField(i, fieldValues[i])
++                }
++                val clozeNumbers = col.clozeNumbersInNote(noteWithContent)
++                val targetClozeNumber = ordinal + 1
++                val index = clozeNumbers.indexOf(targetClozeNumber)
++                if (index == -1) 0 else index
++            }
++            else -> maxOf(0, ordinal)
++        }
++    }
++
+     private fun setCurrentCardFromNoteEditorBundle(col: Collection): Card? {
+         assert(mNoteEditorBundle != null)
+         currentCard = getDummyCard(mEditedNotetype, cardIndex, getBundleEditFields(mNoteEditorBundle))
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/CardTemplatePreviewerTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/CardTemplatePreviewerTest.kt
+index 6e7391ffbc..ae7f13e9bd 100644
+--- a/AnkiDroid/src/test/java/com/ichi2/anki/CardTemplatePreviewerTest.kt
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/CardTemplatePreviewerTest.kt
+@@ -340,7 +340,6 @@ class CardTemplatePreviewerTest : RobolectricTest() {
+     }
+ 
+     @Test
+-    @Ignore("Issue 14694")
+     fun `The ordinal provided is used (standard) - Issue 14694`() {
+         val fields: MutableList<NoteService.NoteField?> = arrayListOf(
+             Field(0, "Hello"),
+@@ -368,7 +367,6 @@ class CardTemplatePreviewerTest : RobolectricTest() {
+     }
+ 
+     @Test
+-    @Ignore("Issue 14694")
+     fun `The ordinal provided is used (cloze)- Issue 14694`() {
+         val fields: MutableList<NoteService.NoteField?> = arrayListOf(
+             Field(0, "{{c1::Hello}} {{c3::World}}"),
+@@ -395,6 +393,50 @@ class CardTemplatePreviewerTest : RobolectricTest() {
+         assertThat("Front is not displayed", testCardTemplatePreviewer.cardContent, containsString("Hello"))
+         assertThat("Back is displayed", testCardTemplatePreviewer.cardContent, not(containsString("World")))
+     }
++    
++    @Test 
++    fun `ordinal to index conversion for cloze cards works correctly`() {
++        // Test the basic functionality of ordinal to index conversion for cloze cards
++        val fields: MutableList<NoteService.NoteField?> = arrayListOf(
++            Field(0, "{{c1::First}} {{c3::Third}} {{c5::Fifth}}"),
++            Field(1, "Extra")
++        )
++
++        val clozeModel = getCurrentDatabaseModelCopy("Cloze")
++        val tempModelPath = CardTemplateNotetype.saveTempModel(targetContext, clozeModel)
++
++        // Test ordinal 0 (c1) - should be index 0
++        val intent1 = Intent(Intent.ACTION_VIEW).apply {
++            putExtra(CardTemplateNotetype.INTENT_MODEL_FILENAME, tempModelPath)
++            putExtra(
++                "noteEditorBundle",
++                bundleOf(
++                    "editFields" to getFieldsAsBundleForPreview(fields),
++                    "did" to 1L
++                )
++            )
++            putExtra("ordinal", 0)
++        }
++
++        val previewer1 = super.startActivityNormallyOpenCollectionWithIntent(TestCardTemplatePreviewer::class.java, intent1)
++        assertThat("Card index should be 0 for ordinal 0", previewer1.cardIndex, equalTo(0))
++
++        // Test ordinal 4 (c5) - should be index 2 
++        val intent2 = Intent(Intent.ACTION_VIEW).apply {
++            putExtra(CardTemplateNotetype.INTENT_MODEL_FILENAME, tempModelPath)
++            putExtra(
++                "noteEditorBundle",
++                bundleOf(
++                    "editFields" to getFieldsAsBundleForPreview(fields),
++                    "did" to 1L
++                )
++            )
++            putExtra("ordinal", 4)
++        }
++
++        val previewer2 = super.startActivityNormallyOpenCollectionWithIntent(TestCardTemplatePreviewer::class.java, intent2)
++        assertThat("Card index should be 2 for ordinal 4 (c5)", previewer2.cardIndex, equalTo(2))
++    }
+ 
+     private fun getFieldsAsBundleForPreview(fields: List<NoteService.NoteField?>?): Bundle {
+         return getFieldsAsBundleForPreview(fields, false)
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

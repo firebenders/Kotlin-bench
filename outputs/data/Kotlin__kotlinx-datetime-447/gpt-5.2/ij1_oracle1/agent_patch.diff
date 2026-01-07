@@ -1,0 +1,202 @@
+diff --git a/core/common/src/DateTimePeriod.kt b/core/common/src/DateTimePeriod.kt
+index f9b2d3f..6c09120 100644
+--- a/core/common/src/DateTimePeriod.kt
++++ b/core/common/src/DateTimePeriod.kt
+@@ -252,6 +252,7 @@ public sealed class DateTimePeriod {
+             // next unread character
+             var i = 0
+             var sign = 1
++            var hasAnyComponent = false
+             var years = 0
+             var months = 0
+             var weeks = 0
+@@ -266,6 +267,8 @@ public sealed class DateTimePeriod {
+                         parseException("Unexpected end of input; 'P' designator is required", i)
+                     if (state == AFTER_T)
+                         parseException("Unexpected end of input; at least one time component is required after 'T'", i)
++                    if (!hasAnyComponent)
++                        parseException("Unexpected end of input; at least one component is required after 'P'", i)
+                     val daysTotal = when (val n = days.toLong() + weeks * 7) {
+                         in Int.MIN_VALUE..Int.MAX_VALUE -> n.toInt()
+                         else -> parseException("The total number of days under 'D' and 'W' designators should fit into an Int", 0)
+@@ -327,12 +330,14 @@ public sealed class DateTimePeriod {
+                 }
+                 when (text[i].uppercaseChar()) {
+                     'Y' -> {
++                        hasAnyComponent = true
+                         if (state >= AFTER_YEAR)
+                             parseException(wrongOrder, i)
+                         state = AFTER_YEAR
+                         years = number.toIntThrowing('Y')
+                     }
+                     'M' -> {
++                        hasAnyComponent = true
+                         if (state >= AFTER_T) {
+                             // Minutes
+                             if (state >= AFTER_MINUTE)
+@@ -348,30 +353,35 @@ public sealed class DateTimePeriod {
+                         }
+                     }
+                     'W' -> {
++                        hasAnyComponent = true
+                         if (state >= AFTER_WEEK)
+                             parseException(wrongOrder, i)
+                         state = AFTER_WEEK
+                         weeks = number.toIntThrowing('W')
+                     }
+                     'D' -> {
++                        hasAnyComponent = true
+                         if (state >= AFTER_DAY)
+                             parseException(wrongOrder, i)
+                         state = AFTER_DAY
+                         days = number.toIntThrowing('D')
+                     }
+                     'H' -> {
++                        hasAnyComponent = true
+                         if (state >= AFTER_HOUR || state < AFTER_T)
+                             parseException(wrongOrder, i)
+                         state = AFTER_HOUR
+                         hours = number.toIntThrowing('H')
+                     }
+                     'S' -> {
++                        hasAnyComponent = true
+                         if (state >= AFTER_SECOND_AND_NANO || state < AFTER_T)
+                             parseException(wrongOrder, i)
+                         state = AFTER_SECOND_AND_NANO
+                         seconds = number.toIntThrowing('S')
+                     }
+                     '.', ',' -> {
++                        hasAnyComponent = true
+                         i += 1
+                         if (i >= text.length)
+                             parseException("Expected designator 'S' after ${text[i - 1]}", i)
+diff --git a/core/commonJs/src/LocalDate.kt b/core/commonJs/src/LocalDate.kt
+index a650665..9400ae4 100644
+--- a/core/commonJs/src/LocalDate.kt
++++ b/core/commonJs/src/LocalDate.kt
+@@ -22,8 +22,16 @@ public actual class LocalDate internal constructor(internal val value: jtLocalDa
+             try {
+                 jsTry { jtLocalDate.parse(input.toString()) }.let(::LocalDate)
+             } catch (e: Throwable) {
+-                if (e.isJodaDateTimeParseException()) throw DateTimeFormatException(e)
+-                throw e
++                if (e.isJodaDateTimeParseException()) {
++                    // The platform parser can be stricter than our ISO format (e.g., on long extended years).
++                    try {
++                        format.parse(input)
++                    } catch (_: IllegalArgumentException) {
++                        throw DateTimeFormatException(e)
++                    }
++                } else {
++                    throw e
++                }
+             }
+         } else {
+             format.parse(input)
+diff --git a/core/commonJs/src/LocalDateTime.kt b/core/commonJs/src/LocalDateTime.kt
+index c85e772..26b4a19 100644
+--- a/core/commonJs/src/LocalDateTime.kt
++++ b/core/commonJs/src/LocalDateTime.kt
+@@ -59,8 +59,16 @@ public actual class LocalDateTime internal constructor(internal val value: jtLoc
+                 try {
+                     jsTry { jtLocalDateTime.parse(input.toString()) }.let(::LocalDateTime)
+                 } catch (e: Throwable) {
+-                    if (e.isJodaDateTimeParseException()) throw DateTimeFormatException(e)
+-                    throw e
++                    if (e.isJodaDateTimeParseException()) {
++                        // The platform parser can be stricter than our ISO format (e.g., on long extended years).
++                        try {
++                            format.parse(input)
++                        } catch (_: IllegalArgumentException) {
++                            throw DateTimeFormatException(e)
++                        }
++                    } else {
++                        throw e
++                    }
+                 }
+             } else {
+                 format.parse(input)
+diff --git a/core/jvm/src/LocalDate.kt b/core/jvm/src/LocalDate.kt
+index fe3b9ae..7e268fe 100644
+--- a/core/jvm/src/LocalDate.kt
++++ b/core/jvm/src/LocalDate.kt
+@@ -24,7 +24,13 @@ public actual class LocalDate internal constructor(internal val value: jtLocalDa
+                 try {
+                     jtLocalDate.parse(input).let(::LocalDate)
+                 } catch (e: DateTimeParseException) {
+-                    throw DateTimeFormatException(e)
++                    // java.time parsing rejects some ISO-8601-valid strings (e.g., with a long extended year),
++                    // while our ISO format supports them.
++                    try {
++                        format.parse(input)
++                    } catch (_: IllegalArgumentException) {
++                        throw DateTimeFormatException(e)
++                    }
+                 }
+             } else {
+                 format.parse(input)
+diff --git a/core/jvm/src/LocalDateTime.kt b/core/jvm/src/LocalDateTime.kt
+index 7dc28cd..0d46c07 100644
+--- a/core/jvm/src/LocalDateTime.kt
++++ b/core/jvm/src/LocalDateTime.kt
+@@ -62,7 +62,13 @@ public actual class LocalDateTime internal constructor(internal val value: jtLoc
+                 try {
+                     jtLocalDateTime.parse(input).let(::LocalDateTime)
+                 } catch (e: DateTimeParseException) {
+-                    throw DateTimeFormatException(e)
++                    // java.time parsing rejects some ISO-8601-valid strings (e.g., with a long extended year),
++                    // while our ISO format supports them.
++                    try {
++                        format.parse(input)
++                    } catch (_: IllegalArgumentException) {
++                        throw DateTimeFormatException(e)
++                    }
+                 }
+             } else {
+                 format.parse(input)
+
+diff --git a/core/common/test/ParsingInconsistenciesTest.kt b/core/common/test/ParsingInconsistenciesTest.kt
+new file mode 100644
+--- /dev/null
++++ b/core/common/test/ParsingInconsistenciesTest.kt
+@@ -0,0 +1,40 @@
++/*
++ * Copyright 2019-2026 JetBrains s.r.o. and contributors.
++ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
++ */
++
++package kotlinx.datetime.test
++
++import kotlinx.datetime.*
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFailsWith
++
++class ParsingInconsistenciesTest {
++
++    @Test
++    fun localDateParseAndIsoFormatParseAgreeOnLongExtendedYear() {
++        val s = "+00000000000002022-07-16"
++        val expected = LocalDate(2022, 7, 16)
++        assertEquals(expected, LocalDate.parse(s))
++        assertEquals(expected, LocalDate.Formats.ISO.parse(s))
++    }
++
++    @Test
++    fun localDateTimeParseAndIsoFormatParseAgreeOnLongExtendedYear() {
++        val s = "+00000000000002022-07-16T13:45:30"
++        val expected = LocalDateTime(2022, 7, 16, 13, 45, 30)
++        assertEquals(expected, LocalDateTime.parse(s))
++        assertEquals(expected, LocalDateTime.Formats.ISO.parse(s))
++    }
++
++    @Test
++    fun dateTimePeriodDoesNotParseBareP() {
++        assertFailsWith<IllegalArgumentException> { DateTimePeriod.parse("P") }
++        assertFailsWith<IllegalArgumentException> { DateTimePeriod.parse("+P") }
++        assertFailsWith<IllegalArgumentException> { DateTimePeriod.parse("-P") }
++
++        assertFailsWith<IllegalArgumentException> { DatePeriod.parse("P") }
++    }
++}
++

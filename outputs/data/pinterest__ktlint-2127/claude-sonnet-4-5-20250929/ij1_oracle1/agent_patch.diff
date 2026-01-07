@@ -1,0 +1,235 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 29498833..cef145d3 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -246,8 +246,18 @@ public class IndentationRule :
+                 visitSecondaryConstructor(node)
+ 
+             node.elementType == PARENTHESIZED &&
+-                node.treeParent.treeParent.elementType != IF ->
+-                startIndentContext(node)
++                node.treeParent.treeParent.elementType != IF -> {
++                if (codeStyle == ktlint_official) {
++                    // Deviate from IntelliJ IDEA formatter. Align the closing parenthesis with the opening parenthesis
++                    // for consistency with how conditions are formatted in if/while/for statements.
++                    startIndentContext(
++                        fromAstNode = node,
++                        lastChildIndent = "",
++                    )
++                } else {
++                    startIndentContext(node)
++                }
++            }
+ 
+             node.elementType == BINARY_WITH_TYPE ||
+                 node.elementType == SUPER_TYPE_ENTRY ||
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleParenthesizedIfTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleParenthesizedIfTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleParenthesizedIfTest.kt
+@@ -0,0 +1,196 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.intellij_idea
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for the fix of parenthesized expressions in if statement branches.
++ * This addresses the issue where closing parentheses were unexpectedly indented in expressions
++ * but not in if conditions.
++ */
++class IndentationRuleParenthesizedIfTest {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Given a parenthesized expression in if branch with ktlint_official style, closing paren should align with opening paren`() {
++        val code =
++            """
++            val pass = if (condition1) {
++                (
++                    condition2
++                )
++            } else {
++                condition3
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a parenthesized expression in if branch with ktlint_official style and wrong indentation, it should be fixed`() {
++        val code =
++            """
++            val pass = if (condition1) {
++                (
++                        condition2
++                    )
++            } else {
++                condition3
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            val pass = if (condition1) {
++                (
++                    condition2
++                )
++            } else {
++                condition3
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasLintViolations(
++                LintViolation(3, 1, "Unexpected indentation (12) (should be 8)"),
++                LintViolation(4, 1, "Unexpected indentation (8) (should be 4)"),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a multiline if condition, the closing paren should align with opening paren in ktlint_official style`() {
++        val code =
++            """
++            fun test() {
++                if (
++                    condition1
++                ) {
++                    (
++                        condition2
++                    )
++                } else {
++                    condition3
++                }
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a parenthesized expression in if branch with intellij_idea style, preserve IDEA quirk behavior`() {
++        val code =
++            """
++            val pass = if (condition1) {
++                (
++                    condition2
++                    )
++            } else {
++                condition3
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to intellij_idea)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a parenthesized expression directly as if branch without block, preserve IDEA quirk for all styles`() {
++        val code =
++            """
++            val foo = if (true) (
++                1 + 2
++                ) else (
++                3 + 4
++                )
++            """.trimIndent()
++        // This case is handled by the condition node.treeParent.treeParent.elementType != IF
++        // which excludes this case from creating indent context, so both styles should behave the same
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to intellij_idea)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given nested parenthesized expressions in if branch with ktlint_official style`() {
++        val code =
++            """
++            val result = if (condition1) {
++                (
++                    (
++                        innerCondition
++                    )
++                )
++            } else {
++                false
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a parenthesized expression in else branch with ktlint_official style`() {
++        val code =
++            """
++            val pass = if (condition1) {
++                condition2
++            } else {
++                (
++                    condition3
++                )
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given complex expression with parentheses in if branch with ktlint_official style`() {
++        val code =
++            """
++            val result = if (someCondition) {
++                (
++                    value1 +
++                        value2 +
++                        value3
++                )
++            } else {
++                defaultValue
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given parenthesized boolean expression in if branch from original issue`() {
++        val code =
++            """
++            val pass = if (condition1) {
++                (
++                    condition2
++                )
++            } else {
++                condition3
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

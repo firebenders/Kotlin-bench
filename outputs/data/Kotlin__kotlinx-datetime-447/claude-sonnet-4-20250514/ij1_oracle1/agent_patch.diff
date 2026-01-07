@@ -1,0 +1,188 @@
+diff --git a/core/common/src/DateTimePeriod.kt b/core/common/src/DateTimePeriod.kt
+index f9b2d3f..5f206d7 100644
+--- a/core/common/src/DateTimePeriod.kt
++++ b/core/common/src/DateTimePeriod.kt
+@@ -266,6 +266,8 @@ public sealed class DateTimePeriod {
+                         parseException("Unexpected end of input; 'P' designator is required", i)
+                     if (state == AFTER_T)
+                         parseException("Unexpected end of input; at least one time component is required after 'T'", i)
++                    if (state == AFTER_P)
++                        parseException("Unexpected end of input; at least one date or time component is required after 'P'", i)
+                     val daysTotal = when (val n = days.toLong() + weeks * 7) {
+                         in Int.MIN_VALUE..Int.MAX_VALUE -> n.toInt()
+                         else -> parseException("The total number of days under 'D' and 'W' designators should fit into an Int", 0)
+diff --git a/core/common/test/DateTimePeriodTest.kt b/core/common/test/DateTimePeriodTest.kt
+index ccf516c..bda2b34 100644
+--- a/core/common/test/DateTimePeriodTest.kt
++++ b/core/common/test/DateTimePeriodTest.kt
+@@ -130,6 +130,10 @@ class DateTimePeriodTest {
+         // loss of precision in fractional seconds
+         assertFailsWith<DateTimeFormatException> { DateTimePeriod.parse("P0.000000000001S") }
+ 
++        // parsing just "P" without any components should fail (ISO 8601 compliance)
++        assertFailsWith<DateTimeFormatException> { DateTimePeriod.parse("P") }
++        assertFailsWith<DateTimeFormatException> { DatePeriod.parse("P") }
++
+         // non-zero time components when parsing DatePeriod
+         assertFailsWith<IllegalArgumentException> { DatePeriod.parse("P1DT1H") }
+         DatePeriod.parse("P1DT0H")
+diff --git a/core/common/test/LocalDateTest.kt b/core/common/test/LocalDateTest.kt
+index a0f2a5e..bed02eb 100644
+--- a/core/common/test/LocalDateTest.kt
++++ b/core/common/test/LocalDateTest.kt
+@@ -64,6 +64,32 @@ class LocalDateTest {
+         checkParsedComponents("-123456-01-01", -123456, 1, 1)
+     }
+ 
++    @Test
++    fun parseExcessiveLeadingZeroes() {
++        // Test for the issue where excessive leading zeroes in ISO format caused parsing failures
++        // when delegating to platform parsers (Java/JSJoda) that don't support them
++        
++        // Both LocalDate.parse and LocalDate.Formats.ISO.parse should handle excessive leading zeroes
++        val dateStringWithExcessiveZeroes = "+00000000000002022-07-16"
++        val expectedDate = LocalDate(2022, 7, 16)
++        
++        val parsedDate1 = LocalDate.parse(dateStringWithExcessiveZeroes)
++        assertEquals(expectedDate, parsedDate1)
++        
++        val parsedDate2 = LocalDate.Formats.ISO.parse(dateStringWithExcessiveZeroes)
++        assertEquals(expectedDate, parsedDate2)
++        
++        // Test with negative years as well
++        val negativeYearString = "-00000000000001234-03-15"
++        val expectedNegativeDate = LocalDate(-1234, 3, 15)
++        
++        val parsedNegativeDate1 = LocalDate.parse(negativeYearString)
++        assertEquals(expectedNegativeDate, parsedNegativeDate1)
++        
++        val parsedNegativeDate2 = LocalDate.Formats.ISO.parse(negativeYearString)
++        assertEquals(expectedNegativeDate, parsedNegativeDate2)
++    }
++
+     @Test
+     fun localDateTimePart() {
+         val datetime = LocalDateTime.parse("2016-02-29T23:59")
+diff --git a/core/common/test/LocalDateTimeTest.kt b/core/common/test/LocalDateTimeTest.kt
+index 55bc907..335d803 100644
+--- a/core/common/test/LocalDateTimeTest.kt
++++ b/core/common/test/LocalDateTimeTest.kt
+@@ -38,6 +38,32 @@ class LocalDateTimeTest {
+         checkParsedComponents("-2008-01-02T23:59:59.999999990", -2008, 1, 2, 23, 59, 59, 999999990)
+     }
+ 
++    @Test
++    fun parseExcessiveLeadingZeroes() {
++        // Test for the issue where excessive leading zeroes in ISO format caused parsing failures
++        // when delegating to platform parsers (Java/JSJoda) that don't support them
++        
++        // Both LocalDateTime.parse and LocalDateTime.Formats.ISO.parse should handle excessive leading zeroes
++        val dateTimeStringWithExcessiveZeroes = "+00000000000002022-07-16T14:30:45.123456789"
++        val expectedDateTime = LocalDateTime(2022, 7, 16, 14, 30, 45, 123456789)
++        
++        val parsedDateTime1 = LocalDateTime.parse(dateTimeStringWithExcessiveZeroes)
++        assertEquals(expectedDateTime, parsedDateTime1)
++        
++        val parsedDateTime2 = LocalDateTime.Formats.ISO.parse(dateTimeStringWithExcessiveZeroes)
++        assertEquals(expectedDateTime, parsedDateTime2)
++        
++        // Test with negative years as well
++        val negativeYearString = "-00000000000001234-03-15T09:15:30"
++        val expectedNegativeDateTime = LocalDateTime(-1234, 3, 15, 9, 15, 30)
++        
++        val parsedNegativeDateTime1 = LocalDateTime.parse(negativeYearString)
++        assertEquals(expectedNegativeDateTime, parsedNegativeDateTime1)
++        
++        val parsedNegativeDateTime2 = LocalDateTime.Formats.ISO.parse(negativeYearString)
++        assertEquals(expectedNegativeDateTime, parsedNegativeDateTime2)
++    }
++
+     @Test
+     fun localDtToInstantConversion() {
+         val ldt1 = "2019-10-01T18:43:15.100500".toLocalDateTime()
+diff --git a/core/commonJs/src/LocalDate.kt b/core/commonJs/src/LocalDate.kt
+index a650665..1f59c82 100644
+--- a/core/commonJs/src/LocalDate.kt
++++ b/core/commonJs/src/LocalDate.kt
+@@ -22,8 +22,17 @@ public actual class LocalDate internal constructor(internal val value: jtLocalDa
+             try {
+                 jsTry { jtLocalDate.parse(input.toString()) }.let(::LocalDate)
+             } catch (e: Throwable) {
+-                if (e.isJodaDateTimeParseException()) throw DateTimeFormatException(e)
+-                throw e
++                if (e.isJodaDateTimeParseException()) {
++                    // Fall back to our custom format parser which supports more cases like excessive leading zeroes
++                    try {
++                        format.parse(input)
++                    } catch (fallbackException: Exception) {
++                        // If the fallback also fails, throw the original exception
++                        throw DateTimeFormatException(e)
++                    }
++                } else {
++                    throw e
++                }
+             }
+         } else {
+             format.parse(input)
+diff --git a/core/commonJs/src/LocalDateTime.kt b/core/commonJs/src/LocalDateTime.kt
+index c85e772..67a5f41 100644
+--- a/core/commonJs/src/LocalDateTime.kt
++++ b/core/commonJs/src/LocalDateTime.kt
+@@ -59,8 +59,17 @@ public actual class LocalDateTime internal constructor(internal val value: jtLoc
+                 try {
+                     jsTry { jtLocalDateTime.parse(input.toString()) }.let(::LocalDateTime)
+                 } catch (e: Throwable) {
+-                    if (e.isJodaDateTimeParseException()) throw DateTimeFormatException(e)
+-                    throw e
++                    if (e.isJodaDateTimeParseException()) {
++                        // Fall back to our custom format parser which supports more cases like excessive leading zeroes
++                        try {
++                            format.parse(input)
++                        } catch (fallbackException: Exception) {
++                            // If the fallback also fails, throw the original exception
++                            throw DateTimeFormatException(e)
++                        }
++                    } else {
++                        throw e
++                    }
+                 }
+             } else {
+                 format.parse(input)
+diff --git a/core/jvm/src/LocalDate.kt b/core/jvm/src/LocalDate.kt
+index fe3b9ae..a7bef10 100644
+--- a/core/jvm/src/LocalDate.kt
++++ b/core/jvm/src/LocalDate.kt
+@@ -24,7 +24,13 @@ public actual class LocalDate internal constructor(internal val value: jtLocalDa
+                 try {
+                     jtLocalDate.parse(input).let(::LocalDate)
+                 } catch (e: DateTimeParseException) {
+-                    throw DateTimeFormatException(e)
++                    // Fall back to our custom format parser which supports more cases like excessive leading zeroes
++                    try {
++                        format.parse(input)
++                    } catch (fallbackException: Exception) {
++                        // If the fallback also fails, throw the original exception
++                        throw DateTimeFormatException(e)
++                    }
+                 }
+             } else {
+                 format.parse(input)
+diff --git a/core/jvm/src/LocalDateTime.kt b/core/jvm/src/LocalDateTime.kt
+index 7dc28cd..721910e 100644
+--- a/core/jvm/src/LocalDateTime.kt
++++ b/core/jvm/src/LocalDateTime.kt
+@@ -62,7 +62,13 @@ public actual class LocalDateTime internal constructor(internal val value: jtLoc
+                 try {
+                     jtLocalDateTime.parse(input).let(::LocalDateTime)
+                 } catch (e: DateTimeParseException) {
+-                    throw DateTimeFormatException(e)
++                    // Fall back to our custom format parser which supports more cases like excessive leading zeroes
++                    try {
++                        format.parse(input)
++                    } catch (fallbackException: Exception) {
++                        // If the fallback also fails, throw the original exception
++                        throw DateTimeFormatException(e)
++                    }
+                 }
+             } else {
+                 format.parse(input)

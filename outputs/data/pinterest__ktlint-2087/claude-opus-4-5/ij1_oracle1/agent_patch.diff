@@ -1,477 +1,188 @@
-diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 26e4a6c2..b3e728e0 100644
---- a/CHANGELOG.md
-+++ b/CHANGELOG.md
-@@ -31,6 +31,7 @@ At this point in time, it is not yet decided what the next steps will be. Ktlint
- * Add new experimental rule `no-empty-file` for all code styles. A kotlin (script) file may not be empty ([#1074](https://github.com/pinterest/ktlint/issues/1074))
- * Add new experimental rule `statement-wrapping` which ensures function, class, or other blocks statement body doesn't start or end at starting or ending braces of the block ([#1938](https://github.com/pinterest/ktlint/issues/1938))
- * Add new experimental rule `blank-line-before-declaration`. This rule requires a blank line before class, function or property declarations ([#1939](https://github.com/pinterest/ktlint/issues/1939))
-+* Repeat format step until no more errors are found which can be auto-corrected, with a maximum of 3 reruns to prevent infinite loops. This resolves issues where the order of rule execution could leave code not fully formatted after a single format run.
- 
- ### Removed
- 
 diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt
-index 98f113c3..2748f86f 100644
+index 98f113c3..9e8010c5 100644
 --- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt
 +++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt
-@@ -80,5 +80,21 @@ public class Code private constructor(
-          * same time respecting the '.editorconfig' files on the path to the file.
-          */
-         public fun fromStdin(): Code = fromSnippet(String(System.`in`.readBytes()))
+@@ -23,6 +23,15 @@ public class Code private constructor(
+             fileName.orEmpty()
+         }
+ 
++    internal fun copy(content: String): Code =
++        Code(
++            content = content,
++            fileName = fileName,
++            filePath = filePath,
++            script = script,
++            isStdIn = isStdIn,
++        )
 +
-+        /**
-+         * Create [Code] with the given [content] while retaining the other properties from [code]. This internal method is used when
-+         * formatting a file multiple times to resolve cascading formatting issues.
-+         */
-+        internal fun fromSnippetWithPath(
-+            content: String,
-+            code: Code,
-+        ): Code =
-+            Code(
-+                content = content,
-+                fileName = code.fileName,
-+                filePath = code.filePath,
-+                script = code.script,
-+                isStdIn = code.isStdIn,
-+            )
-     }
- }
+     public companion object {
+         /**
+          * Create [Code] from a [file] containing valid Kotlin code or script. The '.editorconfig' files on the path to [file] are taken
 diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
-index eec63c77..2a830066 100644
+index eec63c77..9953f84b 100644
 --- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
 +++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
-@@ -123,6 +123,9 @@ public class KtLintRuleEngine(
-      * Fix style violations in [code] for lint errors when possible. If [code] is passed as file reference then the '.editorconfig' files on
-      * the path are taken into account. For each lint violation found, the [callback] is invoked.
-      *
-+     * The format is repeated until the code is fully formatted, or until a maximum of [MAX_FORMAT_RUNS_PER_FILE] format runs is reached.
-+     * The best results are returned, but it is possible that not all violations can be autocorrected.
-+     *
-      * @throws KtLintParseException if text is not a valid Kotlin code
-      * @throws KtLintRuleException in case of internal failure caused by a bug in rule implementation
-      */
-@@ -133,17 +136,96 @@ public class KtLintRuleEngine(
+@@ -133,77 +133,98 @@ public class KtLintRuleEngine(
          LOGGER.debug { "Starting with formatting file '${code.fileNameOrStdin()}'" }
  
          val hasUTF8BOM = code.content.startsWith(UTF8_BOM)
-+        var currentCode = code
-+        var mutated = false
-+        // Collect all errors from all format runs. Errors are stored as (LintError, corrected) pairs.
-+        val allErrors = mutableSetOf<Pair<LintError, Boolean>>()
-+
-+        // Reformat the code until no more auto-corrections are made, or max runs is reached
-+        for (formatRunCount in 1..MAX_FORMAT_RUNS_PER_FILE) {
-+            val formatRunResult = formatOnce(currentCode, formatRunCount)
-+            // Add autocorrected errors from this run to the cumulative set
-+            allErrors.addAll(formatRunResult.errors)
-+
-+            if (formatRunResult.mutated) {
-+                mutated = true
-+                currentCode = Code.fromSnippetWithPath(formatRunResult.formattedCode, code)
-+                if (formatRunCount < MAX_FORMAT_RUNS_PER_FILE) {
-+                    LOGGER.debug {
-+                        "Format run $formatRunCount of file '${code.fileNameOrStdin()}' completed with ${formatRunResult.correctedErrors.size} " +
-+                            "autocorrected error(s). Starting format run ${formatRunCount + 1}."
-+                    }
-+                }
-+            } else {
-+                // No more changes were made, return the formatted code
-+                LOGGER.debug { "Format completed after $formatRunCount run(s) for file '${code.fileNameOrStdin()}'" }
-+                // Do a final lint run to collect any remaining errors not visible during format
-+                if (mutated) {
-+                    lintAfterFormat(currentCode).forEach { e ->
-+                        allErrors.add(Pair(e, false))
-+                    }
-+                }
-+                allErrors
-+                    .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
-+                    .forEach { (e, corrected) -> callback(e, corrected) }
-+                return if (hasUTF8BOM && mutated) {
-+                    UTF8_BOM + formatRunResult.formattedCode
-+                } else if (mutated) {
-+                    formatRunResult.formattedCode
-+                } else {
-+                    code.content
-+                }.also {
-+                    LOGGER.debug { "Finished with formatting file '${code.fileNameOrStdin()}'" }
-+                }
-+            }
-+        }
-+
-+        // Max format runs reached, do a final lint run to get the remaining errors
-+        LOGGER.warn {
-+            "Format reached the maximum number of $MAX_FORMAT_RUNS_PER_FILE runs for file '${code.fileNameOrStdin()}'. " +
-+                "The result is still not fully formatted."
-+        }
-+
-+        lintAfterFormat(currentCode).forEach { e ->
-+            allErrors.add(Pair(e, false))
-+        }
-+        allErrors
-+            .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
-+            .forEach { (e, corrected) -> callback(e, corrected) }
-+
-+        return if (hasUTF8BOM) {
-+            UTF8_BOM + currentCode.content.removePrefix(UTF8_BOM)
-+        } else {
-+            currentCode.content
-+        }.also {
-+            LOGGER.debug { "Finished with formatting file '${code.fileNameOrStdin()}'" }
-+        }
-+    }
-+
-+    private data class FormatRunResult(
-+        val formattedCode: String,
-+        val errors: Set<Pair<LintError, Boolean>>,
-+        val correctedErrors: Set<LintError>,
-+        val mutated: Boolean,
-+    )
-+
-+    /**
-+     * Run a single format pass on the given [code].
-+     */
-+    private fun formatOnce(
-+        code: Code,
-+        formatRunCount: Int,
-+    ): FormatRunResult {
-         val ruleExecutionContext = createRuleExecutionContext(this, code)
- 
+-        val ruleExecutionContext = createRuleExecutionContext(this, code)
+-
 -        var tripped = false
-         var mutated = false
+-        var mutated = false
++        var currentCode = code
++        var currentRuleExecutionContext = createRuleExecutionContext(this, currentCode)
          val errors = mutableSetOf<Pair<LintError, Boolean>>()
-+        val correctedErrors = mutableSetOf<LintError>()
-         val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
-         visitorProvider
-             .visitor()
-             .invoke { rule ->
-                 ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
+-        val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+-        visitorProvider
+-            .visitor()
+-            .invoke { rule ->
+-                ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
 -                    tripped = true
-                     if (canBeAutoCorrected) {
-                         mutated = true
-                         /**
-@@ -153,64 +235,57 @@ public class KtLintRuleEngine(
-                         ruleExecutionContext.rebuildSuppressionLocator()
-                     }
-                     val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
-+                    val lintError = LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected)
-                     errors.add(
-                         Pair(
+-                    if (canBeAutoCorrected) {
+-                        mutated = true
+-                        /**
+-                         * Rebuild the suppression locator after each change in the AST as the offsets of the
+-                         * suppression hints might have changed.
+-                         */
+-                        ruleExecutionContext.rebuildSuppressionLocator()
+-                    }
+-                    val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+-                    errors.add(
+-                        Pair(
 -                            LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
-+                            lintError,
-                             // It is assumed that a rule that emits that an error can be autocorrected, also
-                             // does correct the error.
-                             canBeAutoCorrected,
-                         ),
-                     )
-+                    if (canBeAutoCorrected) {
-+                        correctedErrors.add(lintError)
-+                    }
-                     // In trace mode report the violation immediately. The order in which violations are actually found might be different
+-                            // It is assumed that a rule that emits that an error can be autocorrected, also
+-                            // does correct the error.
+-                            canBeAutoCorrected,
+-                        ),
+-                    )
+-                    // In trace mode report the violation immediately. The order in which violations are actually found might be different
 -                    // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
-+                    // from the order in which they are reported. For debugging purposes it can be helpful to know the exact order in which
-                     // violations are being solved.
-                     LOGGER.trace {
+-                    // violations are being solved.
+-                    LOGGER.trace {
 -                        "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
-+                        "Format violation (run $formatRunCount): ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
-                             canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
-                     }
-                 }
-             }
+-                            canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
+-                    }
+-                }
+-            }
 -        if (tripped) {
--            visitorProvider
--                .visitor()
--                .invoke { rule ->
++
++        var formatRunCount = 0
++        var mutated: Boolean
++
++        do {
++            formatRunCount++
++
++            var tripped = false
++            mutated = false
++            val visitorProvider = VisitorProvider(currentRuleExecutionContext.ruleProviders)
+             visitorProvider
+                 .visitor()
+                 .invoke { rule ->
 -                    ruleExecutionContext.executeRule(
 -                        rule,
 -                        false,
 -                    ) { offset, errorMessage, canBeAutoCorrected ->
 -                        val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
--                        errors.add(
--                            Pair(
--                                LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
++                    currentRuleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
++                        tripped = true
++                        if (canBeAutoCorrected) {
++                            mutated = true
++                            /**
++                             * Rebuild the suppression locator after each change in the AST as the offsets of the
++                             * suppression hints might have changed.
++                             */
++                            currentRuleExecutionContext.rebuildSuppressionLocator()
++                        }
++                        val (line, col) = currentRuleExecutionContext.positionInTextLocator(offset)
+                         errors.add(
+                             Pair(
+                                 LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
 -                                // It is assumed that a rule only corrects an error after it has emitted an
 -                                // error and indicating that it actually can be autocorrected.
 -                                false,
--                            ),
--                        )
--                    }
--                }
++                                // It is assumed that a rule that emits that an error can be autocorrected, also
++                                // does correct the error.
++                                canBeAutoCorrected,
+                             ),
+                         )
++                        // In trace mode report the violation immediately. The order in which violations are actually found might be different
++                        // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
++                        // violations are being solved.
++                        LOGGER.trace {
++                            "Format violation: ${currentCode.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
++                                canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
++                        }
+                     }
+                 }
 -        }
--
--        errors
--            .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
--            .forEach { (e, corrected) -> callback(e, corrected) }
--
++
++            // The formatRunCount starts at 1 for the initial run and is incremented for each rerun.
++            // So rerunCount = formatRunCount - 1, and we can have at most MAX_FORMAT_RERUNS_PER_FILE reruns.
++            if (mutated && formatRunCount <= MAX_FORMAT_RERUNS_PER_FILE) {
++                // Rerun format until no more changes are made or max reruns reached
++                val newContent =
++                    currentRuleExecutionContext
++                        .rootNode
++                        .text
++                        .replace("\n", currentRuleExecutionContext.determineLineSeparator(currentCode.content))
++                currentCode = currentCode.copy(content = newContent)
++                currentRuleExecutionContext = createRuleExecutionContext(this, currentCode)
++                LOGGER.debug { "Format run $formatRunCount of file '${currentCode.fileNameOrStdin()}' resulted in a change of the formatted output, running format again" }
++            } else if (tripped) {
++                visitorProvider
++                    .visitor()
++                    .invoke { rule ->
++                        currentRuleExecutionContext.executeRule(
++                            rule,
++                            false,
++                        ) { offset, errorMessage, canBeAutoCorrected ->
++                            val (line, col) = currentRuleExecutionContext.positionInTextLocator(offset)
++                            errors.add(
++                                Pair(
++                                    LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
++                                    // It is assumed that a rule only corrects an error after it has emitted an
++                                    // error and indicating that it actually can be autocorrected.
++                                    false,
++                                ),
++                            )
++                        }
++                    }
++            }
++        } while (mutated && formatRunCount <= MAX_FORMAT_RERUNS_PER_FILE)
+ 
+         errors
+             .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
+             .forEach { (e, corrected) -> callback(e, corrected) }
+ 
 -        if (!mutated) {
--            return code.content
--        }
++        if (currentCode.content == code.content) {
+             return code.content
+         }
  
          val formattedCode =
-             ruleExecutionContext
+-            ruleExecutionContext
++            currentRuleExecutionContext
                  .rootNode
                  .text
-                 .replace("\n", ruleExecutionContext.determineLineSeparator(code.content))
--        return if (hasUTF8BOM) {
--            UTF8_BOM + formattedCode
--        } else {
--            formattedCode
--        }.also {
--            LOGGER.debug("Finished with formatting file '${code.fileNameOrStdin()}'")
--        }
-+
-+        return FormatRunResult(
-+            formattedCode = formattedCode,
-+            errors = errors,
-+            correctedErrors = correctedErrors,
-+            mutated = mutated,
-+        )
-+    }
-+
-+    /**
-+     * Run a lint pass on the code after formatting to identify remaining lint violations.
-+     */
-+    private fun lintAfterFormat(code: Code): List<LintError> {
-+        val ruleExecutionContext = createRuleExecutionContext(this, code)
-+        val errors = mutableListOf<LintError>()
-+        VisitorProvider(ruleExecutionContext.ruleProviders)
-+            .visitor()
-+            .invoke { rule ->
-+                ruleExecutionContext.executeRule(rule, false) { offset, errorMessage, canBeAutoCorrected ->
-+                    val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
-+                    errors.add(LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected))
-+                }
-+            }
-+        return errors
-     }
- 
-     private fun RuleExecutionContext.determineLineSeparator(fileContent: String): String {
-@@ -285,5 +360,14 @@ public class KtLintRuleEngine(
+-                .replace("\n", ruleExecutionContext.determineLineSeparator(code.content))
++                .replace("\n", currentRuleExecutionContext.determineLineSeparator(code.content))
+         return if (hasUTF8BOM) {
+             UTF8_BOM + formattedCode
+         } else {
+@@ -285,5 +306,12 @@ public class KtLintRuleEngine(
          internal const val UTF8_BOM = "\uFEFF"
  
          public const val STDIN_FILE: String = "<stdin>"
 +
 +        /**
-+         * The maximum number of times a file is formatted. This limit exists to prevent an infinite loop in case one or more rules
-+         * autocorrect each others formatting. Once the [MAX_FORMAT_RUNS_PER_FILE] is reached, the code is not formatted any further
-+         * and the reported errors might still be autocorrectable.
-+         *
-+         * This is set to 4 (1 initial run + 3 reruns) as per the issue description.
++         * The maximum number of times the format may be rerun on a file before returning the result. If for some
++         * reason a set of rules keeps making changes in subsequent runs while not being able to resolve all violations
++         * then this prevents an infinite loop.
 +         */
-+        private const val MAX_FORMAT_RUNS_PER_FILE = 4
++        private const val MAX_FORMAT_RERUNS_PER_FILE = 3
      }
  }
-diff --git a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintTest.kt b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintTest.kt
-index f5e868e9..ff3c490e 100644
---- a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintTest.kt
-+++ b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintTest.kt
-@@ -459,6 +459,156 @@ class KtLintTest {
-         assertThat(actualFormattedCode).isEqualTo(code)
-     }
- 
-+    @Nested
-+    inner class `Given that format is called and it needs multiple runs to resolve all formatting issues` {
-+        @Test
-+        fun `Given two rules where the first rule creates a violation that the second rule autocorrects in the same run`() {
-+            // Rule order: ReplaceAaaWithBbbRule runs first (alphabetically), then ReplaceBbbWithCccRule
-+            // Run 1: "aaa" -> "bbb" (by Rule 1), then "bbb" -> "ccc" (by Rule 2 in same run because it sees the modified AST)
-+            // Run 2: No changes, return "ccc"
-+            val code =
-+                """
-+                val foo = "aaa"
-+                """.trimIndent()
-+            val formattedCode =
-+                """
-+                val foo = "ccc"
-+                """.trimIndent()
-+            val callbacks = mutableListOf<CallbackResult>()
-+            val actualFormattedCode =
-+                KtLintRuleEngine(
-+                    ruleProviders =
-+                        setOf(
-+                            RuleProvider { ReplaceAaaWithBbbRule() },
-+                            RuleProvider { ReplaceBbbWithCccRule() },
-+                        ),
-+                ).format(Code.fromSnippet(code)) { e, corrected ->
-+                    callbacks.add(
-+                        CallbackResult(
-+                            line = e.line,
-+                            col = e.col,
-+                            ruleId = e.ruleId,
-+                            detail = e.detail,
-+                            canBeAutoCorrected = e.canBeAutoCorrected,
-+                            corrected = corrected,
-+                        ),
-+                    )
-+                }
-+            assertThat(actualFormattedCode).isEqualTo(formattedCode)
-+            // Both autocorrected violations should be reported
-+            assertThat(callbacks).hasSize(2)
-+            assertThat(callbacks).allSatisfy { assertThat(it.corrected).isTrue() }
-+        }
-+
-+        @Test
-+        fun `Given two rules where the second rule creates a violation that the first rule should fix, then multi-run resolves it`() {
-+            // Rule order: ReplaceBbbWithCccRule runs first (alphabetically), then ReplaceAaaWithBbbRule runs late
-+            // Run 1: ReplaceBbbWithCccRule does nothing (no "bbb"), then ReplaceAaaWithBbbRule: "aaa" -> "bbb"
-+            // Code now has "bbb" but ReplaceBbbWithCccRule already ran in this pass
-+            // Run 2: ReplaceBbbWithCccRule: "bbb" -> "ccc", ReplaceAaaWithBbbRule does nothing (no "aaa")
-+            // Run 3: No changes, return "ccc"
-+            val code =
-+                """
-+                val foo = "aaa"
-+                """.trimIndent()
-+            val formattedCode =
-+                """
-+                val foo = "ccc"
-+                """.trimIndent()
-+            val callbacks = mutableListOf<CallbackResult>()
-+            val actualFormattedCode =
-+                KtLintRuleEngine(
-+                    ruleProviders =
-+                        setOf(
-+                            // ReplaceAaaWithBbbRule runs late, so ReplaceBbbWithCccRule runs first
-+                            RuleProvider { ReplaceAaaWithBbbRule(runAsLate = true) },
-+                            RuleProvider { ReplaceBbbWithCccRule() },
-+                        ),
-+                ).format(Code.fromSnippet(code)) { e, corrected ->
-+                    callbacks.add(
-+                        CallbackResult(
-+                            line = e.line,
-+                            col = e.col,
-+                            ruleId = e.ruleId,
-+                            detail = e.detail,
-+                            canBeAutoCorrected = e.canBeAutoCorrected,
-+                            corrected = corrected,
-+                        ),
-+                    )
-+                }
-+            assertThat(actualFormattedCode).isEqualTo(formattedCode)
-+            // Both autocorrected violations should be reported (one from run 1, one from run 2)
-+            assertThat(callbacks).hasSize(2)
-+            assertThat(callbacks).allSatisfy { assertThat(it.corrected).isTrue() }
-+        }
-+
-+        @Test
-+        fun `Given code that is already properly formatted then only one format run is needed`() {
-+            val code =
-+                """
-+                val foo = "ccc"
-+                """.trimIndent()
-+            val callbacks = mutableListOf<CallbackResult>()
-+            val actualFormattedCode =
-+                KtLintRuleEngine(
-+                    ruleProviders =
-+                        setOf(
-+                            RuleProvider { ReplaceAaaWithBbbRule() },
-+                            RuleProvider { ReplaceBbbWithCccRule() },
-+                        ),
-+                ).format(Code.fromSnippet(code)) { e, corrected ->
-+                    callbacks.add(
-+                        CallbackResult(
-+                            line = e.line,
-+                            col = e.col,
-+                            ruleId = e.ruleId,
-+                            detail = e.detail,
-+                            canBeAutoCorrected = e.canBeAutoCorrected,
-+                            corrected = corrected,
-+                        ),
-+                    )
-+                }
-+            assertThat(actualFormattedCode).isEqualTo(code)
-+            assertThat(callbacks).isEmpty()
-+        }
-+
-+        @Test
-+        fun `Given code with a violation that is autocorrected then the corrected violation is reported`() {
-+            val code =
-+                """
-+                val foo = "bbb"
-+                """.trimIndent()
-+            val formattedCode =
-+                """
-+                val foo = "ccc"
-+                """.trimIndent()
-+            val callbacks = mutableListOf<CallbackResult>()
-+            val actualFormattedCode =
-+                KtLintRuleEngine(
-+                    ruleProviders =
-+                        setOf(
-+                            RuleProvider { ReplaceAaaWithBbbRule() },
-+                            RuleProvider { ReplaceBbbWithCccRule() },
-+                        ),
-+                ).format(Code.fromSnippet(code)) { e, corrected ->
-+                    callbacks.add(
-+                        CallbackResult(
-+                            line = e.line,
-+                            col = e.col,
-+                            ruleId = e.ruleId,
-+                            detail = e.detail,
-+                            canBeAutoCorrected = e.canBeAutoCorrected,
-+                            corrected = corrected,
-+                        ),
-+                    )
-+                }
-+            assertThat(actualFormattedCode).isEqualTo(formattedCode)
-+            // The autocorrected violation should be reported
-+            assertThat(callbacks).hasSize(1)
-+            assertThat(callbacks.first().corrected).isTrue()
-+        }
-+    }
-+
-     private companion object {
-         val EMPTY_CODE_SNIPPET =
-             Code.fromSnippet(
-@@ -659,3 +809,50 @@ private class WithStateRule : Rule(
-         emit(node.startOffset, "Fake violation which can be autocorrected", true)
-     }
- }
-+
-+/**
-+ * A rule that replaces 'aaa' with 'bbb'. When combined with [ReplaceBbbWithCccRule] and using [RunAsLateAsPossible],
-+ * this tests the multi-run format feature where the second rule creates a condition that the first rule should fix.
-+ */
-+private class ReplaceAaaWithBbbRule(
-+    runAsLate: Boolean = false,
-+) : Rule(
-+    ruleId = RuleId("test:replace-aaa-with-bbb"),
-+    about = About(),
-+    visitorModifiers = if (runAsLate) setOf(RunAsLateAsPossible) else emptySet(),
-+) {
-+    override fun beforeVisitChildNodes(
-+        node: ASTNode,
-+        autoCorrect: Boolean,
-+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
-+    ) {
-+        if (node.elementType == REGULAR_STRING_PART && node.text.contains("aaa")) {
-+            emit(node.startOffset, "Replace aaa with bbb", true)
-+            if (autoCorrect) {
-+                (node as LeafElement).rawReplaceWithText(node.text.replace("aaa", "bbb"))
-+            }
-+        }
-+    }
-+}
-+
-+/**
-+ * A rule that replaces 'bbb' with 'ccc'. When combined with [ReplaceAaaWithBbbRule], this tests the multi-run format
-+ * feature where one rule creates a condition that another rule should fix.
-+ */
-+private class ReplaceBbbWithCccRule : Rule(
-+    ruleId = RuleId("test:replace-bbb-with-ccc"),
-+    about = About(),
-+) {
-+    override fun beforeVisitChildNodes(
-+        node: ASTNode,
-+        autoCorrect: Boolean,
-+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
-+    ) {
-+        if (node.elementType == REGULAR_STRING_PART && node.text.contains("bbb")) {
-+            emit(node.startOffset, "Replace bbb with ccc", true)
-+            if (autoCorrect) {
-+                (node as LeafElement).rawReplaceWithText(node.text.replace("bbb", "ccc"))
-+            }
-+        }
-+    }
-+}
 
 diff --git a/local.properties b/local.properties
 new file mode 100644

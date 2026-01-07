@@ -1,0 +1,224 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ea4b034e..83ecc43a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -11,7 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ ### Fixed
+ * Do not enable the experimental rules by default when `.editorconfig` properties `disabled_rules` or `ktlint_disabled_rules` are set. ([#1771](https://github.com/pinterest/ktlint/issues/1771))
+ * A function signature not having any parameters which exceeds the `max-line-length` should be ignored by rule `function-signature` ([#1773](https://github.com/pinterest/ktlint/issues/1773))
+-* 
++* Array syntax annotations (`@[...]`) must be placed on a separate line ([#1765](https://github.com/pinterest/ktlint/issues/1765)) 
+ 
+ ### Changed
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+index 7fdfdd88..0efd83ac 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+@@ -49,6 +49,8 @@ public class AnnotationRule : Rule("annotation") {
+             FILE_ANNOTATION_LIST -> {
+                 visitFileAnnotationList(node, emit, autoCorrect)
+             }
++            ANNOTATION ->
++                visitAnnotation(node, emit, autoCorrect)
+             ANNOTATION_ENTRY ->
+                 visitAnnotationEntry(node, emit, autoCorrect)
+         }
+@@ -61,6 +63,11 @@ public class AnnotationRule : Rule("annotation") {
+     ) {
+         require(node.elementType == ANNOTATION_ENTRY)
+ 
++        // Skip processing annotation entries inside array syntax annotations (@[...]) as they are handled at the ANNOTATION level
++        if (node.treeParent.elementType == ANNOTATION) {
++            return
++        }
++
+         if (node.isAnnotationEntryWithValueArgumentList() &&
+             node.treeParent.treeParent.elementType != VALUE_PARAMETER && // fun fn(@Ann("blah") a: String)
+             node.treeParent.treeParent.elementType != VALUE_ARGUMENT && // fn(@Ann("blah") "42")
+@@ -84,6 +91,29 @@ public class AnnotationRule : Rule("annotation") {
+         }
+     }
+ 
++    private fun visitAnnotation(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        require(node.elementType == ANNOTATION)
++
++        // For array syntax annotations (@[...]), always force them onto separate lines
++        if (node.isOnSameLineAsAnnotatedConstruct()) {
++            emit(
++                node.startOffset,
++                "Annotation must be placed on separate line",
++                true,
++            )
++            if (autoCorrect) {
++                node
++                    .lastChildLeafOrSelf()
++                    .nextLeaf()
++                    ?.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++            }
++        }
++    }
++
+     private fun checkForAnnotationWithParameterToBePlacedOnSeparateLine(
+         node: ASTNode,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationArraySyntaxRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationArraySyntaxRuleTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationArraySyntaxRuleTest.kt
+@@ -0,0 +1,142 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++class AnnotationArraySyntaxRuleTest {
++    private val annotationRuleAssertThat = assertThatRule { AnnotationRule() }
++
++    @Test
++    fun `Given an array syntax annotation on same line as function then force onto separate line`() {
++        val code =
++            """
++            @[JvmStatic Provides] fun foo() = 42
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[JvmStatic Provides]
++            fun foo() = 42
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given an array syntax annotation on separate line before function then no violation`() {
++        val code =
++            """
++            @[JvmStatic Provides]
++            fun foo() = 42
++            """.trimIndent()
++        annotationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given an array syntax annotation on same line as class then force onto separate line`() {
++        val code =
++            """
++            @[JvmStatic Provides] class Bar
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[JvmStatic Provides]
++            class Bar
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given an array syntax annotation on separate line before class then no violation`() {
++        val code =
++            """
++            @[JvmStatic Provides]
++            class Bar
++            """.trimIndent()
++        annotationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given an array syntax annotation on same line as property then force onto separate line`() {
++        val code =
++            """
++            class Foo {
++                @[JvmField Volatile] var bar: String = ""
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            class Foo {
++                @[JvmField Volatile]
++                var bar: String = ""
++            }
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .hasLintViolation(2, 5, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given an array syntax annotation on separate line before property then no violation`() {
++        val code =
++            """
++            class Foo {
++                @[JvmField Volatile]
++                var bar: String = ""
++            }
++            """.trimIndent()
++        annotationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given an array syntax annotation with comments on same line as function then force onto separate line`() {
++        val code =
++            """
++            @[JvmStatic Provides] /* comment */ fun foo() = 42
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[JvmStatic Provides]
++            /* comment */ fun foo() = 42
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given single array entry annotation on same line as function then force onto separate line`() {
++        val code =
++            """
++            @[JvmStatic] fun foo() = 42
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[JvmStatic]
++            fun foo() = 42
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given an array syntax annotation with parameters on same line as function then force onto separate line`() {
++        val code =
++            """
++            @[Suppress("DEPRECATION") JvmStatic] fun foo() = 42
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[Suppress("DEPRECATION") JvmStatic]
++            fun foo() = 42
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

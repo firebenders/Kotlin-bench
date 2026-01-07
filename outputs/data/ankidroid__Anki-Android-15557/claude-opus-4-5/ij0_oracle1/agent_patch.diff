@@ -1,0 +1,147 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 3fef2583bf..149e4dda8f 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.9.0'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -228,12 +227,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -248,12 +247,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -364,7 +357,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.5.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+index 9f1599a7eb..bd14c50998 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+@@ -97,6 +97,8 @@ import com.ichi2.themes.Themes
+ import com.ichi2.themes.Themes.getResFromAttr
+ import com.ichi2.ui.FixedEditText
+ import com.ichi2.utils.*
++import org.json.JSONArray
++import org.json.JSONException
+ import com.ichi2.utils.ClipboardUtil.getText
+ import com.ichi2.utils.HandlerUtils.executeFunctionWithDelay
+ import com.ichi2.utils.HandlerUtils.newHandler
+@@ -1327,12 +1329,47 @@ abstract class AbstractFlashcardViewer :
+             val inputMethodManager = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+             inputMethodManager.hideSoftInputFromWindow(answerField!!.windowToken, 0)
+         }
++
++        // When useInputTag is true, the typed answer is in the WebView's input field.
++        // We need to explicitly retrieve it before showing the answer, as the blur event
++        // may not have been processed yet due to asynchronous signal handling.
++        if (typeAnswer!!.useInputTag && typeAnswer!!.correct != null) {
++            webView?.evaluateJavascript(
++                "(function() { var input = document.getElementById('typeans'); return input ? input.value : ''; })()"
++            ) { value ->
++                // The value is returned as a JSON string (with quotes and escapes),
++                // so we need to parse it properly to handle special characters.
++                val inputValue = try {
++                    if (value != null && value != "null") {
++                        // Wrap in JSON array to parse the string value correctly
++                        JSONArray("[$value]").optString(0, "")
++                    } else {
++                        ""
++                    }
++                } catch (e: JSONException) {
++                    Timber.w(e, "Failed to parse typed answer from WebView")
++                    ""
++                }
++                typeAnswer!!.input = inputValue
++                continueDisplayingAnswer()
++            }
++        } else {
++            // Clean up the user answer and the correct answer
++            if (!typeAnswer!!.useInputTag) {
++                typeAnswer!!.input = answerField!!.text.toString()
++            }
++            continueDisplayingAnswer()
++        }
++    }
++
++    /**
++     * Continues displaying the answer after the typed input has been captured.
++     * This is separated from [displayCardAnswer] to handle both synchronous (EditText)
++     * and asynchronous (WebView input tag) input capture.
++     */
++    private fun continueDisplayingAnswer() {
+         displayAnswer = true
+         answerField!!.visibility = View.GONE
+-        // Clean up the user answer and the correct answer
+-        if (!typeAnswer!!.useInputTag) {
+-            typeAnswer!!.input = answerField!!.text.toString()
+-        }
+         isSelecting = false
+         val answerContent = htmlGenerator!!.generateHtml(getColUnsafe, currentCard!!, SingleCardSide.BACK)
+         automaticAnswer.onDisplayAnswer()
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index df05afef76..4d2ca9684e 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

@@ -1,0 +1,180 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ea4b034e..75a649c4 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -11,7 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ ### Fixed
+ * Do not enable the experimental rules by default when `.editorconfig` properties `disabled_rules` or `ktlint_disabled_rules` are set. ([#1771](https://github.com/pinterest/ktlint/issues/1771))
+ * A function signature not having any parameters which exceeds the `max-line-length` should be ignored by rule `function-signature` ([#1773](https://github.com/pinterest/ktlint/issues/1773))
+-* 
++* Fix formatting of array syntax annotations by forcing `@[...]` annotations onto a separate line. ([#1765](https://github.com/pinterest/ktlint/issues/1765))
+ 
+ ### Changed
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+index 7fdfdd88..4b201292 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+@@ -5,6 +5,8 @@ import com.pinterest.ktlint.core.ast.ElementType.ANNOTATED_EXPRESSION
+ import com.pinterest.ktlint.core.ast.ElementType.ANNOTATION
+ import com.pinterest.ktlint.core.ast.ElementType.ANNOTATION_ENTRY
+ import com.pinterest.ktlint.core.ast.ElementType.FILE_ANNOTATION_LIST
++import com.pinterest.ktlint.core.ast.ElementType.LBRACKET
++import com.pinterest.ktlint.core.ast.ElementType.MODIFIER_LIST
+ import com.pinterest.ktlint.core.ast.ElementType.TYPE_ARGUMENT_LIST
+ import com.pinterest.ktlint.core.ast.ElementType.VALUE_ARGUMENT
+ import com.pinterest.ktlint.core.ast.ElementType.VALUE_ARGUMENT_LIST
+@@ -49,11 +51,52 @@ public class AnnotationRule : Rule("annotation") {
+             FILE_ANNOTATION_LIST -> {
+                 visitFileAnnotationList(node, emit, autoCorrect)
+             }
++            ANNOTATION -> {
++                visitAnnotation(node, emit, autoCorrect)
++            }
+             ANNOTATION_ENTRY ->
+                 visitAnnotationEntry(node, emit, autoCorrect)
+         }
+     }
+ 
++    private fun visitAnnotation(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        require(node.elementType == ANNOTATION)
++
++        if (!node.isArraySyntaxAnnotation()) {
++            return
++        }
++
++        val modifierList = node.treeParent
++        val isPartOfModifierListOnValueParameterOrArgument =
++            modifierList.elementType == MODIFIER_LIST &&
++                (
++                    modifierList.treeParent.elementType == VALUE_PARAMETER ||
++                        modifierList.treeParent.elementType == VALUE_ARGUMENT
++                )
++
++        if (isPartOfModifierListOnValueParameterOrArgument || node.isPartOf(TYPE_ARGUMENT_LIST)) {
++            return
++        }
++
++        if (node.isOnSameLineAsAnnotatedConstruct()) {
++            emit(
++                node.startOffset,
++                "Annotation must be placed on separate line",
++                node.treeParent.elementType != ANNOTATED_EXPRESSION,
++            )
++            if (autoCorrect && node.treeParent.elementType != ANNOTATED_EXPRESSION) {
++                node
++                    .lastChildLeafOrSelf()
++                    .nextLeaf()
++                    ?.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++            }
++        }
++    }
++
+     private fun visitAnnotationEntry(
+         node: ASTNode,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+@@ -61,6 +104,12 @@ public class AnnotationRule : Rule("annotation") {
+     ) {
+         require(node.elementType == ANNOTATION_ENTRY)
+ 
++        // Annotation entries inside array syntax annotations ("@[..]") should not be handled as stand-alone
++        // annotations. Instead, handle the containing ANNOTATION element.
++        if (node.treeParent.elementType == ANNOTATION) {
++            return
++        }
++
+         if (node.isAnnotationEntryWithValueArgumentList() &&
+             node.treeParent.treeParent.elementType != VALUE_PARAMETER && // fun fn(@Ann("blah") a: String)
+             node.treeParent.treeParent.elementType != VALUE_ARGUMENT && // fn(@Ann("blah") "42")
+@@ -193,6 +242,9 @@ public class AnnotationRule : Rule("annotation") {
+             ?.useSiteTarget
+             ?.getAnnotationUseSiteTarget()
+ 
++    private fun ASTNode.isArraySyntaxAnnotation() =
++        elementType == ANNOTATION && findChildByType(LBRACKET) != null
++
+     private fun ASTNode.isAnnotationEntryWithValueArgumentList() =
+         getAnnotationEntryValueArgumentList() != null
+ 
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRuleArraySyntaxAnnotationTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRuleArraySyntaxAnnotationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRuleArraySyntaxAnnotationTest.kt
+@@ -0,0 +1,64 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class AnnotationRuleArraySyntaxAnnotationTest {
++    private val annotationRuleAssertThat = assertThatRule { AnnotationRule() }
++
++    @Test
++    fun `Given an array syntax annotation on same line as annotated construct then report and autocorrect`() {
++        val code =
++            """
++            @[JvmStatic Provides] fun foo() = 42
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[JvmStatic Provides]
++            fun foo() = 42
++            """.trimIndent()
++
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given an array syntax annotation containing an annotation with parameter on same line as annotated construct then report and autocorrect without wrapping the entries`() {
++        val code =
++            """
++            @[Suppress("DEPRECATION") Provides] fun foo() = 42
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[Suppress("DEPRECATION") Provides]
++            fun foo() = 42
++            """.trimIndent()
++
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a use-site target array syntax annotation on same line as annotated construct then report and autocorrect`() {
++        val code =
++            """
++            class Foo {
++                @set:[Inject VisibleForTesting] public var collaborator: Collaborator
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            class Foo {
++                @set:[Inject VisibleForTesting]
++                public var collaborator: Collaborator
++            }
++            """.trimIndent()
++
++        annotationRuleAssertThat(code)
++            .hasLintViolation(2, 5, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

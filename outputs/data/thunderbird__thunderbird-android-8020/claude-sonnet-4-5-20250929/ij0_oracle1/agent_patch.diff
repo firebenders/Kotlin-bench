@@ -1,0 +1,119 @@
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
+index a90f133eda..d134065d0f 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
+@@ -186,6 +186,9 @@ public class RecipientSelectView extends TokenCompleteTextView<Recipient> implem
+         } catch (NonAsciiEmailAddressException e) {
+             setError(getContext().getString(R.string.recipient_error_non_ascii));
+             return null;
++        } catch (InvalidEmailAddressException e) {
++            setError(getContext().getString(R.string.recipient_error_invalid_email));
++            return null;
+         }
+     }
+ 
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+index a14cb14bdb..b655c0477b 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+@@ -1,5 +1,6 @@
+ package com.fsck.k9.view
+ 
++import com.fsck.k9.EmailAddressValidator
+ import com.fsck.k9.mail.Address
+ import org.apache.james.mime4j.util.CharsetUtil
+ 
+@@ -10,14 +11,16 @@ import org.apache.james.mime4j.util.CharsetUtil
+  *  RFC 5322 address-list syntax. See (ignored) tests in `UserInputEmailAddressParserTest`.
+  */
+ internal class UserInputEmailAddressParser {
++    private val emailAddressValidator = EmailAddressValidator()
+ 
+-    @Throws(NonAsciiEmailAddressException::class)
++    @Throws(NonAsciiEmailAddressException::class, InvalidEmailAddressException::class)
+     fun parse(input: String): List<Address> {
+         return Address.parseUnencoded(input)
+             .mapNotNull { address ->
+                 when {
+                     address.isIncomplete() -> null
+                     address.isNonAsciiAddress() -> throw NonAsciiEmailAddressException(address.address)
++                    !address.isValidRfc5321Address() -> throw InvalidEmailAddressException(address.address)
+                     else -> Address.parse(address.toEncodedString()).firstOrNull()
+                 }
+             }
+@@ -26,6 +29,10 @@ internal class UserInputEmailAddressParser {
+     private fun Address.isIncomplete() = hostname.isNullOrBlank()
+ 
+     private fun Address.isNonAsciiAddress() = !CharsetUtil.isASCII(address)
++
++    private fun Address.isValidRfc5321Address() = emailAddressValidator.isValidAddressOnly(address)
+ }
+ 
+ internal class NonAsciiEmailAddressException(message: String) : Exception(message)
++
++internal class InvalidEmailAddressException(message: String) : Exception(message)
+diff --git a/legacy/ui/legacy/src/main/res/values/strings.xml b/legacy/ui/legacy/src/main/res/values/strings.xml
+index a40685e598..164e4f7e6c 100644
+--- a/legacy/ui/legacy/src/main/res/values/strings.xml
++++ b/legacy/ui/legacy/src/main/res/values/strings.xml
+@@ -992,6 +992,7 @@
+ 
+     <string name="recipient_error_non_ascii">Special characters are currently not supported!</string>
+     <string name="recipient_error_parse_failed">Error parsing address!</string>
++    <string name="recipient_error_invalid_email">Invalid email address!</string>
+     <string name="account_settings_crypto_hide_sign_only">Hide unencrypted signatures</string>
+     <string name="account_settings_crypto_hide_sign_only_on">Only encrypted signatures will be displayed</string>
+     <string name="account_settings_crypto_hide_sign_only_off">All signatures will be displayed</string>
+
+diff --git a/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidAddressTest.kt b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidAddressTest.kt
+new file mode 100644
+--- /dev/null
++++ b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidAddressTest.kt
+@@ -0,0 +1,47 @@
++package com.fsck.k9.view
++
++import assertk.assertFailure
++import assertk.assertThat
++import assertk.assertions.isInstanceOf
++import assertk.assertions.isNotEmpty
++import kotlin.test.Test
++
++class UserInputEmailAddressParserInvalidAddressTest {
++    private val parser = UserInputEmailAddressParser()
++
++    @Test
++    fun `address with slash at end should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("test@gmail.com/")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `address with slash in domain should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("test@gmai/l.com")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `address with invalid character in domain should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("test@gmail.com#")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `address with slash in local part is valid`() {
++        // Note: According to RFC 5321, slash is allowed in the local part
++        val addresses = parser.parse("test/user@gmail.com")
++        assertThat(addresses).isNotEmpty()
++    }
++
++    @Test
++    fun `address with space in domain should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("test@gmai l.com")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++}
++

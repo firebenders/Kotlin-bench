@@ -1,0 +1,413 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ImportOrderingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ImportOrderingRule.kt
+index 32fe19b3..bb64b471 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ImportOrderingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ImportOrderingRule.kt
+@@ -78,10 +78,13 @@ public class ImportOrderingRule :
+                     val index2 = importSorter.findImportIndex((current.psi as KtImportDirective).importPath!!)
+ 
+                     var hasBlankLines = false
+-                    for (i in (index1 + 1) until index2) {
+-                        if (importSorter.patterns[i] == PatternEntry.BLANK_LINE_ENTRY) {
+-                            hasBlankLines = true
+-                            break
++                    // Only check for blank lines between imports, not before the first import
++                    if (prev != null) {
++                        for (i in (index1 + 1) until index2) {
++                            if (importSorter.patterns[i] == PatternEntry.BLANK_LINE_ENTRY) {
++                                hasBlankLines = true
++                                break
++                            }
+                         }
+                     }
+                     if (hasBlankLines) {
+
+diff --git a/FIX_SUMMARY.md b/FIX_SUMMARY.md
+new file mode 100644
+--- /dev/null
++++ b/FIX_SUMMARY.md
+@@ -0,0 +1,119 @@
++# Fix for Import Ordering Issue with Multiple Blank Line Separators
++
++## Issue Description
++
++When using the `ij_kotlin_imports_layout` configuration with multiple `|` (blank line) separators, ktlint version 0.48.2 was generating extra blank lines before the first import in a file. The number of extra blank lines corresponded to the number of `|` separators that appeared before the pattern matching the first import.
++
++### Example Configuration
++```
++ij_kotlin_imports_layout = *, |, javax.**, java.**, |, kotlinx.**, kotlin.**
++```
++
++### Expected Behavior
++For a file containing only `java.**` imports:
++```kotlin
++package test
++
++import java.nio.file.Files
++import java.nio.file.Paths
++import java.util.Objects
++
++object TestData {
++    // ...
++}
++```
++
++### Observed Behavior (Bug)
++```kotlin
++package test
++
++
++
++import java.nio.file.Files
++import java.nio.file.Paths
++import java.util.Objects
++
++object TestData {
++    // ...
++}
++```
++
++Note the extra blank lines between the package declaration and imports.
++
++## Root Cause
++
++In `ImportOrderingRule.kt`, the logic for inserting blank lines between import groups was checking ALL patterns from the beginning (index 0) up to the first import's pattern index when processing the first import (`prev == null`). This caused any blank line separators (`|`) that appeared before the first import's matching pattern to be incorrectly added before the first import.
++
++### Code Location
++File: `ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ImportOrderingRule.kt`
++
++Lines 76-96 (before fix):
++```kotlin
++sortedImports.fold(null as ASTNode?) { prev, current ->
++    val index1 = if (prev == null) -1 else importSorter.findImportIndex((prev.psi as KtImportDirective).importPath!!)
++    val index2 = importSorter.findImportIndex((current.psi as KtImportDirective).importPath!!)
++
++    var hasBlankLines = false
++    for (i in (index1 + 1) until index2) {  // When prev is null, this checks from 0 to index2
++        if (importSorter.patterns[i] == PatternEntry.BLANK_LINE_ENTRY) {
++            hasBlankLines = true
++            break
++        }
++    }
++    if (hasBlankLines) {
++        sortedImportsWithSpaces += PsiWhiteSpaceImpl("\n\n")  // Adds blank line BEFORE first import
++    }
++    sortedImportsWithSpaces += current
++
++    return@fold current
++}
++```
++
++## Solution
++
++Added a check to only look for blank line patterns when there is a previous import (`prev != null`). This ensures that blank lines are only inserted BETWEEN import groups, never before the first import.
++
++### Modified Code
++Lines 80-89 (after fix):
++```kotlin
++var hasBlankLines = false
++// Only check for blank lines between imports, not before the first import
++if (prev != null) {
++    for (i in (index1 + 1) until index2) {
++        if (importSorter.patterns[i] == PatternEntry.BLANK_LINE_ENTRY) {
++            hasBlankLines = true
++            break
++        }
++    }
++}
++```
++
++## Testing
++
++### New Test Files
++1. `ImportOrderingRuleIssueTest.kt` - Tests for the specific issue scenarios
++2. `ImportOrderingRuleRegressionTest.kt` - Comprehensive regression tests including:
++   - The exact scenario from the reported issue
++   - Multiple blank line separators before the first matching pattern
++   - Idempotency verification (running format twice should produce same result)
++   - Complex layouts with multiple groups
++
++### Test Results
++- All new tests pass ✓
++- All existing import ordering tests pass ✓
++- No regressions in the full test suite ✓
++
++## Impact
++
++This fix:
++1. Resolves the reported issue where multiple blank line separators caused extra blank lines before the first import
++2. Makes the import formatting idempotent (applying format twice produces the same result)
++3. Maintains backward compatibility with existing import layout configurations
++4. Does not affect the insertion of blank lines between import groups (which still works correctly)
++
++## Files Changed
++
++1. **ImportOrderingRule.kt** - Core fix (lines 81-89)
++2. **ImportOrderingRuleIssueTest.kt** - New test file
++3. **ImportOrderingRuleRegressionTest.kt** - New test file
++
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/importordering/ImportOrderingRuleIssueTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/importordering/ImportOrderingRuleIssueTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/importordering/ImportOrderingRuleIssueTest.kt
+@@ -0,0 +1,122 @@
++package com.pinterest.ktlint.ruleset.standard.rules.importordering
++
++import com.pinterest.ktlint.ruleset.standard.rules.ImportOrderingRule
++import com.pinterest.ktlint.ruleset.standard.rules.ImportOrderingRule.Companion.IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for the issue where multiple blank line patterns in ij_kotlin_imports_layout
++ * cause extra blank lines to be inserted before the first import.
++ */
++class ImportOrderingRuleIssueTest {
++    private val importOrderingRuleAssertThat = assertThatRule { ImportOrderingRule() }
++
++    @Test
++    fun `Issue - Given imports layout with multiple blank line separators and file has only imports matching one pattern, do not add blank lines before first import`() {
++        val code =
++            """
++            import java.nio.file.Files
++            import java.nio.file.Paths
++            import java.util.Objects
++            """.trimIndent()
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "*, |, javax.**, java.**, |, kotlinx.**, kotlin.**")
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue - Given imports layout with blank line separators before matching pattern, format correctly without extra blank lines`() {
++        val code =
++            """
++            import java.nio.file.Files
++            import java.nio.file.Paths
++            import java.util.Objects
++            """.trimIndent()
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "*, |, javax.**, java.**, |, kotlinx.**, kotlin.**")
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue - Given imports from multiple groups with blank line separators between them, format correctly`() {
++        val code =
++            """
++            import java.nio.file.Files
++            import kotlin.concurrent.Thread
++            """.trimIndent()
++        val formattedCode =
++            """
++            import java.nio.file.Files
++
++            import kotlin.concurrent.Thread
++            """.trimIndent()
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "*, |, javax.**, java.**, |, kotlinx.**, kotlin.**")
++            .hasLintViolation(1, 1, "Imports must be ordered according to the pattern specified in .editorconfig")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue - Given layout starting with blank line pattern and only matching later pattern, do not add blank lines before first import`() {
++        val code =
++            """
++            import kotlin.concurrent.Thread
++            import kotlin.io.Closeable
++            """.trimIndent()
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "|, |, kotlin.**, *")
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue - Given imports matching first pattern after blank line separators, do not add blank lines before first import`() {
++        val code =
++            """
++            import android.app.Activity
++            import android.view.View
++            """.trimIndent()
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "*, |, java.**, |, kotlin.**")
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue - Complex layout with multiple blank line separators and imports from various groups`() {
++        val code =
++            """
++            import android.app.Activity
++            import android.view.View
++
++            import javax.inject.Inject
++
++            import java.nio.file.Files
++            import java.util.Objects
++
++            import kotlin.concurrent.Thread
++            """.trimIndent()
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "android.**, |, javax.**, |, java.**, |, kotlin.**, *")
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue - Given imports that need reordering with blank line separators, do not add blank lines before first import after reformatting`() {
++        val code =
++            """
++            import kotlin.concurrent.Thread
++            import java.nio.file.Files
++            """.trimIndent()
++        val formattedCode =
++            """
++            import java.nio.file.Files
++
++            import kotlin.concurrent.Thread
++            """.trimIndent()
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "*, |, java.**, |, kotlin.**")
++            .hasLintViolation(1, 1, "Imports must be ordered according to the pattern specified in .editorconfig")
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/importordering/ImportOrderingRuleRegressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/importordering/ImportOrderingRuleRegressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/importordering/ImportOrderingRuleRegressionTest.kt
+@@ -0,0 +1,124 @@
++package com.pinterest.ktlint.ruleset.standard.rules.importordering
++
++import com.pinterest.ktlint.ruleset.standard.rules.ImportOrderingRule
++import com.pinterest.ktlint.ruleset.standard.rules.ImportOrderingRule.Companion.IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++/**
++ * Regression test for issue where multiple blank line patterns in ij_kotlin_imports_layout
++ * caused extra blank lines to be inserted before the first import in version 0.48.2.
++ *
++ * The issue was that when the first import matched a pattern that had blank line separators
++ * before it in the layout configuration, those blank lines were incorrectly added before
++ * the first import.
++ *
++ * For example, with layout: "*, |, javax.**, java.**, |, kotlinx.**, kotlin.**"
++ * And a file with only java.** imports, ktlint would incorrectly add blank lines before
++ * the first import because there was a "|" separator before "java.**" in the pattern.
++ */
++class ImportOrderingRuleRegressionTest {
++    private val importOrderingRuleAssertThat = assertThatRule { ImportOrderingRule() }
++
++    @Test
++    fun `Regression - Issue with multiple pipe separators generating extra blank lines before first import`() {
++        // This is the exact scenario from the reported issue
++        val code =
++            """
++            package test
++
++            import java.nio.file.Files
++            import java.nio.file.Paths
++            import java.util.Objects
++
++            object TestData {
++                fun loadString(dataset: String): String {
++                    val path = Paths.get(Objects.requireNonNull(TestData::class.java.getResource(dataset)).toURI())
++                    return String(Files.readAllBytes(path))
++                }
++            }
++            """.trimIndent()
++
++        // With the fix, this should pass without any lint violations
++        // Before the fix, it would fail because ktlint would want to add extra blank lines
++        // between package and imports
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "*, |, javax.**, java.**, |, kotlinx.**, kotlin.**")
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Regression - Blank line patterns before first matching pattern should not add blank lines before first import`() {
++        val code =
++            """
++            import kotlin.concurrent.Thread
++            import kotlin.io.Closeable
++            """.trimIndent()
++
++        // The layout has two blank line separators before kotlin.**
++        // These should NOT cause blank lines to be added before the first import
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "|, |, kotlin.**, *")
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Regression - Multiple groups with blank line separators should only add blank lines between groups`() {
++        val code =
++            """
++            import android.app.Activity
++
++            import java.nio.file.Files
++
++            import kotlin.concurrent.Thread
++            """.trimIndent()
++
++        // Layout: android.**, |, java.**, |, kotlin.**, *
++        // Should add blank lines BETWEEN groups but NOT before the first import
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "android.**, |, java.**, |, kotlin.**, *")
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Regression - Formatting should be idempotent - running twice should produce same result`() {
++        val code =
++            """
++            import kotlin.concurrent.Thread
++            import java.nio.file.Files
++            """.trimIndent()
++        val formattedCode =
++            """
++            import java.nio.file.Files
++
++            import kotlin.concurrent.Thread
++            """.trimIndent()
++
++        // First format
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "*, |, java.**, |, kotlin.**")
++            .hasLintViolation(1, 1, "Imports must be ordered according to the pattern specified in .editorconfig")
++            .isFormattedAs(formattedCode)
++
++        // Second format - should be idempotent (no further changes)
++        importOrderingRuleAssertThat(formattedCode)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "*, |, java.**, |, kotlin.**")
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Regression - All imports matching first pattern after blank separators should not add extra blank lines`() {
++        val code =
++            """
++            import com.example.Bar
++            import com.example.Foo
++            """.trimIndent()
++
++        // Layout starts with blank line separators, but all imports match the wildcard pattern
++        // Should NOT add blank lines before first import
++        importOrderingRuleAssertThat(code)
++            .withEditorConfigOverride(IJ_KOTLIN_IMPORTS_LAYOUT_PROPERTY to "*, |, java.**, |, kotlin.**")
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

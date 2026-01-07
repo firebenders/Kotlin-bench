@@ -1,0 +1,267 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt
+index 9c79f4b6a21..4c7d3313694 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt
+@@ -3,6 +3,7 @@ package org.wordpress.android.ui.domains.management.newdomainsearch
+ import androidx.lifecycle.viewModelScope
+ import dagger.hilt.android.lifecycle.HiltViewModel
+ import kotlinx.coroutines.CoroutineDispatcher
++import kotlinx.coroutines.ExperimentalCoroutinesApi
+ import kotlinx.coroutines.FlowPreview
+ import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.flow.MutableSharedFlow
+@@ -10,6 +11,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+ import kotlinx.coroutines.flow.debounce
+ import kotlinx.coroutines.flow.filter
++import kotlinx.coroutines.flow.flatMapLatest
++import kotlinx.coroutines.flow.flow
+ import kotlinx.coroutines.flow.launchIn
+ import kotlinx.coroutines.flow.onEach
+ import org.wordpress.android.analytics.AnalyticsTracker
+@@ -23,7 +26,7 @@ import javax.inject.Named
+ 
+ private const val SEARCH_QUERY_DELAY_MS = 250L
+ 
+-@OptIn(FlowPreview::class)
++@OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
+ @HiltViewModel
+ class NewDomainSearchViewModel @Inject constructor(
+     @Named(UI_THREAD) private val mainDispatcher: CoroutineDispatcher,
+@@ -43,19 +46,20 @@ class NewDomainSearchViewModel @Inject constructor(
+         debouncedQuery
+             .filter { it.isNotBlank() }
+             .debounce(SEARCH_QUERY_DELAY_MS)
+-            .onEach(::fetchDomains)
+-            .launchIn(viewModelScope)
+-    }
+-
+-    private suspend fun fetchDomains(query: String) {
+-        _uiStateFlow.emit(UiState.Loading)
+-        val result = newDomainsSearchRepository.searchForDomains(query)
+-        _uiStateFlow.emit(
+-            when (result) {
+-                is NewDomainsSearchRepository.DomainsResult.Success -> UiState.PopulatedDomains(result.proposedDomains)
+-                is NewDomainsSearchRepository.DomainsResult.Error -> UiState.Error
++            .flatMapLatest { query ->
++                flow {
++                    emit(UiState.Loading)
++                    val result = newDomainsSearchRepository.searchForDomains(query)
++                    emit(
++                        when (result) {
++                            is NewDomainsSearchRepository.DomainsResult.Success -> UiState.PopulatedDomains(result.proposedDomains)
++                            is NewDomainsSearchRepository.DomainsResult.Error -> UiState.Error
++                        }
++                    )
++                }
+             }
+-        )
++            .onEach { state -> _uiStateFlow.emit(state) }
++            .launchIn(viewModelScope)
+     }
+ 
+     fun onSearchQueryChanged(query: String) {
+
+diff --git a/IMPLEMENTATION_SUMMARY.md b/IMPLEMENTATION_SUMMARY.md
+new file mode 100644
+--- /dev/null
++++ b/IMPLEMENTATION_SUMMARY.md
+@@ -0,0 +1,58 @@
++# Implementation Summary: Cancel Stale Requests on Domain Search Screen
++
++## Problem
++When searching for a new domain, multiple requests could be in-flight simultaneously. The results of these requests could arrive out of order, causing stale (older) results to overwrite newer results on the UI. This is a classic race condition issue.
++
++## Root Cause
++The original implementation used `.onEach(::fetchDomains)` which would trigger a new coroutine for each debounced query, but didn't cancel the previous one. If:
++1. User types "examp" - Request A starts
++2. User types "example" - Request B starts
++3. Request B completes first and updates UI correctly
++4. Request A completes later and overwrites UI with stale results
++
++This resulted in the UI showing incorrect/outdated search results.
++
++## Solution
++Changed the flow pipeline to use `flatMapLatest` instead of `onEach`. The key changes:
++
++### Modified File: `NewDomainSearchViewModel.kt`
++
++**Changes Made:**
++1. Added imports:
++   - `kotlinx.coroutines.ExperimentalCoroutinesApi`
++   - `kotlinx.coroutines.flow.flatMapLatest`
++   - `kotlinx.coroutines.flow.flow`
++
++2. Updated `@OptIn` annotation:
++   - Changed from: `@OptIn(FlowPreview::class)`
++   - Changed to: `@OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)`
++
++3. Refactored the init block to use `flatMapLatest`:
++   - **Before:** Used `.onEach(::fetchDomains)` which launched independent coroutines
++   - **After:** Used `.flatMapLatest { query -> flow { ... } }` which cancels the previous flow when a new query arrives
++   - Removed the separate `fetchDomains` function - logic is now inline
++
++## How It Works
++`flatMapLatest` is a Flow operator that:
++1. When a new value is emitted (new search query)
++2. It **cancels** the previous flow collection (previous search)
++3. Then starts the new flow (new search)
++4. This ensures only the latest search can complete and update the UI
++
++## Benefits
++- **Prevents race conditions:** Older requests are cancelled, so they can't overwrite newer results
++- **Cleaner code:** Automatic cancellation without manual Job management
++- **Better UX:** Users always see results for their most recent search query
++- **Maintains debouncing:** The existing 250ms debounce delay is preserved
++
++## Testing
++Created new test file `NewDomainSearchViewModelRaceConditionTest.kt` with tests that verify:
++1. When first request is slow and second is fast, only second result appears in UI
++2. When multiple rapid requests are made, only the latest completes
++
++## Backward Compatibility
++The change is transparent to callers - the public API remains unchanged:
++- `onSearchQueryChanged(query: String)` - same signature
++- `uiStateFlow` - same type and behavior
++- The only difference is internal: stale requests are now cancelled automatically
++
+
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModelRaceConditionTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModelRaceConditionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/WordPress/src/test/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModelRaceConditionTest.kt
+@@ -0,0 +1,134 @@
++package org.wordpress.android.ui.domains.management.newdomainsearch
++
++import kotlinx.coroutines.ExperimentalCoroutinesApi
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.flow.toList
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.test.TestScope
++import org.assertj.core.api.Assertions.assertThat
++import org.junit.Before
++import org.junit.Test
++import org.mockito.Mock
++import org.mockito.MockitoAnnotations
++import org.mockito.kotlin.whenever
++import org.wordpress.android.BaseUnitTest
++import org.wordpress.android.ui.domains.management.newdomainsearch.NewDomainSearchViewModel.UiState
++import org.wordpress.android.ui.domains.management.newdomainsearch.domainsfetcher.NewDomainsSearchRepository
++import org.wordpress.android.ui.domains.management.newdomainsearch.domainsfetcher.NewDomainsSearchRepository.DomainsResult
++import org.wordpress.android.ui.domains.management.newdomainsearch.domainsfetcher.ProposedDomain
++import org.wordpress.android.util.analytics.AnalyticsTrackerWrapper
++
++@ExperimentalCoroutinesApi
++class NewDomainSearchViewModelRaceConditionTest : BaseUnitTest() {
++    @Mock
++    private lateinit var analyticsTracker: AnalyticsTrackerWrapper
++
++    @Mock
++    private lateinit var repository: NewDomainsSearchRepository
++
++    private lateinit var viewModel: NewDomainSearchViewModel
++
++    @Before
++    fun setUp() {
++        MockitoAnnotations.openMocks(this)
++        viewModel = NewDomainSearchViewModel(
++            mainDispatcher = testDispatcher(),
++            analyticsTracker = analyticsTracker,
++            newDomainsSearchRepository = repository
++        )
++    }
++
++    @Test
++    fun `GIVEN slow first request and fast second request WHEN searching THEN only latest result updates UI`() =
++        testWithUiStates { states ->
++            val firstDomains = listOf(
++                ProposedDomain(
++                    productId = 1,
++                    domain = "oldresult.com",
++                    price = "USD 100",
++                    salePrice = null,
++                    supportsPrivacy = true
++                )
++            )
++            val secondDomains = listOf(
++                ProposedDomain(
++                    productId = 2,
++                    domain = "newresult.com",
++                    price = "USD 200",
++                    salePrice = null,
++                    supportsPrivacy = true
++                )
++            )
++
++            // First request is slow (500ms delay)
++            whenever(repository.searchForDomains("first")).then {
++                Thread.sleep(500)
++                DomainsResult.Success(firstDomains)
++            }
++
++            // Second request is fast (100ms delay)
++            whenever(repository.searchForDomains("second")).then {
++                Thread.sleep(100)
++                DomainsResult.Success(secondDomains)
++            }
++
++            viewModel.onSearchQueryChanged("first")
++            delay(300) // Wait for debounce
++            viewModel.onSearchQueryChanged("second")
++            advanceUntilIdle()
++
++            // The last state should be from the second (latest) request, not the first
++            val finalState = states.last()
++            assertThat(finalState).isInstanceOf(UiState.PopulatedDomains::class.java)
++            val populatedState = finalState as UiState.PopulatedDomains
++            assertThat(populatedState.domains).isEqualTo(secondDomains)
++            assertThat(populatedState.domains.first().domain).isEqualTo("newresult.com")
++        }
++
++    @Test
++    fun `GIVEN multiple rapid requests WHEN searching THEN only latest request completes`() =
++        testWithUiStates { states ->
++            val domains1 = listOf(ProposedDomain(1, "first.com", "USD 100", null, true))
++            val domains2 = listOf(ProposedDomain(2, "second.com", "USD 200", null, true))
++            val domains3 = listOf(ProposedDomain(3, "third.com", "USD 300", null, true))
++
++            // All requests have some delay to simulate network calls
++            whenever(repository.searchForDomains("first")).then {
++                Thread.sleep(300)
++                DomainsResult.Success(domains1)
++            }
++            whenever(repository.searchForDomains("second")).then {
++                Thread.sleep(300)
++                DomainsResult.Success(domains2)
++            }
++            whenever(repository.searchForDomains("third")).then {
++                Thread.sleep(100)
++                DomainsResult.Success(domains3)
++            }
++
++            // Trigger searches with enough delay to pass debounce
++            viewModel.onSearchQueryChanged("first")
++            delay(260)
++            viewModel.onSearchQueryChanged("second")
++            delay(260)
++            viewModel.onSearchQueryChanged("third")
++            advanceUntilIdle()
++
++            // Only the third (latest) request should complete
++            val finalState = states.last()
++            assertThat(finalState).isInstanceOf(UiState.PopulatedDomains::class.java)
++            val populatedState = finalState as UiState.PopulatedDomains
++            assertThat(populatedState.domains).isEqualTo(domains3)
++            assertThat(populatedState.domains.first().domain).isEqualTo("third.com")
++        }
++
++    private fun testWithUiStates(block: suspend TestScope.(events: List<UiState>) -> Unit) = test {
++        val uiStates = mutableListOf<UiState>()
++        val job = launch { viewModel.uiStateFlow.toList(uiStates) }
++
++        block(uiStates)
++
++        job.cancel()
++    }
++}
++

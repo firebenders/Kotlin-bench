@@ -48,66 +48,49 @@ index 3fef2583bf..149e4dda8f 100644
  
      // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
      // and there's no no-op version for release build. Usage has been disabled for release
-diff --git a/AnkiDroid/src/main/assets/scripts/card.js b/AnkiDroid/src/main/assets/scripts/card.js
-index e82279e5c8..2c52d7dd0c 100644
---- a/AnkiDroid/src/main/assets/scripts/card.js
-+++ b/AnkiDroid/src/main/assets/scripts/card.js
-@@ -106,6 +106,16 @@ function taBlur(itag) {
-     window.location.href = "typeblurtext:" + encodedVal;
- }
- 
-+/* Get the current typed text from the input field.
-+ * Called by the app to capture the typed answer before showing the answer card. */
-+function _getTypedText() {
-+    var typeans = document.getElementById("typeans");
-+    if (typeans) {
-+        return typeans.value;
-+    }
-+    return "";
-+}
-+
- /* Look at the text entered into the input box and send the text on a return */
- function taKey(itag, e) {
-     var keycode;
 diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
-index 9f1599a7eb..36b26441af 100644
+index 9f1599a7eb..cf1359a32b 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
-@@ -1332,7 +1332,34 @@ abstract class AbstractFlashcardViewer :
-         // Clean up the user answer and the correct answer
-         if (!typeAnswer!!.useInputTag) {
+@@ -1334,6 +1334,38 @@ abstract class AbstractFlashcardViewer :
              typeAnswer!!.input = answerField!!.text.toString()
-+            onTypedInputCaptured()
-+        } else if (typeAnswer!!.correct != null && webView != null) {
-+            // When using input tag, capture the typed input from the WebView
-+            // before generating the answer HTML
-+            webView?.evaluateJavascript("_getTypedText()") { result ->
-+                // Result is JSON-encoded, e.g., "\"hello\"" for "hello", or "\"\"" for empty
-+                typeAnswer!!.input = result?.let {
-+                    if (it.length >= 2 && it.startsWith("\"") && it.endsWith("\"")) {
-+                        // Remove surrounding quotes and unescape
-+                        it.substring(1, it.length - 1)
-+                            .replace("\\\"", "\"")
-+                            .replace("\\\\", "\\")
-+                            .replace("\\n", "\n")
-+                            .replace("\\r", "\r")
-+                            .replace("\\t", "\t")
-+                    } else {
+         }
+         isSelecting = false
++        // When using input tag in WebView, get the typed value directly from the input element
++        // before generating the answer HTML. This ensures the comparison is shown correctly
++        // even if the blur event hasn't been processed yet.
++        if (typeAnswer!!.useInputTag && typeAnswer!!.correct != null && webView != null) {
++            webView!!.evaluateJavascript(
++                "(function() { var e = document.getElementById('typeans'); return e ? e.value : ''; })()"
++            ) { value ->
++                // The returned value is a JSON-encoded string (e.g., "hello" with quotes).
++                // Parse it as JSON to properly handle escaped characters.
++                typeAnswer!!.input = try {
++                    if (value.isNullOrEmpty() || value == "null") {
 +                        ""
++                    } else {
++                        org.json.JSONArray("[$value]").optString(0, "")
 +                    }
-+                } ?: ""
-+                onTypedInputCaptured()
++                } catch (e: Exception) {
++                    Timber.w(e, "Failed to parse typed answer from WebView")
++                    ""
++                }
++                displayCardAnswerContinue()
 +            }
 +        } else {
-+            onTypedInputCaptured()
-         }
++            displayCardAnswerContinue()
++        }
 +    }
 +
-+    /** Called after the typed input has been captured. Continues the answer display process. */
-+    private fun onTypedInputCaptured() {
-         isSelecting = false
++    /**
++     * Continues displaying the card answer after the typed input has been captured.
++     * This is called either directly from displayCardAnswer() when not using input tag,
++     * or from the JavaScript callback when using input tag.
++     */
++    private fun displayCardAnswerContinue() {
          val answerContent = htmlGenerator!!.generateHtml(getColUnsafe, currentCard!!, SingleCardSide.BACK)
          automaticAnswer.onDisplayAnswer()
+         launchCatchingTask {
 diff --git a/gradle.properties b/gradle.properties
 index 13992ecd31..b06b0f2c12 100644
 --- a/gradle.properties

@@ -1,0 +1,290 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 65465d1e..0a68c885 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -32,6 +32,8 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUNCTION_LITERAL
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.IDENTIFIER
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.LAMBDA_ARGUMENT
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.LAMBDA_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.IF
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.KDOC
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.KDOC_END
+@@ -451,7 +453,7 @@ public class IndentationRule :
+             }
+     }
+ 
+-    private fun ASTNode.calculateIndentOfFunctionLiteralParameters() =
++    private fun ASTNode.calculateIndentOfFunctionLiteralParameters(): String {
+         if (codeStyle == ktlint_official || isFirstParameterOfFunctionLiteralPrecededByNewLine()) {
+             // val fieldExample =
+             //      LongNameClass {
+@@ -460,25 +462,47 @@ public class IndentationRule :
+             //              paramC ->
+             //          ClassB(paramA, paramB, paramC)
+             //      }
+-            indentConfig.indent.repeat(2)
+-        } else {
+-            // Allow default IntelliJ IDEA formatting:
+-            // val fieldExample =
+-            //     LongNameClass { paramA,
+-            //                     paramB,
+-            //                     paramC ->
+-            //         ClassB(paramA, paramB, paramC)
+-            //     }
+-            parent(CALL_EXPRESSION)
+-                ?.let { callExpression ->
+-                    val textBeforeFirstParameter =
+-                        callExpression.findChildByType(REFERENCE_EXPRESSION)?.text +
+-                            " { "
+-                    " ".repeat(textBeforeFirstParameter.length)
+-                }
+-                ?: indentConfig.indent.repeat(2)
++            return indentConfig.indent.repeat(2)
+         }
+ 
++        // Check if this is a trailing lambda where the call expression's VALUE_ARGUMENT_LIST contains newlines.
++        // In this case, alignment to the function name doesn't make sense visually.
++        // For example:
++        //     combine(
++        //         Any(),
++        //         Any()
++        //     ) { a,
++        //             b ->  // Should use double indent, not align to "combine { "
++        //         TODO()
++        //     }
++        val functionLiteral = parent(FUNCTION_LITERAL)
++        val lambdaExpression = functionLiteral?.treeParent?.takeIf { it.elementType == LAMBDA_EXPRESSION }
++        val lambdaArgument = lambdaExpression?.treeParent?.takeIf { it.elementType == LAMBDA_ARGUMENT }
++        val callExpression = lambdaArgument?.treeParent?.takeIf { it.elementType == CALL_EXPRESSION }
++        if (callExpression != null) {
++            val valueArgumentList = callExpression.findChildByType(VALUE_ARGUMENT_LIST)
++            if (valueArgumentList?.textContains('\n') == true) {
++                return indentConfig.indent.repeat(2)
++            }
++        }
++
++        // Allow default IntelliJ IDEA formatting for single-line call expressions:
++        // val fieldExample =
++        //     LongNameClass { paramA,
++        //                     paramB,
++        //                     paramC ->
++        //         ClassB(paramA, paramB, paramC)
++        //     }
++        return parent(CALL_EXPRESSION)
++            ?.let { callExpr ->
++                val textBeforeFirstParameter =
++                    callExpr.findChildByType(REFERENCE_EXPRESSION)?.text +
++                        " { "
++                " ".repeat(textBeforeFirstParameter.length)
++            }
++            ?: indentConfig.indent.repeat(2)
++    }
++
+     private fun ASTNode.isFirstParameterOfFunctionLiteralPrecededByNewLine() =
+         parent(FUNCTION_LITERAL)
+             ?.findChildByType(VALUE_PARAMETER_LIST)
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssue1756Test.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssue1756Test.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssue1756Test.kt
+@@ -0,0 +1,189 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Nested
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for issue https://github.com/pinterest/ktlint/issues/1756
++ * Format parameters in lambda when the trailing lambda follows a multiline call expression
++ */
++class IndentationRuleIssue1756Test {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Nested
++    inner class `Issue 1756 - Given a trailing lambda with multiline parameters following a multiline call expression` {
++        @Test
++        fun `Given ktlint_official code style with trailing lambda following multiline call then expect double indent for lambda params`() {
++            val code =
++                """
++                fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
++                    c(a, b)
++                }
++
++                class Foo {
++                    fun foo() {
++                        combine(
++                            Any(),
++                            Any()
++                        ) { a,
++                                b ->
++                            TODO()
++                        }
++                    }
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given intellij_idea code style with trailing lambda following multiline call then expect double indent for lambda params`() {
++            // When the call expression before the trailing lambda is multiline, the alignment with
++            // the function name does not make sense. In this case, double indent should be used.
++            val code =
++                """
++                fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
++                    c(a, b)
++                }
++
++                class Foo {
++                    fun foo() {
++                        combine(
++                            Any(),
++                            Any()
++                        ) { a,
++                                b ->
++                            TODO()
++                        }
++                    }
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.intellij_idea)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given android_studio code style with trailing lambda following multiline call then expect double indent for lambda params`() {
++            val code =
++                """
++                fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
++                    c(a, b)
++                }
++
++                class Foo {
++                    fun foo() {
++                        combine(
++                            Any(),
++                            Any()
++                        ) { a,
++                                b ->
++                            TODO()
++                        }
++                    }
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.android_studio)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given badly indented code with trailing lambda following multiline call then fix the indentation`() {
++            val code =
++                """
++                fun foo() {
++                    combine(
++                        Any(),
++                        Any()
++                    ) { a,
++                        b ->
++                        TODO()
++                    }
++                }
++                """.trimIndent()
++            val formattedCode =
++                """
++                fun foo() {
++                    combine(
++                        Any(),
++                        Any()
++                    ) { a,
++                            b ->
++                        TODO()
++                    }
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.intellij_idea)
++                .hasLintViolation(6, 1, "Unexpected indentation (8) (should be 12)")
++                .isFormattedAs(formattedCode)
++        }
++    }
++
++    @Nested
++    inner class `Issue 1756 - Given a trailing lambda with single line call expression before it` {
++        @Test
++        fun `Given ktlint_official code style and lambda parameters on same line as brace then expect double indent`() {
++            val code =
++                """
++                fun foo() {
++                    combine(Any(), Any()) { a,
++                            b ->
++                        TODO()
++                    }
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given intellij_idea code style and single line call with lambda params on same line as brace then expect alignment`() {
++            // In intellij_idea style with a single line call expression, lambda parameters should be
++            // aligned based on "combine { " = 10 characters, plus base indent of 4 = 14 total
++            val code =
++                """
++                fun foo() {
++                    combine(Any(), Any()) { a,
++                              b ->
++                        TODO()
++                    }
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.intellij_idea)
++                .hasNoLintViolations()
++        }
++    }
++
++    @Nested
++    inner class `Issue 1756 - Given a trailing lambda with parameters starting on new line` {
++        @Test
++        fun `Given any code style with lambda parameters starting on new line after brace then expect double indent`() {
++            val code =
++                """
++                fun foo() {
++                    combine(
++                        Any(),
++                        Any()
++                    ) {
++                            a,
++                            b ->
++                        TODO()
++                    }
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.intellij_idea)
++                .hasNoLintViolations()
++        }
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

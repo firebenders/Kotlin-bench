@@ -49,68 +49,18 @@ index 413a4af4fd..dea9975cd2 100644
      // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
      // and there's no no-op version for release build. Usage has been disabled for release
 diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
-index 9e6c7805a6..3e5cf497a0 100644
+index 9e6c7805a6..2ce8b04953 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
-@@ -373,7 +373,13 @@ fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
-             replaceWithFileScheme("object", "data")
+@@ -340,7 +340,7 @@ fun parseVideos(text: String, mediaDir: String): String {
+ @NotInLibAnki
+ @VisibleForTesting
+ fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
+-    val doc = Jsoup.parse(content)
++    val doc = Jsoup.parseBodyFragment(content)
+     doc.outputSettings(OutputSettings().prettyPrint(false))
  
-     return if (hasMadeChanges) {
--        doc.body().html()
-+        // Use childNodes() instead of html() to preserve all content including script tags
-+        // Jsoup's html() method strips script content, breaking complex card templates
-+        val sb = StringBuilder()
-+        for (node in doc.body().childNodes()) {
-+            sb.append(node.outerHtml())
-+        }
-+        sb.toString()
-     } else {
-         content
-     }
-diff --git a/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt b/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
-index 9e77802166..8093290992 100644
---- a/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
-+++ b/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
-@@ -133,6 +133,39 @@ class TemplateManagerTest {
-         assertEquals("""<img src="file:///storage/emulated/0/AnkiDroid@%23$%25/collection.media/magenta.png">""", result)
-     }
- 
-+    /**
-+     * Regression test for https://github.com/ankidroid/Anki-Android/issues/15773
-+     * Script tags were being stripped when a substitution took place
-+     */
-+    @Test
-+    fun `parseSourcesToFileScheme - script tags are preserved when substitution occurs`() {
-+        val mediaDir = "storage/emulated/0/AnkiDroid/collection.media"
-+
-+        @Language("HTML")
-+        val content = """
-+            <script>
-+            var showHintsForPseudoClozes = true
-+            var underlineRevealedPseudoClozes = false
-+            </script>
-+            <div id="extra" class="content">
-+            <img src="paste-image.jpg" width="203">
-+            </div>
-+            <script>
-+            function toggleCloze(elem) { return elem; }
-+            </script>
-+        """.trimIndent()
-+
-+        val result = parseSourcesToFileScheme(content, mediaDir)
-+
-+        // Verify that script tags are preserved
-+        assert(result.contains("<script>")) { "Script opening tag should be preserved" }
-+        assert(result.contains("</script>")) { "Script closing tag should be preserved" }
-+        assert(result.contains("showHintsForPseudoClozes")) { "First script content should be preserved" }
-+        assert(result.contains("toggleCloze")) { "Second script content should be preserved" }
-+        // Verify that the image src was substituted
-+        assert(result.contains("file:///$mediaDir/paste-image.jpg")) { "Image src should be converted to file scheme" }
-+    }
-+
-     /***********************************************************************************************
-      * [parseVideos] tests
-      **********************************************************************************************/
+     fun replaceWithFileScheme(tag: String, attr: String): Boolean {
 diff --git a/gradle.properties b/gradle.properties
 index 13992ecd31..b06b0f2c12 100644
 --- a/gradle.properties
@@ -143,3 +93,163 @@ index df05afef76..4d2ca9684e 100644
  }
  
  dependencyResolutionManagement {
+
+diff --git a/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerScriptPreservationTest.kt b/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerScriptPreservationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerScriptPreservationTest.kt
+@@ -0,0 +1,154 @@
++/*
++ *  Copyright (c) 2024 Brayan Oliveira <brayandso.dev@gmail.com>
++ *
++ *  This program is free software; you can redistribute it and/or modify it under
++ *  the terms of the GNU General Public License as published by the Free Software
++ *  Foundation; either version 3 of the License, or (at your option) any later
++ *  version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT ANY
++ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
++ *  PARTICULAR PURPOSE. See the GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along with
++ *  this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++package com.ichi2.libanki
++
++import org.junit.jupiter.api.Test
++import kotlin.test.assertContains
++import kotlin.test.assertEquals
++
++/**
++ * Tests for script tag preservation in [parseSourcesToFileScheme].
++ * 
++ * This addresses the issue where complex card templates with `<script>` tags
++ * were broken when `parseSourcesToFileScheme` made substitutions.
++ * 
++ * See: https://github.com/ankidroid/Anki-Android/issues/15631
++ */
++class TemplateManagerScriptPreservationTest {
++
++    @Test
++    fun `parseSourcesToFileScheme - script tags are preserved when substitution occurs`() {
++        val input = """
++            <script>
++            var showHintsForPseudoClozes = true
++            </script>
++            <img src="test.png">
++        """.trimIndent()
++        
++        val result = parseSourcesToFileScheme(input, "/storage/media")
++        
++        // The script tag and its contents should be preserved
++        assertContains(result, "<script>")
++        assertContains(result, "var showHintsForPseudoClozes = true")
++        assertContains(result, "</script>")
++        // The image src should be converted to file scheme
++        assertContains(result, "file:///storage/media/test.png")
++    }
++
++    @Test
++    fun `parseSourcesToFileScheme - script tags at beginning are preserved`() {
++        val input = """
++            <script>
++            var scrollToClozeOnToggle = false
++            var animateScroll = true
++            </script>
++            <div id="card-body">
++            <img src="image.jpg">
++            </div>
++        """.trimIndent()
++        
++        val result = parseSourcesToFileScheme(input, "/storage/media")
++        
++        assertContains(result, "<script>")
++        assertContains(result, "var scrollToClozeOnToggle = false")
++        assertContains(result, "var animateScroll = true")
++        assertContains(result, "</script>")
++        assertContains(result, "file:///storage/media/image.jpg")
++    }
++
++    @Test
++    fun `parseSourcesToFileScheme - multiple script tags are preserved`() {
++        val input = """
++            <script>var first = 1;</script>
++            <img src="a.png">
++            <script>var second = 2;</script>
++        """.trimIndent()
++        
++        val result = parseSourcesToFileScheme(input, "/storage/media")
++        
++        assertContains(result, "var first = 1;")
++        assertContains(result, "var second = 2;")
++        assertContains(result, "file:///storage/media/a.png")
++    }
++
++    @Test
++    fun `parseSourcesToFileScheme - script with special characters in code`() {
++        // Scripts may contain < and > characters which should not confuse the parser
++        val input = """
++            <script>
++            if (x < 10 && y > 5) { console.log("ok"); }
++            </script>
++            <img src="test.png">
++        """.trimIndent()
++        
++        val result = parseSourcesToFileScheme(input, "/storage/media")
++        
++        assertContains(result, "<script>")
++        assertContains(result, "</script>")
++        assertContains(result, "file:///storage/media/test.png")
++    }
++
++    @Test
++    fun `parseSourcesToFileScheme - complex Enhanced Cloze template preserved`() {
++        // Simplified version of the Enhanced Cloze template from the bug report
++        val input = """
++            <!-- VERSION 1.14 -->
++            <script>
++            var scrollToClozeOnToggle = false
++            var showHintsForPseudoClozes = true
++
++            async function enhancedClozesMain() {
++                await maybeInjectJquery()
++            }
++            </script>
++
++            <div id="card-body">
++            <img src="paste-0f5d2bfd.jpg" width="203">
++            </div>
++            
++            <script>
++            function toggleCloze(elem, displayOption) {
++                if (elem == null) return
++            }
++            </script>
++        """.trimIndent()
++        
++        val result = parseSourcesToFileScheme(input, "/storage/media")
++        
++        // All script content should be preserved
++        assertContains(result, "var scrollToClozeOnToggle = false")
++        assertContains(result, "var showHintsForPseudoClozes = true")
++        assertContains(result, "async function enhancedClozesMain()")
++        assertContains(result, "function toggleCloze(elem, displayOption)")
++        
++        // Image should be converted
++        assertContains(result, "file:///storage/media/paste-0f5d2bfd.jpg")
++    }
++
++    @Test
++    fun `parseSourcesToFileScheme - no changes returns original content`() {
++        // When no substitution is made, original content is returned as-is
++        val input = """
++            <script>var x = 1;</script>
++            <p>No images here</p>
++        """.trimIndent()
++        
++        val result = parseSourcesToFileScheme(input, "/storage/media")
++        
++        assertEquals(input, result)
++    }
++}
++

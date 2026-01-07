@@ -1,0 +1,185 @@
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/RuleExecutionContext.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/RuleExecutionContext.kt
+index fee8e1c7..d2150c41 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/RuleExecutionContext.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/RuleExecutionContext.kt
+@@ -183,6 +183,7 @@ internal class RuleExecutionContext private constructor(
+                     .ruleProviders(
+                         RuleExecutionRuleFilter(editorConfig),
+                         RunAfterRuleFilter(),
++                        InternalRuleProvidersFilter(),
+                     )
+ 
+             return RuleExecutionContext(
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressHandler.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressHandler.kt
+index 80ccbdec..5c363d39 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressHandler.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressHandler.kt
+@@ -1,6 +1,7 @@
+ package com.pinterest.ktlint.rule.engine.internal
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.internal.rules.KtlintSuppressionRule
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+ 
+ internal class SuppressHandler(
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
+index 3a70af99..4c5c2d27 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
+@@ -105,7 +105,7 @@ internal object SuppressionLocatorBuilder {
+             .forEach { it.collect(block) }
+     }
+ 
+-    private fun ASTNode.createSuppressionHintFromComment(formatterTags: FormatterTags): CommentSuppressionHint? =
++    internal fun ASTNode.createSuppressionHintFromComment(formatterTags: FormatterTags): CommentSuppressionHint? =
+         if (text.startsWith("//")) {
+             createSuppressionHintFromEolComment(formatterTags)
+         } else {
+@@ -293,7 +293,7 @@ internal object SuppressionLocatorBuilder {
+         val disabledRuleIds: Set<RuleId> = emptySet(),
+     )
+ 
+-    private data class CommentSuppressionHint(
++    internal data class CommentSuppressionHint(
+         val node: ASTNode,
+         val disabledRuleIds: Set<RuleId> = emptySet(),
+         val type: Type,
+
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rulefilter/InternalRuleProvidersFilter.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rulefilter/InternalRuleProvidersFilter.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rulefilter/InternalRuleProvidersFilter.kt
+@@ -0,0 +1,12 @@
++package com.pinterest.ktlint.rule.engine.internal.rulefilter
++
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++// import com.pinterest.ktlint.rule.engine.internal.rules.KtlintSuppressionRule
++
++internal class InternalRuleProvidersFilter : RuleFilter {
++    override fun filter(ruleProviders: Set<RuleProvider>): Set<RuleProvider> =
++        ruleProviders.plus(
++            RuleProvider { KtlintSuppressionRule() },
++        )
++}
++
+
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/InternalRule.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/InternalRule.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/InternalRule.kt
+@@ -0,0 +1,18 @@
++package com.pinterest.ktlint.rule.engine.internal.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.Rule
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfigProperty
++
++internal open class InternalRule(
++    ruleId: RuleId,
++    about: About = About(),
++    visitorModifiers: Set<VisitorModifier> = emptySet(),
++    usesEditorConfigProperties: Set<EditorConfigProperty<*>> = emptySet(),
++) : Rule(
++    ruleId = ruleId,
++    about = about,
++    visitorModifiers = visitorModifiers,
++    usesEditorConfigProperties = usesEditorConfigProperties,
++)
++
+
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/KtlintSuppressionRule.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/KtlintSuppressionRule.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/KtlintSuppressionRule.kt
+@@ -0,0 +1,41 @@
++package com.pinterest.ktlint.rule.engine.internal.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
++import com.pinterest.ktlint.rule.engine.internal.FormatterTags
++import com.pinterest.ktlint.rule.engine.internal.SuppressionLocatorBuilder
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.psi.PsiComment
++
++internal class KtlintSuppressionRule : InternalRule(
++    ruleId = RULE_ID,
++) {
++    private lateinit var formatterTags: FormatterTags
++
++    override fun beforeFirstNode(editorConfig: EditorConfig) {
++        formatterTags = FormatterTags.from(editorConfig)
++    }
++
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.psi is PsiComment) {
++            val suppressionHint = with(SuppressionLocatorBuilder) {
++                node.createSuppressionHintFromComment(formatterTags)
++            } ?: return
++
++            emit(
++                node.startOffset,
++                "Ktlint directive is deprecated. Replace with @Suppress annotation",
++                false
++            )
++        }
++    }
++
++    companion object {
++        val RULE_ID = RuleId("ktlint:suppression")
++    }
++}
++
+
+diff --git a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/KtlintSuppressionRuleTest.kt b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/KtlintSuppressionRuleTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/KtlintSuppressionRuleTest.kt
+@@ -0,0 +1,36 @@
++package com.pinterest.ktlint.rule.engine.internal.rules
++
++import com.pinterest.ktlint.rule.engine.api.Code
++import com.pinterest.ktlint.rule.engine.api.KtLintRuleEngine
++import com.pinterest.ktlint.rule.engine.api.LintError
++import com.pinterest.ktlint.rule.engine.core.api.Rule
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import org.assertj.core.api.Assertions.assertThat
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.junit.jupiter.api.Test
++
++class KtlintSuppressionRuleTest {
++    @Test
++    fun `Given a ktlint-disable comment then a violation is reported`() {
++        val code = """
++            val foo = "foo" // ktlint-disable
++        """.trimIndent()
++
++        val errors = ArrayList<LintError>()
++        KtLintRuleEngine(
++            ruleProviders = setOf(RuleProvider { DummyRule() })
++        ).lint(Code.fromSnippet(code)) { e -> errors.add(e) }
++
++        assertThat(errors).anyMatch { it.ruleId == KtlintSuppressionRule.RULE_ID }
++    }
++
++    class DummyRule : Rule(RuleId("standard:dummy"), About()) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit
++        ) {}
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

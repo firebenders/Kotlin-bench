@@ -1,0 +1,273 @@
+diff --git a/legacy/core/src/main/java/com/fsck/k9/preferences/AccountSettingsUpgrader.kt b/legacy/core/src/main/java/com/fsck/k9/preferences/AccountSettingsUpgrader.kt
+index 475f5a0171..bea24e8e7b 100644
+--- a/legacy/core/src/main/java/com/fsck/k9/preferences/AccountSettingsUpgrader.kt
++++ b/legacy/core/src/main/java/com/fsck/k9/preferences/AccountSettingsUpgrader.kt
+@@ -1,5 +1,7 @@
+ package com.fsck.k9.preferences
+ 
++import app.k9mail.legacy.account.Account.SpecialFolderSelection
++
+ internal class AccountSettingsUpgrader(
+     private val identitySettingsUpgrader: IdentitySettingsUpgrader,
+     private val folderSettingsUpgrader: FolderSettingsUpgrader,
+@@ -11,10 +13,21 @@ internal class AccountSettingsUpgrader(
+ ) {
+ 
+     fun upgrade(contentVersion: Int, account: ValidatedSettings.Account): ValidatedSettings.Account {
+-        if (contentVersion == latestVersion) {
+-            return account
++        val upgradedAccount = if (contentVersion == latestVersion) {
++            account
++        } else {
++            performVersionUpgrades(contentVersion, account)
+         }
+ 
++        // Ensure folder selections are set to MANUAL when folder names are present.
++        // This is necessary to ensure imported folder assignments are used instead of auto-detection.
++        return fixFolderSelections(upgradedAccount)
++    }
++
++    private fun performVersionUpgrades(
++        contentVersion: Int,
++        account: ValidatedSettings.Account,
++    ): ValidatedSettings.Account {
+         val relevantCombinedUpgraderVersions = combinedUpgraders.keys.asSequence()
+             .filter { it > contentVersion }
+             .toSortedSet()
+@@ -35,6 +48,40 @@ internal class AccountSettingsUpgrader(
+         return upgradeToVersion(toVersion = latestVersion, contentVersion = currentVersion, currentAccount)
+     }
+ 
++    private fun fixFolderSelections(account: ValidatedSettings.Account): ValidatedSettings.Account {
++        val settings = account.settings.toMutableMap()
++        var changed = false
++
++        changed = fixFolderSelection(settings, "archiveFolderName", "archiveFolderSelection") || changed
++        changed = fixFolderSelection(settings, "draftsFolderName", "draftsFolderSelection") || changed
++        changed = fixFolderSelection(settings, "sentFolderName", "sentFolderSelection") || changed
++        changed = fixFolderSelection(settings, "spamFolderName", "spamFolderSelection") || changed
++        changed = fixFolderSelection(settings, "trashFolderName", "trashFolderSelection") || changed
++
++        return if (changed) {
++            account.copy(settings = settings)
++        } else {
++            account
++        }
++    }
++
++    private fun fixFolderSelection(
++        settings: MutableMap<String, Any?>,
++        folderNameKey: String,
++        folderSelectionKey: String,
++    ): Boolean {
++        val folderName = settings[folderNameKey] as? String
++        val folderSelection = settings[folderSelectionKey]
++
++        // If a folder name is present and selection is AUTOMATIC, change it to MANUAL
++        // so the imported folder assignment is used instead of auto-detection.
++        if (!folderName.isNullOrEmpty() && folderSelection == SpecialFolderSelection.AUTOMATIC) {
++            settings[folderSelectionKey] = SpecialFolderSelection.MANUAL
++            return true
++        }
++        return false
++    }
++
+     private fun upgradeToVersion(
+         toVersion: Int,
+         contentVersion: Int,
+diff --git a/legacy/core/src/main/java/com/fsck/k9/preferences/upgrader/AccountSettingsUpgraderTo54.java b/legacy/core/src/main/java/com/fsck/k9/preferences/upgrader/AccountSettingsUpgraderTo54.java
+index 5a658f5784..b3be8db6d9 100644
+--- a/legacy/core/src/main/java/com/fsck/k9/preferences/upgrader/AccountSettingsUpgraderTo54.java
++++ b/legacy/core/src/main/java/com/fsck/k9/preferences/upgrader/AccountSettingsUpgraderTo54.java
+@@ -7,17 +7,28 @@ import com.fsck.k9.preferences.SettingsUpgrader;
+ 
+ 
+ /**
+- * Inserts folder selection entries with a value of "MANUAL"
++ * Inserts folder selection entries with a value of "MANUAL" when a folder name is configured.
++ *
++ * If a folder name is present, we set the selection to MANUAL so the imported folder is used.
++ * If no folder name is present, we leave the selection as AUTOMATIC (the default) so the folder
++ * can be auto-detected.
+  */
+ public class AccountSettingsUpgraderTo54 implements SettingsUpgrader {
+     private static final String FOLDER_SELECTION_MANUAL = "MANUAL";
+ 
+     @Override
+     public void upgrade(Map<String, Object> settings) {
+-        settings.put("archiveFolderSelection", FOLDER_SELECTION_MANUAL);
+-        settings.put("draftsFolderSelection", FOLDER_SELECTION_MANUAL);
+-        settings.put("sentFolderSelection", FOLDER_SELECTION_MANUAL);
+-        settings.put("spamFolderSelection", FOLDER_SELECTION_MANUAL);
+-        settings.put("trashFolderSelection", FOLDER_SELECTION_MANUAL);
++        upgradeFolderSelection(settings, "archiveFolderName", "archiveFolderSelection");
++        upgradeFolderSelection(settings, "draftsFolderName", "draftsFolderSelection");
++        upgradeFolderSelection(settings, "sentFolderName", "sentFolderSelection");
++        upgradeFolderSelection(settings, "spamFolderName", "spamFolderSelection");
++        upgradeFolderSelection(settings, "trashFolderName", "trashFolderSelection");
++    }
++
++    private void upgradeFolderSelection(Map<String, Object> settings, String folderNameKey, String folderSelectionKey) {
++        String folderName = (String) settings.get(folderNameKey);
++        if (folderName != null && !folderName.isEmpty()) {
++            settings.put(folderSelectionKey, FOLDER_SELECTION_MANUAL);
++        }
+     }
+ }
+
+diff --git a/legacy/core/src/test/java/com/fsck/k9/preferences/FolderSelectionImportTest.kt b/legacy/core/src/test/java/com/fsck/k9/preferences/FolderSelectionImportTest.kt
+new file mode 100644
+--- /dev/null
++++ b/legacy/core/src/test/java/com/fsck/k9/preferences/FolderSelectionImportTest.kt
+@@ -0,0 +1,151 @@
++package com.fsck.k9.preferences
++
++import app.k9mail.legacy.account.Account.SpecialFolderSelection
++import assertk.assertThat
++import assertk.assertions.isEqualTo
++import kotlin.test.Test
++
++/**
++ * Tests for folder selection import handling.
++ *
++ * Verifies that folder selections are correctly set to MANUAL when folder names are present,
++ * ensuring imported folder assignments are used instead of auto-detection.
++ */
++class FolderSelectionImportTest {
++
++    @Test
++    fun `AccountSettingsUpgraderTo54 should set folder selection to MANUAL when folder name is present`() {
++        val upgrader = com.fsck.k9.preferences.upgrader.AccountSettingsUpgraderTo54()
++        val settings = mutableMapOf<String, Any?>(
++            "archiveFolderName" to "Archive",
++            "draftsFolderName" to "Drafts",
++            "sentFolderName" to "Sent",
++            "spamFolderName" to "Spam",
++            "trashFolderName" to "Trash",
++        )
++
++        upgrader.upgrade(settings)
++
++        assertThat(settings["archiveFolderSelection"]).isEqualTo("MANUAL")
++        assertThat(settings["draftsFolderSelection"]).isEqualTo("MANUAL")
++        assertThat(settings["sentFolderSelection"]).isEqualTo("MANUAL")
++        assertThat(settings["spamFolderSelection"]).isEqualTo("MANUAL")
++        assertThat(settings["trashFolderSelection"]).isEqualTo("MANUAL")
++    }
++
++    @Test
++    fun `AccountSettingsUpgraderTo54 should not set folder selection when folder name is null`() {
++        val upgrader = com.fsck.k9.preferences.upgrader.AccountSettingsUpgraderTo54()
++        val settings = mutableMapOf<String, Any?>(
++            "archiveFolderName" to "Archive", // Only archive has a name
++        )
++
++        upgrader.upgrade(settings)
++
++        assertThat(settings["archiveFolderSelection"]).isEqualTo("MANUAL")
++        assertThat(settings.containsKey("draftsFolderSelection")).isEqualTo(false)
++        assertThat(settings.containsKey("sentFolderSelection")).isEqualTo(false)
++        assertThat(settings.containsKey("spamFolderSelection")).isEqualTo(false)
++        assertThat(settings.containsKey("trashFolderSelection")).isEqualTo(false)
++    }
++
++    @Test
++    fun `AccountSettingsUpgraderTo54 should not set folder selection when folder name is empty`() {
++        val upgrader = com.fsck.k9.preferences.upgrader.AccountSettingsUpgraderTo54()
++        val settings = mutableMapOf<String, Any?>(
++            "archiveFolderName" to "",
++            "draftsFolderName" to "",
++        )
++
++        upgrader.upgrade(settings)
++
++        assertThat(settings.containsKey("archiveFolderSelection")).isEqualTo(false)
++        assertThat(settings.containsKey("draftsFolderSelection")).isEqualTo(false)
++    }
++
++    @Test
++    fun `AccountSettingsUpgrader should fix folder selections for imports at current version`() {
++        // Use minimal dependencies to avoid Koin initialization issues
++        val accountSettingsUpgrader = AccountSettingsUpgrader(
++            identitySettingsUpgrader = IdentitySettingsUpgrader(
++                settingsDescriptions = emptyMap(),
++                upgraders = emptyMap(),
++            ),
++            folderSettingsUpgrader = FolderSettingsUpgrader(
++                settingsDescriptions = emptyMap(),
++                upgraders = emptyMap(),
++            ),
++            serverSettingsUpgrader = ServerSettingsUpgrader(
++                settingsDescriptions = emptyMap(),
++                upgraders = emptyMap(),
++            ),
++            latestVersion = 100,
++            settingsDescriptions = emptyMap(),
++            upgraders = emptyMap(),
++            combinedUpgraders = emptyMap(),
++        )
++
++        val account = ValidatedSettings.Account(
++            uuid = "test-uuid",
++            name = "Test Account",
++            incoming = ValidatedSettings.Server(type = "imap", settings = emptyMap(), extras = emptyMap()),
++            outgoing = ValidatedSettings.Server(type = "smtp", settings = emptyMap(), extras = emptyMap()),
++            settings = mapOf(
++                "archiveFolderName" to "Archive",
++                "archiveFolderSelection" to SpecialFolderSelection.AUTOMATIC, // This should be changed to MANUAL
++                "draftsFolderName" to "Drafts",
++                "draftsFolderSelection" to SpecialFolderSelection.MANUAL, // Already MANUAL, should stay MANUAL
++                "sentFolderName" to null, // No folder name, selection should stay AUTOMATIC
++                "sentFolderSelection" to SpecialFolderSelection.AUTOMATIC,
++            ),
++            identities = emptyList(),
++            folders = emptyList(),
++        )
++
++        // Upgrade with contentVersion = latestVersion (no version-specific upgrades should run)
++        val result = accountSettingsUpgrader.upgrade(100, account)
++
++        assertThat(result.settings["archiveFolderSelection"]).isEqualTo(SpecialFolderSelection.MANUAL)
++        assertThat(result.settings["draftsFolderSelection"]).isEqualTo(SpecialFolderSelection.MANUAL)
++        assertThat(result.settings["sentFolderSelection"]).isEqualTo(SpecialFolderSelection.AUTOMATIC)
++    }
++
++    @Test
++    fun `AccountSettingsUpgrader should not change folder selection when folder name is absent`() {
++        val accountSettingsUpgrader = AccountSettingsUpgrader(
++            identitySettingsUpgrader = IdentitySettingsUpgrader(
++                settingsDescriptions = emptyMap(),
++                upgraders = emptyMap(),
++            ),
++            folderSettingsUpgrader = FolderSettingsUpgrader(
++                settingsDescriptions = emptyMap(),
++                upgraders = emptyMap(),
++            ),
++            serverSettingsUpgrader = ServerSettingsUpgrader(
++                settingsDescriptions = emptyMap(),
++                upgraders = emptyMap(),
++            ),
++            latestVersion = 100,
++            settingsDescriptions = emptyMap(),
++            upgraders = emptyMap(),
++            combinedUpgraders = emptyMap(),
++        )
++
++        val account = ValidatedSettings.Account(
++            uuid = "test-uuid",
++            name = "Test Account",
++            incoming = ValidatedSettings.Server(type = "imap", settings = emptyMap(), extras = emptyMap()),
++            outgoing = ValidatedSettings.Server(type = "smtp", settings = emptyMap(), extras = emptyMap()),
++            settings = mapOf(
++                "archiveFolderSelection" to SpecialFolderSelection.AUTOMATIC,
++            ),
++            identities = emptyList(),
++            folders = emptyList(),
++        )
++
++        val result = accountSettingsUpgrader.upgrade(100, account)
++
++        assertThat(result.settings["archiveFolderSelection"]).isEqualTo(SpecialFolderSelection.AUTOMATIC)
++    }
++}
++

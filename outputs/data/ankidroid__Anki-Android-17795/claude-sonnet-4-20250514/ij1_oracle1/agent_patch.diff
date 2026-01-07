@@ -1,0 +1,316 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 95757cc736..814e950843 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -238,12 +238,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+diff --git a/AnkiDroid/src/main/assets/scripts/js-api.js b/AnkiDroid/src/main/assets/scripts/js-api.js
+index a33010525f..e5e3f91cd4 100644
+--- a/AnkiDroid/src/main/assets/scripts/js-api.js
++++ b/AnkiDroid/src/main/assets/scripts/js-api.js
+@@ -72,6 +72,8 @@ const jsApiList = {
+     ankiSttStart: "sttStart",
+     ankiSttStop: "sttStop",
+     ankiAddTagToNote: "addTagToNote",
++    ankiGetNoteTags: "getNoteTags",
++    ankiSetNoteTags: "setNoteTags",
+ };
+ 
+ class AnkiDroidJS {
+@@ -125,6 +127,22 @@ Object.keys(jsApiList).forEach(method => {
+         };
+         return;
+     }
++    if (method === "ankiGetNoteTags") {
++        AnkiDroidJS.prototype[method] = async function (noteId) {
++            const endpoint = jsApiList[method];
++            const data = JSON.stringify({ noteId });
++            return await this.handleRequest(endpoint, data);
++        };
++        return;
++    }
++    if (method === "ankiSetNoteTags") {
++        AnkiDroidJS.prototype[method] = async function (noteId, tags) {
++            const endpoint = jsApiList[method];
++            const data = JSON.stringify({ noteId, tags });
++            return await this.handleRequest(endpoint, data);
++        };
++        return;
++    }
+     if (method === "ankiTtsSpeak") {
+         AnkiDroidJS.prototype[method] = async function (text, queueMode = 0) {
+             const endpoint = jsApiList[method];
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
+index f4ec2dc7d0..1775d575ff 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
+@@ -47,12 +47,14 @@ import com.ichi2.libanki.Collection
+ import com.ichi2.libanki.Decks
+ import com.ichi2.libanki.SortOrder
+ import com.ichi2.utils.NetworkUtils
++import com.ichi2.utils.stringIterable
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ import kotlinx.serialization.builtins.ListSerializer
+ import kotlinx.serialization.builtins.serializer
+ import kotlinx.serialization.json.Json
++import org.json.JSONArray
+ import org.json.JSONException
+ import org.json.JSONObject
+ import timber.log.Timber
+@@ -373,6 +375,25 @@ open class AnkiDroidJsAPI(
+                 getColUnsafe.updateNote(note)
+                 convertToByteArray(apiContract, true)
+             }
++
++            "getNoteTags" -> {
++                val jsonObject = JSONObject(apiParams)
++                val noteId = jsonObject.getLong("noteId")
++                val note = getColUnsafe.getNote(noteId)
++                convertToByteArray(apiContract, JSONArray(note.tags).toString())
++            }
++
++            "setNoteTags" -> {
++                val jsonObject = JSONObject(apiParams)
++                val noteId = jsonObject.getLong("noteId")
++                val tags = jsonObject.getJSONArray("tags")
++                val note =
++                    getColUnsafe.getNote(noteId).apply {
++                        setTagsFromStr(getColUnsafe, tags.stringIterable().joinToString(" "))
++                    }
++                getColUnsafe.updateNote(note)
++                convertToByteArray(apiContract, true)
++            }
+             "sttSetLanguage" -> convertToByteArray(apiContract, speechRecognizer.setLanguage(apiParams))
+             "sttStart" -> {
+                 val callback =
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITest.kt
+index 4221277b30..93b3e40820 100644
+--- a/AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITest.kt
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITest.kt
+@@ -27,6 +27,7 @@ import com.ichi2.utils.BASIC_MODEL_NAME
+ import net.ankiweb.rsdroid.withoutUnicodeIsolation
+ import org.hamcrest.CoreMatchers.equalTo
+ import org.hamcrest.MatcherAssert.assertThat
++import org.json.JSONArray
+ import org.json.JSONObject
+ import org.junit.Ignore
+ import org.junit.Test
+@@ -417,6 +418,85 @@ class AnkiDroidJsAPITest : RobolectricTest() {
+             assertEquals(CardType.New, cardAfterReset.type, "Card type after reset")
+         }
+ 
++    @Test
++    fun ankiNoteTagsTest() =
++        runTest {
++            val models = col.notetypes
++            val didA = addDeck("Test", setAsSelected = true)
++            val basic = models.byName(BASIC_MODEL_NAME)
++            basic!!.put("did", didA)
++            val note = addBasicNote("foo", "bar")
++
++            val reviewer: Reviewer = startReviewer()
++            val jsapi = reviewer.jsApi
++
++            waitForAsyncTasksToComplete()
++
++            val noteId = note.id
++
++            // Test getting tags from a note with no tags
++            val initialTagsRes = getDataFromRequest("getNoteTags", jsapi, """{"noteId": $noteId}""")
++            val initialTagsJson = JSONObject(initialTagsRes)
++            val initialTags = JSONArray(initialTagsJson.getString(VALUE_KEY))
++            assertThat(initialTags.length(), equalTo(0))
++
++            // Test setting tags on a note
++            val newTags = JSONArray().apply {
++                put("tag1")
++                put("tag2")
++                put("important")
++            }
++            val setTagsData = JSONObject().apply {
++                put("noteId", noteId)
++                put("tags", newTags)
++            }.toString()
++
++            assertThat(
++                getDataFromRequest("setNoteTags", jsapi, setTagsData),
++                equalTo(formatApiResult(true))
++            )
++
++            // Test getting tags after setting them
++            val updatedTagsRes = getDataFromRequest("getNoteTags", jsapi, """{"noteId": $noteId}""")
++            val updatedTagsJson = JSONObject(updatedTagsRes)
++            val updatedTags = JSONArray(updatedTagsJson.getString(VALUE_KEY))
++            assertThat(updatedTags.length(), equalTo(3))
++
++            val retrievedTags = mutableListOf<String>()
++            for (i in 0 until updatedTags.length()) {
++                retrievedTags.add(updatedTags.getString(i))
++            }
++            assertThat(retrievedTags.sorted(), equalTo(listOf("important", "tag1", "tag2")))
++
++            // Test replacing tags (remove tag2, add new-tag)
++            val replacementTags = JSONArray().apply {
++                put("tag1")
++                put("important")
++                put("new-tag")
++            }
++            val replaceTagsData = JSONObject().apply {
++                put("noteId", noteId)
++                put("tags", replacementTags)
++            }.toString()
++
++            assertThat(
++                getDataFromRequest("setNoteTags", jsapi, replaceTagsData),
++                equalTo(formatApiResult(true))
++            )
++
++            // Verify the replacement worked
++            val finalTagsRes = getDataFromRequest("getNoteTags", jsapi, """{"noteId": $noteId}""")
++            val finalTagsJson = JSONObject(finalTagsRes)
++            val finalTags = JSONArray(finalTagsJson.getString(VALUE_KEY))
++            assertThat(finalTags.length(), equalTo(3))
++
++            val finalRetrievedTags = mutableListOf<String>()
++            for (i in 0 until finalTags.length()) {
++                finalRetrievedTags.add(finalTags.getString(i))
++            }
++            assertThat(finalRetrievedTags.sorted(), equalTo(listOf("important", "new-tag", "tag1")))
++        }
++
+     companion object {
+         fun jsApiContract(data: String = ""): ByteArray =
+             JSONObject()
+diff --git a/gradle.properties b/gradle.properties
+index 509de8a9e4..e257a70586 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 2f64680e40..f8202bcc26 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -17,4 +17,4 @@ dependencyResolutionManagement {
+     }
+ }
+ 
+-include(":lint-rules", ":api", ":AnkiDroid", ":testlib", ":common")
+\ No newline at end of file
++include(":lint-rules", ":api", ":AnkiDroid", ":testlib", ":common")
+
+diff --git a/js-api-tag-example.js b/js-api-tag-example.js
+new file mode 100644
+--- /dev/null
++++ b/js-api-tag-example.js
+@@ -0,0 +1,87 @@
++/**
++ * Example usage of the new AnkiDroid JS API tag management functions
++ * 
++ * These functions implement a REST-style API for tag management:
++ * - ankiGetNoteTags: Gets all tags for a note as an array
++ * - ankiSetNoteTags: Sets all tags for a note from an array
++ */
++
++// Initialize the AnkiDroid JS API
++const api = AnkiDroidJS.init({
++    developer: "yourname@example.com",
++    version: "0.0.3"
++});
++
++// Example: Remove a specific tag from a note
++async function removeTagFromNote(noteId, tagToRemove) {
++    try {
++        // Get current tags
++        const currentTags = await api.ankiGetNoteTags(noteId);
++        
++        // Remove the specific tag
++        const updatedTags = currentTags.filter(tag => tag !== tagToRemove);
++        
++        // Set the updated tags
++        await api.ankiSetNoteTags(noteId, updatedTags);
++        
++        console.log(`Successfully removed tag "${tagToRemove}" from note ${noteId}`);
++        return true;
++    } catch (error) {
++        console.error("Error removing tag:", error);
++        return false;
++    }
++}
++
++// Example: Add a tag to a note (alternative to ankiAddTagToNote)
++async function addTagToNote(noteId, tagToAdd) {
++    try {
++        // Get current tags
++        const currentTags = await api.ankiGetNoteTags(noteId);
++        
++        // Add the new tag if it doesn't already exist
++        if (!currentTags.includes(tagToAdd)) {
++            const updatedTags = [...currentTags, tagToAdd];
++            
++            // Set the updated tags
++            await api.ankiSetNoteTags(noteId, updatedTags);
++            
++            console.log(`Successfully added tag "${tagToAdd}" to note ${noteId}`);
++        } else {
++            console.log(`Tag "${tagToAdd}" already exists on note ${noteId}`);
++        }
++        return true;
++    } catch (error) {
++        console.error("Error adding tag:", error);
++        return false;
++    }
++}
++
++// Example: Replace all tags on a note
++async function replaceAllTags(noteId, newTags) {
++    try {
++        await api.ankiSetNoteTags(noteId, newTags);
++        console.log(`Successfully set tags for note ${noteId}:`, newTags);
++        return true;
++    } catch (error) {
++        console.error("Error setting tags:", error);
++        return false;
++    }
++}
++
++// Example: Get all tags for a note
++async function getAllTags(noteId) {
++    try {
++        const tags = await api.ankiGetNoteTags(noteId);
++        console.log(`Tags for note ${noteId}:`, tags);
++        return tags;
++    } catch (error) {
++        console.error("Error getting tags:", error);
++        return [];
++    }
++}
++
++// Example usage:
++// removeTagFromNote(1234567890, "unwanted-tag");
++// addTagToNote(1234567890, "important");
++// replaceAllTags(1234567890, ["tag1", "tag2", "important"]);
++// getAllTags(1234567890);

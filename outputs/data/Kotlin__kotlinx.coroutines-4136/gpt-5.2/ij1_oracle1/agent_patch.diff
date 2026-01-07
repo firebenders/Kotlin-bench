@@ -1,0 +1,82 @@
+diff --git a/kotlinx-coroutines-core/common/src/EventLoop.common.kt b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+index 6bfcbf0cb..a199927b5 100644
+--- a/kotlinx-coroutines-core/common/src/EventLoop.common.kt
++++ b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+@@ -282,6 +282,15 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+ 
+     final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
+ 
++    @InternalCoroutinesApi
++    override fun dispatchYield(context: CoroutineContext, block: Runnable) {
++        // Yield should give other already-resumable tasks a chance to run first.
++        // In particular, tasks that have just become eligible (e.g., after a delay) may still reside in the
++        // delayed queue until the next event-loop iteration. If we enqueue yield continuation first, it will
++        // run before such delayed tasks are moved into the FIFO queue.
++        enqueueYield(block)
++    }
++
+     open fun enqueue(task: Runnable) {
+         if (enqueueImpl(task)) {
+             // todo: we should unpark only when this delayed task became first in the queue
+@@ -291,6 +300,32 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+         }
+     }
+ 
++    private fun enqueueYield(task: Runnable) {
++        var unparkNeeded = false
++        // Queue all delayed tasks that are due to be executed before the yielding task itself.
++        val delayed = _delayed.value
++        if (delayed != null && !delayed.isEmpty) {
++            val now = nanoTime()
++            while (true) {
++                delayed.removeFirstIf {
++                    if (it.timeToExecute(now)) {
++                        enqueueImpl(it).also { enqueued ->
++                            if (enqueued) unparkNeeded = true
++                        }
++                    } else {
++                        false
++                    }
++                } ?: break
++            }
++        }
++        if (enqueueImpl(task)) {
++            unpark()
++        } else {
++            if (unparkNeeded) unpark()
++            DefaultExecutor.enqueue(task)
++        }
++    }
++
+     @Suppress("UNCHECKED_CAST")
+     private fun enqueueImpl(task: Runnable): Boolean {
+         _queue.loop { queue ->
+
+diff --git a/kotlinx-coroutines-core/jvm/test/EventLoopYieldDelayedTest.kt b/kotlinx-coroutines-core/jvm/test/EventLoopYieldDelayedTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/EventLoopYieldDelayedTest.kt
+@@ -0,0 +1,23 @@
++package kotlinx.coroutines
++
++import org.junit.Test
++import kotlin.test.assertEquals
++
++class EventLoopYieldDelayedTest {
++
++    @Test
++    fun testYieldToAlreadyDueDelayedTaskInRunBlockingEventLoop() {
++        val events = mutableListOf<String>()
++        runBlocking {
++            launch(start = CoroutineStart.UNDISPATCHED) {
++                delay(1)
++                events += "first"
++            }
++            Thread.sleep(100)
++            yield()
++            events += "second"
++        }
++        assertEquals(listOf("first", "second"), events)
++    }
++}
++

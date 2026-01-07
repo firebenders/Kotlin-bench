@@ -1,0 +1,199 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt b/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt
+index 8d25b5d32a7..0064943aba8 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationViewModelSlice.kt
+@@ -179,9 +179,12 @@ class DashboardCardPersonalizationViewModelSlice @Inject constructor(
+ 
+     private fun updateCardState(cardType: CardType, enabled: Boolean) {
+         val currentCards: MutableList<DashboardCardState> = _uiState.value!!.toMutableList()
+-        val updated = currentCards.find { it.cardType == cardType }!!.copy(enabled = enabled)
+-        currentCards[cardType.order] = updated
+-        _uiState.postValue(currentCards)
++        val cardIndex = currentCards.indexOfFirst { it.cardType == cardType }
++        if (cardIndex != -1) {
++            val updated = currentCards[cardIndex].copy(enabled = enabled)
++            currentCards[cardIndex] = updated
++            _uiState.postValue(currentCards)
++        }
+     }
+ 
+     private fun isStatsCardShown(siteId: Long) = !appPrefsWrapper.getShouldHideTodaysStatsDashboardCard(siteId)
+
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationIndexCrashTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationIndexCrashTest.kt
+new file mode 100644
+--- /dev/null
++++ b/WordPress/src/test/java/org/wordpress/android/ui/mysite/personalization/DashboardCardPersonalizationIndexCrashTest.kt
+@@ -0,0 +1,173 @@
++package org.wordpress.android.ui.mysite.personalization
++
++import junit.framework.TestCase.assertEquals
++import junit.framework.TestCase.assertTrue
++import kotlinx.coroutines.ExperimentalCoroutinesApi
++import kotlinx.coroutines.flow.flowOf
++import org.junit.Before
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.mockito.Mock
++import org.mockito.junit.MockitoJUnitRunner
++import org.mockito.kotlin.whenever
++import org.wordpress.android.BaseUnitTest
++import org.wordpress.android.fluxc.model.BloggingRemindersModel
++import org.wordpress.android.fluxc.model.SiteModel
++import org.wordpress.android.fluxc.store.BloggingRemindersStore
++import org.wordpress.android.ui.blaze.BlazeFeatureUtils
++import org.wordpress.android.ui.bloggingprompts.BloggingPromptsSettingsHelper
++import org.wordpress.android.ui.mysite.SelectedSiteRepository
++import org.wordpress.android.ui.prefs.AppPrefsWrapper
++import org.wordpress.android.util.analytics.AnalyticsTrackerWrapper
++
++/**
++ * Test to verify the fix for the IndexOutOfBoundsException crash when updating card state
++ * in the Dashboard Personalization View.
++ *
++ * The crash occurred when:
++ * 1. Some optional cards (PAGES, ACTIVITY_LOG, BLAZE) were not added to the list
++ * 2. A card with a higher order number (e.g., BLOGGING_PROMPTS with order=6) was toggled
++ * 3. The old code tried to use cardType.order as the list index, causing a crash
++ */
++@ExperimentalCoroutinesApi
++@RunWith(MockitoJUnitRunner::class)
++class DashboardCardPersonalizationIndexCrashTest : BaseUnitTest() {
++    @Mock
++    lateinit var appPrefsWrapper: AppPrefsWrapper
++
++    @Mock
++    lateinit var selectedSiteRepository: SelectedSiteRepository
++
++    @Mock
++    lateinit var bloggingRemindersStore: BloggingRemindersStore
++
++    @Mock
++    lateinit var analyticsTrackerWrapper: AnalyticsTrackerWrapper
++
++    @Mock
++    lateinit var blazeFeatureUtils: BlazeFeatureUtils
++
++    @Mock
++    lateinit var bloggingPromptsSettingsHelper: BloggingPromptsSettingsHelper
++
++    private lateinit var viewModelSlice: DashboardCardPersonalizationViewModelSlice
++
++    private val site = SiteModel().apply { siteId = 123L }
++    private val localSiteId = 456
++
++    private val uiStateList = mutableListOf<List<DashboardCardState>>()
++
++    private val userSetBloggingRemindersModel =
++        BloggingRemindersModel(localSiteId, setOf(BloggingRemindersModel.Day.MONDAY), 5, 43, false)
++
++    @Before
++    fun setUp() {
++        whenever(selectedSiteRepository.getSelectedSite()).thenReturn(site)
++        whenever(selectedSiteRepository.getSelectedSiteLocalId()).thenReturn(localSiteId)
++        whenever(bloggingRemindersStore.bloggingRemindersModel(localSiteId))
++            .thenReturn(flowOf(userSetBloggingRemindersModel))
++
++        test {
++            whenever(bloggingPromptsSettingsHelper.shouldShowPromptsFeature()).thenReturn(true)
++        }
++
++        viewModelSlice = DashboardCardPersonalizationViewModelSlice(
++            bgDispatcher = testDispatcher(),
++            appPrefsWrapper = appPrefsWrapper,
++            selectedSiteRepository = selectedSiteRepository,
++            bloggingRemindersStore = bloggingRemindersStore,
++            analyticsTrackerWrapper = analyticsTrackerWrapper,
++            blazeFeatureUtils = blazeFeatureUtils,
++            bloggingPromptsSettingsHelper = bloggingPromptsSettingsHelper
++        )
++
++        viewModelSlice.uiState.observeForever {
++            uiStateList.add(it)
++        }
++
++        viewModelSlice.initialize(testScope())
++    }
++
++    @Test
++    fun `given site without optional cards, when blogging prompts card is toggled, then no crash occurs`() {
++        // Setup: Create a scenario where optional cards (PAGES, ACTIVITY_LOG, BLAZE) are NOT added
++        // This means the list will have fewer items than the BLOGGING_PROMPTS.order (which is 6)
++
++        // Site has no edit pages capability (PAGES card will not be added)
++        site.hasCapabilityEditPages = false
++        site.setIsSelfHostedAdmin(false)
++
++        // Site has no manage options capability (ACTIVITY_LOG card will not be added)
++        site.hasCapabilityManageOptions = false
++
++        // Blaze is not eligible (BLAZE card will not be added)
++        whenever(blazeFeatureUtils.isSiteBlazeEligible(site)).thenReturn(false)
++
++        // Start and get initial state
++        viewModelSlice.start(123L)
++        val initialState = uiStateList.last()
++
++        // Verify that only base cards + BLOGGING_PROMPTS are present (4 cards total)
++        // STATS, DRAFT_POSTS, SCHEDULED_POSTS, BLOGGING_PROMPTS
++        assertEquals(4, initialState.size)
++
++        val bloggingPromptsCard = initialState.find { it.cardType == CardType.BLOGGING_PROMPTS }
++        require(bloggingPromptsCard != null) { "Blogging prompts card should be present" }
++
++        // This should NOT crash even though BLOGGING_PROMPTS.order = 6 and list size is 4
++        viewModelSlice.onCardToggled(CardType.BLOGGING_PROMPTS, true)
++
++        // Verify the state was updated correctly
++        val updatedState = uiStateList.last()
++        val updatedCard = updatedState.find { it.cardType == CardType.BLOGGING_PROMPTS }
++        assertTrue(updatedCard!!.enabled)
++    }
++
++    @Test
++    fun `given site with some optional cards, when last card is toggled, then state is updated correctly`() {
++        // Setup: Site has PAGES but not ACTIVITY_LOG or BLAZE
++        site.hasCapabilityEditPages = true
++        site.setIsSelfHostedAdmin(true)
++        site.hasCapabilityManageOptions = false
++        whenever(blazeFeatureUtils.isSiteBlazeEligible(site)).thenReturn(false)
++
++        viewModelSlice.start(123L)
++        val initialState = uiStateList.last()
++
++        // Verify 5 cards: STATS, DRAFT_POSTS, SCHEDULED_POSTS, PAGES, BLOGGING_PROMPTS
++        assertEquals(5, initialState.size)
++
++        // Toggle BLOGGING_PROMPTS - should work without crash
++        viewModelSlice.onCardToggled(CardType.BLOGGING_PROMPTS, true)
++
++        val updatedState = uiStateList.last()
++        val updatedCard = updatedState.find { it.cardType == CardType.BLOGGING_PROMPTS }
++        assertTrue(updatedCard!!.enabled)
++    }
++
++    @Test
++    fun `given minimal cards, when toggling any card, then state is updated correctly`() {
++        // Setup: Minimal scenario - only mandatory cards (STATS, DRAFT_POSTS, SCHEDULED_POSTS)
++        // and no BLOGGING_PROMPTS
++        site.hasCapabilityEditPages = false
++        site.hasCapabilityManageOptions = false
++        whenever(blazeFeatureUtils.isSiteBlazeEligible(site)).thenReturn(false)
++        test {
++            whenever(bloggingPromptsSettingsHelper.shouldShowPromptsFeature()).thenReturn(false)
++        }
++
++        viewModelSlice.start(123L)
++        val initialState = uiStateList.last()
++
++        // Verify only 3 mandatory cards
++        assertEquals(3, initialState.size)
++
++        // Toggle STATS card - should work correctly
++        viewModelSlice.onCardToggled(CardType.STATS, false)
++
++        val updatedState = uiStateList.last()
++        val updatedCard = updatedState.find { it.cardType == CardType.STATS }
++        assertTrue(!updatedCard!!.enabled) // Should be disabled now
++    }
++}
++

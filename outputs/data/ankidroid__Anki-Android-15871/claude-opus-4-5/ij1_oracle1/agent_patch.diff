@@ -48,50 +48,54 @@ index a95b57bcac..05c3928238 100644
  
      // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
      // and there's no no-op version for release build. Usage has been disabled for release
-diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/ViewerAssetLoader.kt b/AnkiDroid/src/main/java/com/ichi2/anki/ViewerAssetLoader.kt
-index c97e57f56c..eae42fc3b6 100644
---- a/AnkiDroid/src/main/java/com/ichi2/anki/ViewerAssetLoader.kt
-+++ b/AnkiDroid/src/main/java/com/ichi2/anki/ViewerAssetLoader.kt
-@@ -24,6 +24,16 @@ import java.io.ByteArrayInputStream
- import java.io.File
- import java.io.FileInputStream
- 
-+/**
-+ * CORS headers to allow JavaScript to access content of embedded objects (e.g., SVG files
-+ * loaded via <object> tags). Without these headers, contentDocument access would be blocked
-+ * by the browser's same-origin policy.
-+ * See: https://github.com/ankidroid/Anki-Android/issues/15522
-+ */
-+private val CORS_HEADERS = mapOf(
-+    "Access-Control-Allow-Origin" to "*"
-+)
-+
- fun Context.getViewerAssetLoader(domain: String): WebViewAssetLoader {
-     val mediaDir = CollectionHelper.getMediaDirectory(this)
-     return WebViewAssetLoader.Builder()
-@@ -36,7 +46,14 @@ fun Context.getViewerAssetLoader(domain: String): WebViewAssetLoader {
-             try {
-                 val file = File(mediaDir, path)
-                 val inputStream = FileInputStream(file)
--                WebResourceResponse(guessMimeType(path), null, inputStream)
-+                WebResourceResponse(
-+                    guessMimeType(path),
-+                    null,
-+                    HTTP_OK,
-+                    HTTP_OK_REASON_PHRASE,
-+                    CORS_HEADERS,
-+                    inputStream
-+                )
-             } catch (e: Exception) {
-                 Timber.d("File not found: %s", path)
-                 null
-@@ -44,3 +61,6 @@ fun Context.getViewerAssetLoader(domain: String): WebViewAssetLoader {
-         }
-         .build()
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+index 7e4ff83970..8aa819aee5 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+@@ -329,10 +329,13 @@ fun parseVideos(text: String, mediaDir: String): String {
  }
-+
-+private const val HTTP_OK = 200
-+private const val HTTP_OK_REASON_PHRASE = "OK"
+ 
+ /**
+- * Parses the sources of the `<img>`, `<video>`, `<audio>`, `<object>` and `<source>` tags
++ * Parses the sources of the `<img>`, `<video>`, `<audio>` and `<source>` tags
+  * to use the `file:///` scheme, which allows seeking audio and videos,
+  * and loads faster than using HTTP.
+  *
++ * `<object>` tags are not parsed to preserve same-origin access for JavaScript,
++ * allowing operations like accessing `.contentDocument` for embedded SVGs.
++ *
+  * Only attribute values that don't have an Uri scheme (http, file, etc) are parsed.
+  */
+ @NotInLibAnki
+@@ -367,8 +370,7 @@ fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
+         replaceWithFileScheme("img", "src") ||
+             replaceWithFileScheme("video", "src") ||
+             replaceWithFileScheme("audio", "src") ||
+-            replaceWithFileScheme("source", "src") ||
+-            replaceWithFileScheme("object", "data")
++            replaceWithFileScheme("source", "src")
+ 
+     return if (hasMadeChanges) {
+         doc.body().html()
+diff --git a/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt b/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
+index f669bb48c8..aa3ca1c8ca 100644
+--- a/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
++++ b/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
+@@ -48,10 +48,12 @@ class TemplateManagerTest {
+     }
+ 
+     @Test
+-    fun `parseSourcesToFileScheme - object`() {
++    fun `parseSourcesToFileScheme - object not parsed to preserve same-origin JS access`() {
+         val mediaDir = "storage/emulated/0/AnkiDroid/collection.media"
++        // object tags are not converted to file:// scheme to preserve same-origin access
++        // for JavaScript, allowing operations like accessing .contentDocument for embedded SVGs
+         val result = parseSourcesToFileScheme("<object data=\"ben.mov\"></object>", mediaDir)
+-        assertEquals("""<object data="file:///$mediaDir/ben.mov"></object>""", result)
++        assertEquals("""<object data="ben.mov"></object>""", result)
+     }
+ 
+     @Test
 diff --git a/gradle.properties b/gradle.properties
 index 13992ecd31..b06b0f2c12 100644
 --- a/gradle.properties

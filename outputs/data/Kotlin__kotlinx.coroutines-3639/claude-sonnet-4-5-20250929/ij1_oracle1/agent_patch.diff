@@ -1,0 +1,170 @@
+diff --git a/docs/topics/coroutine-context-and-dispatchers.md b/docs/topics/coroutine-context-and-dispatchers.md
+index 32d189195..1cdd4bc7d 100644
+--- a/docs/topics/coroutine-context-and-dispatchers.md
++++ b/docs/topics/coroutine-context-and-dispatchers.md
+@@ -292,7 +292,7 @@ My job is "coroutine#1":BlockingCoroutine{Active}@6d311334
+ <!--- TEST lines.size == 1 && lines[0].startsWith("My job is \"coroutine#1\":BlockingCoroutine{Active}@") -->
+ 
+ Note that [isActive] in [CoroutineScope] is just a convenient shortcut for
+-`coroutineContext[Job]?.isActive == true`.
++`coroutineContext[Job]?.isActive ?: true`.
+ 
+ ## Children of a coroutine
+ 
+diff --git a/kotlinx-coroutines-core/common/src/Job.kt b/kotlinx-coroutines-core/common/src/Job.kt
+index 65646dc59..1ad59dc20 100644
+--- a/kotlinx-coroutines-core/common/src/Job.kt
++++ b/kotlinx-coroutines-core/common/src/Job.kt
+@@ -550,11 +550,15 @@ public fun Job.cancelChildren(cause: Throwable? = null) {
+  * }
+  * ```
+  *
+- * The `coroutineContext.isActive` expression is a shortcut for `coroutineContext[Job]?.isActive == true`.
++ * The `coroutineContext.isActive` expression is a shortcut for `coroutineContext[Job]?.isActive ?: true`.
+  * See [Job.isActive].
++ *
++ * This property returns `true` if there is no [Job] in the context.
++ * This is consistent with the general contract that a job "has not been completed and was not cancelled yet"
++ * when the job is not present in the context.
+  */
+ public val CoroutineContext.isActive: Boolean
+-    get() = this[Job]?.isActive == true
++    get() = this[Job]?.isActive ?: true
+ 
+ /**
+  * Cancels [Job] of this context with an optional cancellation cause.
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/common/test/CoroutineContextIsActiveTest.kt b/kotlinx-coroutines-core/common/test/CoroutineContextIsActiveTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/CoroutineContextIsActiveTest.kt
+@@ -0,0 +1,114 @@
++/*
++ * Copyright 2016-2021 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines
++
++import kotlin.coroutines.*
++import kotlin.test.*
++
++/**
++ * Tests for CoroutineContext.isActive property behavior,
++ * particularly when the context does not contain a Job.
++ */
++class CoroutineContextIsActiveTest : TestBase() {
++
++    @Test
++    fun testIsActiveWithoutJob() = runTest {
++        // EmptyCoroutineContext should be considered active
++        assertTrue(EmptyCoroutineContext.isActive)
++        
++        // Context with only a dispatcher should be considered active
++        assertTrue(Dispatchers.Default.isActive)
++        
++        // Context with dispatcher and name but no Job should be considered active
++        assertTrue((Dispatchers.Default + CoroutineName("test")).isActive)
++    }
++
++    @Test
++    fun testIsActiveWithActiveJob() = runTest {
++        val job = Job()
++        assertTrue(job.isActive)
++        assertTrue((EmptyCoroutineContext + job).isActive)
++        job.cancel()
++    }
++
++    @Test
++    fun testIsActiveWithCompletedJob() = runTest {
++        val job = Job()
++        job.complete()
++        job.join()
++        assertTrue(job.isCompleted)
++        assertFalse((EmptyCoroutineContext + job).isActive)
++    }
++
++    @Test
++    fun testIsActiveWithCancelledJob() = runTest {
++        val job = Job()
++        job.cancel()
++        job.join()
++        assertFalse(job.isActive)
++        assertFalse((EmptyCoroutineContext + job).isActive)
++    }
++
++    @Test
++    fun testIsActiveConsistencyWithScope() = runTest {
++        // CoroutineScope.isActive and CoroutineContext.isActive should behave
++        // consistently when there's no Job in the context
++        val contextWithoutJob = Dispatchers.Default + CoroutineName("test")
++        
++        // Create a scope wrapper to access CoroutineScope.isActive
++        val scope = object : CoroutineScope {
++            override val coroutineContext: CoroutineContext = contextWithoutJob
++        }
++        
++        // Both should return true for contexts without a Job
++        assertEquals(contextWithoutJob.isActive, scope.isActive)
++        assertTrue(contextWithoutJob.isActive)
++        assertTrue(scope.isActive)
++    }
++
++    @Test
++    fun testIsActiveInSuspendFunction() = runTest {
++        // Test that contexts without Job in suspend functions are considered active
++        suspend fun checkActiveInSuspendContext() {
++            withContext(Dispatchers.Default) {
++                // This context has a Job from the runTest scope
++                assertTrue(coroutineContext.isActive)
++            }
++            
++            // Even a minimal context should be considered active
++            assertTrue(EmptyCoroutineContext.isActive)
++        }
++        
++        checkActiveInSuspendContext()
++    }
++
++    @Test
++    fun testIsActiveWithGlobalScope() = runTest {
++        // GlobalScope has no Job, so it should be considered active
++        assertTrue(GlobalScope.coroutineContext.isActive)
++    }
++
++    @Test
++    fun testIsActiveInLongRunningLoop() = runTest {
++        // Simulate the use case mentioned in the issue documentation
++        var iterations = 0
++        val contextWithoutJob = Dispatchers.Default + CoroutineName("loop")
++        
++        // This loop should not immediately terminate
++        while (contextWithoutJob.isActive && iterations < 5) {
++            iterations++
++        }
++        
++        assertEquals(5, iterations, "Loop should run when context has no Job")
++    }
++
++    @Test
++    fun testIsActiveWithNonCancellable() = runTest {
++        // NonCancellable is always active
++        assertTrue(NonCancellable.isActive)
++        assertTrue((EmptyCoroutineContext + NonCancellable).isActive)
++    }
++}
++

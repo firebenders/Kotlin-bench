@@ -1,0 +1,174 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index c802acac..afe7b796 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -1270,6 +1270,21 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+                     } else {
+                         expectedIndent
+                     }
++                // When the opening quotes are followed by a newline, also accept closing quotes at the
++                // node's starting indent level (without extra indentation). This provides consistency
++                // between functions and properties. For example, both of these should be valid:
++                //   fun foo() = """
++                //       bar
++                //   """.trimIndent()
++                //   val foo = """
++                //       bar
++                //   """.trimIndent()
++                val alternativeExpectedIndent =
++                    if (node.isRawStringLiteralFunctionBodyExpression() && node.isOpeningQuoteFollowedByNewline()) {
++                        node.indent(false)
++                    } else {
++                        null
++                    }
+                 node.children()
+                     .forEach {
+                         if (it.prevLeaf()?.text == "\n" &&
+@@ -1301,7 +1316,10 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+                                         correctedExpectedIndent + actualContent,
+                                     )
+                                 }
+-                            } else if (actualIndent != correctedExpectedIndent && it.isIndentBeforeClosingQuote()) {
++                            } else if (actualIndent != correctedExpectedIndent &&
++                                actualIndent != alternativeExpectedIndent &&
++                                it.isIndentBeforeClosingQuote()
++                            ) {
+                                 // It is a deliberate choice not to fix the indents inside the string literal except the line which only contains
+                                 // the closing quotes.
+                                 emit(
+@@ -1310,13 +1328,16 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+                                     true,
+                                 )
+                                 if (autoCorrect) {
++                                    // When an alternative indent is available (i.e., when opening quotes are followed by newline),
++                                    // use it for auto-correction as it aligns closing quotes with the statement's starting column.
++                                    val indentForAutoCorrect = alternativeExpectedIndent ?: correctedExpectedIndent
+                                     if (it.firstChildNode == null) {
+                                         (it as LeafPsiElement).rawInsertBeforeMe(
+-                                            LeafPsiElement(REGULAR_STRING_PART, correctedExpectedIndent),
++                                            LeafPsiElement(REGULAR_STRING_PART, indentForAutoCorrect),
+                                         )
+                                     } else {
+                                         (it.firstChildNode as LeafPsiElement).rawReplaceWithText(
+-                                            correctedExpectedIndent + actualContent,
++                                            indentForAutoCorrect + actualContent,
+                                         )
+                                     }
+                                 }
+@@ -1328,14 +1349,22 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+ 
+     private fun ASTNode.isRawStringLiteralFunctionBodyExpression() =
+         (prevLeaf()?.elementType != WHITE_SPACE || prevLeaf()?.text == " ") &&
+-            FUN ==
+             prevCodeLeaf()
+                 .takeIf { it?.elementType == EQ }
+                 ?.treeParent
+                 ?.elementType
++                .let { it == FUN || it == PROPERTY }
+ 
+     private fun ASTNode.isRawStringLiteralReturnInFunctionBodyBlock() = RETURN_KEYWORD == prevCodeLeaf()?.elementType
+ 
++    private fun ASTNode.isOpeningQuoteFollowedByNewline(): Boolean {
++        require(elementType == STRING_TEMPLATE)
++        return findChildByType(OPEN_QUOTE)
++            ?.nextSibling { it.elementType != WHITE_SPACE }
++            ?.let { it.elementType == LITERAL_STRING_TEMPLATE_ENTRY && it.text.startsWith("\n") }
++            ?: false
++    }
++
+     /**
+      * Get the length of the indent which is shared by all lines inside the string template except for the indent of
+      * the closing quotes.
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssue2167Test.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssue2167Test.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssue2167Test.kt
+@@ -0,0 +1,79 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.MULTILINE_STRING_QUOTE
++import org.junit.jupiter.api.Test
++
++/**
++ * Test cases for GitHub issue #2167:
++ * "Indentation rule inconsistently identifies issues with multiline string closing quotes between functions and properties"
++ *
++ * @see <a href="https://github.com/pinterest/ktlint/issues/2167">GitHub Issue #2167</a>
++ */
++internal class IndentationRuleIssue2167Test {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Given a function body expression with multiline string and closing quotes at column 0`() {
++        val code =
++            """
++            fun foo() = $MULTILINE_STRING_QUOTE
++                <!--suppress XmlUnusedNamespaceDeclaration -->
++                <manifest xmlns:android="http://schemas.android.com/apk/res/android"/>
++            $MULTILINE_STRING_QUOTE.trimIndent()
++            """.trimIndent()
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a property with multiline string and closing quotes at column 0`() {
++        val code =
++            """
++            val foo = $MULTILINE_STRING_QUOTE
++                <!--suppress XmlUnusedNamespaceDeclaration -->
++                <manifest xmlns:android="http://schemas.android.com/apk/res/android"/>
++            $MULTILINE_STRING_QUOTE.trimIndent()
++            """.trimIndent()
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a function body block with multiline string returned at correct indent`() {
++        // For return statements, closing quotes should be at one indent level deeper
++        val code =
++            """
++            fun foo2(): String {
++                return $MULTILINE_STRING_QUOTE
++                    <!--suppress XmlUnusedNamespaceDeclaration -->
++                    <manifest xmlns:android="http://schemas.android.com/apk/res/android"/>
++                    $MULTILINE_STRING_QUOTE.trimIndent()
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a function body expression with multiline string and closing quotes at one indent level`() {
++        // This should also be valid - closing quotes aligned with content
++        val code =
++            """
++            fun foo() = $MULTILINE_STRING_QUOTE
++                bar
++                $MULTILINE_STRING_QUOTE.trimIndent()
++            """.trimIndent()
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a property with multiline string and closing quotes at one indent level`() {
++        // This should also be valid - closing quotes aligned with content
++        val code =
++            """
++            val foo = $MULTILINE_STRING_QUOTE
++                bar
++                $MULTILINE_STRING_QUOTE.trimIndent()
++            """.trimIndent()
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

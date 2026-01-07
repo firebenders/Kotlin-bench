@@ -1,0 +1,467 @@
+diff --git a/core/common/src/Clock.kt b/core/common/src/Clock.kt
+index 7849d67..c29184e 100644
+--- a/core/common/src/Clock.kt
++++ b/core/common/src/Clock.kt
+@@ -10,7 +10,26 @@ import kotlin.time.*
+ /**
+  * A source of [Instant] values.
+  *
+- * See [Clock.System][Clock.System] for the clock instance that queries the operating system.
++ * A [Clock] provides access to the current moment of time as an [Instant] on the UTC-SLS time scale.
++ * The most common way to acquire an [Instant] is to call [now] on a clock, typically [Clock.System].
++ *
++ * `Clock` is an interface primarily to support dependency injection and testing:
++ * instead of calling [Clock.System] directly, pass a [Clock] to the code that needs to obtain the current time.
++ *
++ * ## Behavior and contracts
++ * * A clock is not required to be monotonic: repeated calls to [now] may return instants that are equal or even
++ *   earlier than a previous value if the underlying system clock is adjusted.
++ * * If you need to measure elapsed time, prefer a monotonic source such as [TimeSource.Monotonic] from `kotlin.time`.
++ *
++ * ## Usage
++ * ```kotlin
++ * class Session(private val clock: Clock) {
++ *     fun startedAt(): Instant = clock.now()
++ * }
++ *
++ * val session = Session(Clock.System)
++ * val started = session.startedAt()
++ * ```
+  */
+ public interface Clock {
+     /**
+diff --git a/core/common/src/DateTimePeriod.kt b/core/common/src/DateTimePeriod.kt
+index bb17289..1b6c9f7 100644
+--- a/core/common/src/DateTimePeriod.kt
++++ b/core/common/src/DateTimePeriod.kt
+@@ -15,14 +15,31 @@ import kotlinx.serialization.Serializable
+ /**
+  * A difference between two [instants][Instant], decomposed into date and time components.
+  *
+- * The date components are: [years], [months], [days].
++ * A [DateTimePeriod] stores a calendar-based amount of time split into components:
+  *
+- * The time components are: [hours], [minutes], [seconds], [nanoseconds].
++ * * Date components: [years], [months], [days]
++ * * Time components: [hours], [minutes], [seconds], [nanoseconds]
+  *
+- * A `DateTimePeriod` can be constructed using the same-named constructor function,
+- * [parsed][DateTimePeriod.parse] from a string, or returned as the result of instant arithmetic operations (see [Instant.periodUntil]).
+- * All these functions can return a [DatePeriod] value, which is a subtype of `DateTimePeriod`,
+- * a special case that only stores date components, if all time components of the result happen to be zero.
++ * This is different from a [Duration] from `kotlin.time`, which is a precise amount of elapsed time.
++ * Use [DateTimePeriod] when you need to represent or apply a human-readable calendar difference.
++ *
++ * ## How to acquire
++ * * Construct it with the [DateTimePeriod] factory function.
++ * * Parse an ISO-8601 duration string with [DateTimePeriod.parse].
++ * * Compute it between two instants with [Instant.periodUntil] (requires a [TimeZone] because calendar boundaries
++ *   depend on time-zone rules).
++ *
++ * If all time components are zero, a [DatePeriod] (a subtype of [DateTimePeriod]) is used.
++ *
++ * ## Usage
++ * ```kotlin
++ * val tz = TimeZone.of("Europe/Berlin")
++ * val start = Instant.parse("2020-01-01T00:00:00Z")
++ * val end = Instant.parse("2021-02-03T04:05:06Z")
++ *
++ * val period: DateTimePeriod = start.periodUntil(end, tz)
++ * val roundTrip = start.plus(period, tz)
++ * ```
+  */
+ @Serializable(with = DateTimePeriodIso8601Serializer::class)
+ // TODO: could be error-prone without explicitly named params
+diff --git a/core/common/src/DateTimeUnit.kt b/core/common/src/DateTimeUnit.kt
+index a219cc7..8dec9d7 100644
+--- a/core/common/src/DateTimeUnit.kt
++++ b/core/common/src/DateTimeUnit.kt
+@@ -14,15 +14,32 @@ import kotlin.time.Duration.Companion.nanoseconds
+ /**
+  * A unit for measuring time.
+  *
+- * See the predefined constants for time units, like [DateTimeUnit.NANOSECOND], [DateTimeUnit.DAY],
+- * [DateTimeUnit.MONTH], and others.
++ * `kotlinx-datetime` distinguishes between:
++ * * [TimeBased] units (a precise number of nanoseconds, such as seconds and hours), and
++ * * [DateBased] units (calendar days and months).
+  *
+- * Two ways are provided to create custom [DateTimeUnit] instances:
+- * - By multiplying an existing unit on the right by an integer scalar: for example, `DateTimeUnit.NANOSECOND * 10`.
+- * - By constructing an instance manually with [TimeBased], [DayBased], or [MonthBased]: for example,
+- *   `TimeBased(nanoseconds = 10)`.
++ * Use the predefined constants like [DateTimeUnit.NANOSECOND], [DateTimeUnit.DAY], [DateTimeUnit.MONTH], and others,
++ * or create custom units:
++ * * Multiply an existing unit by an integer scalar: for example, `DateTimeUnit.SECOND * 10`.
++ * * Construct [TimeBased], [DayBased], or [MonthBased] directly.
++ *
++ * ## How units are applied
++ * * When applied to an [Instant], [TimeBased] units correspond to fixed amounts of time and do not depend on a
++ *   time zone.
++ * * [DateBased] units are defined in terms of calendar arithmetic. When applied to an [Instant], they require a
++ *   [TimeZone] to interpret the instant as a [LocalDateTime] and apply the calendar operation.
+  *
+  * Note that a calendar day is not considered identical to 24 hours. See [DateTimeUnit.DayBased] for a discussion.
++ *
++ * ## Usage
++ * ```kotlin
++ * val tz = TimeZone.of("Europe/Berlin")
++ * val now = Clock.System.now()
++ *
++ * val inTwoHours = now.plus(2, DateTimeUnit.HOUR)              // time-based
++ * val tomorrow = now.plus(1, DateTimeUnit.DAY, tz)             // date-based, needs a time zone
++ * val inThreeMonths = now.plus(3, DateTimeUnit.MONTH, tz)
++ * ```
+  */
+ @Serializable(with = DateTimeUnitSerializer::class)
+ public sealed class DateTimeUnit {
+diff --git a/core/common/src/DayOfWeek.kt b/core/common/src/DayOfWeek.kt
+index 496d61b..9c1eb12 100644
+--- a/core/common/src/DayOfWeek.kt
++++ b/core/common/src/DayOfWeek.kt
+@@ -6,7 +6,24 @@
+ package kotlinx.datetime
+ 
+ /**
+- * The enumeration class representing the days of the week.
++ * The ISO-8601 day-of-week.
++ *
++ * This enum represents the seven days of the week as defined by ISO-8601, with Monday as the first day.
++ * It is commonly obtained from [LocalDate.dayOfWeek] or [LocalDateTime.dayOfWeek].
++ *
++ * Use [isoDayNumber] to get the ISO-8601 day number (Monday is 1, Sunday is 7), and the [DayOfWeek] function
++ * to convert an ISO day number back to an enum value.
++ *
++ * ## Usage
++ * ```kotlin
++ * val tz = TimeZone.currentSystemDefault()
++ * val today = Clock.System.todayIn(tz)
++ *
++ * val isWeekend = today.dayOfWeek == DayOfWeek.SATURDAY || today.dayOfWeek == DayOfWeek.SUNDAY
++ *
++ * val n = DayOfWeek.MONDAY.isoDayNumber // 1
++ * val d = DayOfWeek(7) // SUNDAY
++ * ```
+  */
+ public expect enum class DayOfWeek {
+     MONDAY,
+diff --git a/core/common/src/Exceptions.kt b/core/common/src/Exceptions.kt
+index 4194640..7e445fc 100644
+--- a/core/common/src/Exceptions.kt
++++ b/core/common/src/Exceptions.kt
+@@ -16,7 +16,10 @@ public class DateTimeArithmeticException: RuntimeException {
+ }
+ 
+ /**
+- * Thrown when attempting to construct a [TimeZone] with an invalid ID.
++ * Thrown when attempting to construct a [TimeZone] with an invalid identifier.
++ *
++ * This exception is thrown by [TimeZone.of] when the provided string is not a valid time-zone identifier
++ * or when no time zone with that identifier is available on the current platform.
+  */
+ public class IllegalTimeZoneException: IllegalArgumentException {
+     public constructor(): super()
+diff --git a/core/common/src/Instant.kt b/core/common/src/Instant.kt
+index 659fe5b..a313a24 100644
+--- a/core/common/src/Instant.kt
++++ b/core/common/src/Instant.kt
+@@ -14,23 +14,40 @@ import kotlin.time.*
+ /**
+  * A moment in time.
+  *
+- * A point in time must be uniquely identified, so that it is independent of a time zone.
+- * For example, `1970-01-01, 00:00:00` does not represent a moment in time, since this would happen at different times
+- * in different time zones: someone in Tokyo would think its already `1970-01-01` several hours earlier than someone in
+- * Berlin would. To represent such entities, use [LocalDateTime].
+- * In contrast, "the moment the clocks in London first showed 00:00 on Jan 1, 2000" is a specific moment
+- * in time, as is "1970-01-01, 00:00:00 UTC+0", and so it can be represented as an [Instant].
++ * An [Instant] uniquely identifies a point on the time line and is independent of time zones.
++ * For example, `1970-01-01T00:00` is *not* a moment in time, because it will be observed at different physical
++ * instants in different time zones; to represent such a civil date/time, use [LocalDateTime].
++ * In contrast, `1970-01-01T00:00Z` (or "the moment the clocks in London first showed 00:00 on Jan 1, 2000") is a
++ * specific moment in time and can be represented as an [Instant].
+  *
+  * `Instant` uses the UTC-SLS (smeared leap second) time scale. This time scale doesn't contain instants
+- * corresponding to leap seconds, but instead "smears" positive and negative leap seconds among the last 1000 seconds
++ * corresponding to leap seconds; instead, it "smears" positive and negative leap seconds among the last 1000 seconds
+  * of the day when a leap second happens.
+  *
+- * Some ways in which [Instant] can be acquired are:
+- * - [Clock.now] can be used to query the current moment for the given clock. With [Clock.System], it is the current
+- *   moment as the platform sees it.
+- * - [Instant.parse] parses an ISO-8601 string.
+- * - [Instant.fromEpochMilliseconds] and [Instant.fromEpochSeconds] construct the instant values from the amount of time
+- *   since `1970-01-01T00:00:00Z` (the Unix epoch).
++ * ## How to acquire
++ * - Call [Clock.now] on a clock (most commonly, [Clock.System]).
++ * - Parse an ISO-8601 string with [parse].
++ * - Construct from Unix time with [fromEpochMilliseconds] or [fromEpochSeconds].
++ *
++ * ## Working with civil time
++ * To obtain human-readable calendar components, convert an [Instant] to [LocalDateTime] in a [TimeZone]
++ * using [Instant.toLocalDateTime]. To go the other way, interpret a [LocalDateTime] in a time zone using
++ * [LocalDateTime.toInstant].
++ *
++ * ## Arithmetic: duration vs calendar units
++ * Adding/subtracting a [Duration] with [plus] and [minus] is a precise, time-zone-independent operation.
++ * If you need calendar arithmetic such as "add one day in Europe/Berlin", use the overloads of [Instant.plus]
++ * and [Instant.minus] that take [DateTimeUnit] or [DateTimePeriod] together with a [TimeZone].
++ *
++ * ## Usage
++ * ```kotlin
++ * val now = Clock.System.now()
++ * val later = now + 10.seconds
++ *
++ * val tz = TimeZone.currentSystemDefault()
++ * val local = now.toLocalDateTime(tz)
++ * val tomorrowSameLocalTime = now.plus(1, DateTimeUnit.DAY, tz).toLocalDateTime(tz)
++ * ```
+  */
+ @Serializable(with = InstantIso8601Serializer::class)
+ public expect class Instant : Comparable<Instant> {
+diff --git a/core/common/src/LocalDate.kt b/core/common/src/LocalDate.kt
+index 0a411a8..4db0068 100644
+--- a/core/common/src/LocalDate.kt
++++ b/core/common/src/LocalDate.kt
+@@ -10,11 +10,25 @@ import kotlinx.datetime.serializers.LocalDateIso8601Serializer
+ import kotlinx.serialization.Serializable
+ 
+ /**
+- * The date part of [LocalDateTime].
++ * A civil date without a time-zone.
+  *
+- * This class represents dates without a reference to a particular time zone.
+- * As such, these objects may denote different spans of time in different time zones: for someone in Berlin,
+- * `2020-08-30` started and ended at different moments from those for someone in Tokyo.
++ * A [LocalDate] represents the date component of a [LocalDateTime] in the ISO-8601/Gregorian calendar.
++ * It does not identify a unique moment in time: the same date spans different physical instants in different
++ * time zones.
++ *
++ * ## How to acquire
++ * * Convert an [Instant] to a [LocalDateTime] in a [TimeZone] and take the [LocalDateTime.date] property.
++ * * Use [Clock.todayIn] to get "today" for a particular [TimeZone].
++ * * Parse an ISO-8601 string with [parse], or construct from components.
++ *
++ * ## Usage
++ * ```kotlin
++ * val tz = TimeZone.currentSystemDefault()
++ * val today: LocalDate = Clock.System.todayIn(tz)
++ * val tomorrow = today.plus(1, DateTimeUnit.DAY)
++ *
++ * val parsed = LocalDate.parse("2020-02-29")
++ * ```
+  *
+  * The arithmetic on [LocalDate] values is defined independently of the time zone (so `2020-08-30` plus one day
+  * is `2020-08-31` everywhere): see various [LocalDate.plus] and [LocalDate.minus] functions, as well
+diff --git a/core/common/src/LocalDateTime.kt b/core/common/src/LocalDateTime.kt
+index 6fa4e76..1413026 100644
+--- a/core/common/src/LocalDateTime.kt
++++ b/core/common/src/LocalDateTime.kt
+@@ -11,18 +11,41 @@ import kotlinx.datetime.serializers.LocalDateTimeIso8601Serializer
+ import kotlinx.serialization.Serializable
+ 
+ /**
+- * The representation of a specific civil date and time without a reference to a particular time zone.
++ * A civil date and time without a time-zone.
+  *
+- * This class does not describe specific *moments in time*, which are represented as [Instant] values.
+- * Instead, its instances can be thought of as clock readings, something that an observer in a particular time zone
+- * could witness.
+- * For example, `2020-08-30T18:43` is not a *moment in time*, since someone in Berlin and someone in Tokyo would witness
+- * this on their clocks at different times.
++ * A [LocalDateTime] is a set of calendar components (year, month, day, hour, etc.) in the ISO-8601/Gregorian calendar.
++ * It does **not** identify a unique moment in time: the same local date/time may correspond to different moments in
++ * different time zones.
+  *
+- * The main purpose of this class is to provide human-readable representations of [Instant] values, or to transfer them
+- * as data.
++ * Think of a [LocalDateTime] as a wall-clock reading that an observer in some (unspecified) [TimeZone] could witness.
++ * For example, `2020-08-30T18:43` is not a single moment in time: someone in Berlin and someone in Tokyo would see
++ * this on their clocks at different physical instants.
+  *
+- * The arithmetic on [LocalDateTime] values is not provided, since without accounting for the time zone transitions it may give misleading results.
++ * ## How to acquire
++ * * Convert an [Instant] to local components in a particular [TimeZone] using [Instant.toLocalDateTime].
++ * * Parse an ISO-8601 string using [parse] (or parse/format with [DateTimeFormat] via [format]).
++ * * Construct one from explicit components or by combining a [LocalDate] and a [LocalTime].
++ *
++ * ## Recommended usage
++ * * Use [Instant] to represent events that happen at a specific moment on the time line (timestamps, deadlines close to now).
++ * * Use [LocalDateTime] (together with an explicit [TimeZone]) to represent events scheduled at a particular local time,
++ *   especially in the far future, where time-zone rules may change.
++ *
++ * ## Conversion rules and gotchas
++ * Converting a [LocalDateTime] to an [Instant] requires a [TimeZone] and can be ambiguous or impossible due to time-zone
++ * transitions (gaps and overlaps). See [LocalDateTime.toInstant] for the tie-breaking rules.
++ *
++ * Arithmetic on [LocalDateTime] values is intentionally omitted: without a time zone, "add one day" may produce a local
++ * value that is invalid or misleading around daylight saving time transitions.
++ *
++ * ## Usage
++ * ```kotlin
++ * val tz = TimeZone.of("Europe/Berlin")
++ * val meeting = LocalDateTime.parse("2030-05-01T09:30")
++ * val meetingInstant = meeting.toInstant(tz)
++ *
++ * val nowLocal = Clock.System.now().toLocalDateTime(tz)
++ * ```
+  */
+ @Serializable(with = LocalDateTimeIso8601Serializer::class)
+ public expect class LocalDateTime : Comparable<LocalDateTime> {
+diff --git a/core/common/src/LocalTime.kt b/core/common/src/LocalTime.kt
+index 900bc61..a9d878d 100644
+--- a/core/common/src/LocalTime.kt
++++ b/core/common/src/LocalTime.kt
+@@ -12,18 +12,29 @@ import kotlinx.serialization.Serializable
+ 
+ 
+ /**
+- * The time part of [LocalDateTime].
++ * A civil time-of-day without a date or time-zone.
+  *
+- * This class represents time-of-day without a referencing a specific date.
+- * To reconstruct a full [LocalDateTime], representing civil date and time, [LocalTime] needs to be
+- * combined with [LocalDate] via [LocalDate.atTime] or [LocalTime.atDate].
++ * A [LocalTime] represents the time part of a [LocalDateTime] (hour, minute, second, nanosecond) without referencing
++ * a specific date.
++ * To represent a full civil date/time, combine it with a [LocalDate] via [LocalDate.atTime] or [LocalTime.atDate].
+  *
+- * Also, [LocalTime] does not reference a particular time zone.
+- * Therefore, even on the same date, [LocalTime] denotes different moments of time.
+- * For example, `18:43` happens at different moments in Berlin and in Tokyo.
++ * [LocalTime] also does not reference a particular time zone.
++ * Therefore, even on the same date, the same [LocalTime] value can correspond to different moments in different
++ * time zones.
+  *
+- * The arithmetic on [LocalTime] values is not provided, since without accounting for the time zone
+- * transitions it may give misleading results.
++ * Arithmetic on [LocalTime] values is intentionally omitted: without a date and a time zone, adding a duration may be
++ * misleading around time-zone transitions.
++ *
++ * ## How to acquire
++ * * Parse an ISO-8601 string with [parse].
++ * * Construct from components.
++ * * Convert an [Instant] to [LocalDateTime] in a [TimeZone] and take the [LocalDateTime.time] property.
++ *
++ * ## Usage
++ * ```kotlin
++ * val time = LocalTime.parse("18:43")
++ * val dateTime = time.atDate(LocalDate(2020, 8, 30))
++ * ```
+  */
+ @Serializable(LocalTimeIso8601Serializer::class)
+ public expect class LocalTime : Comparable<LocalTime> {
+diff --git a/core/common/src/Month.kt b/core/common/src/Month.kt
+index 5603dc2..92a982a 100644
+--- a/core/common/src/Month.kt
++++ b/core/common/src/Month.kt
+@@ -6,7 +6,22 @@
+ package kotlinx.datetime
+ 
+ /**
+- * The enumeration class representing the 12 months of the year.
++ * The ISO-8601 month-of-year.
++ *
++ * This enum represents the 12 months of the Gregorian calendar as used by ISO-8601.
++ * It is commonly obtained from [LocalDate.month] or [LocalDateTime.month].
++ *
++ * Use [number] to get the ISO-8601 month number (January is 1, December is 12), and the [Month] function
++ * to convert a month number back to an enum value.
++ *
++ * ## Usage
++ * ```kotlin
++ * val date = LocalDate.parse("2020-02-29")
++ * println(date.month)         // FEBRUARY
++ * println(date.month.number)  // 2
++ *
++ * val march = Month(3)        // MARCH
++ * ```
+  */
+ public expect enum class Month {
+     /** January, month #01, with 31 days. */
+diff --git a/core/common/src/TimeZone.kt b/core/common/src/TimeZone.kt
+index c0af7d8..1f1ccbd 100644
+--- a/core/common/src/TimeZone.kt
++++ b/core/common/src/TimeZone.kt
+@@ -36,6 +36,8 @@ public expect open class TimeZone {
+ 
+         /**
+          * Returns the time zone with the fixed UTC+0 offset.
++         *
++         * This is equivalent to `TimeZone.of("Z")`, and to `UtcOffset.ZERO.asTimeZone()`.
+          */
+         public val UTC: FixedOffsetTimeZone
+ 
+@@ -56,7 +58,11 @@ public expect open class TimeZone {
+         public fun of(zoneId: String): TimeZone
+ 
+         /**
+-         * Queries the set of identifiers of time zones available in the system.
++         * Queries the set of identifiers of time zones available on the current platform.
++         *
++         * This set can be used to present a list of selectable time zones to a user.
++         *
++         * Note: the available set can be limited on some platforms and configurations.
+          */
+         public val availableZoneIds: Set<String>
+     }
+@@ -92,6 +98,23 @@ public expect open class TimeZone {
+ 
+ /**
+  * A time zone that is known to always have the same offset from UTC.
++ *
++ * Unlike region-based time zones (for example, `Europe/Berlin`), a [FixedOffsetTimeZone] never changes its offset
++ * and therefore does not model daylight saving time or historical/political time-zone changes.
++ *
++ * ## How to acquire
++ * * Use [FixedOffsetTimeZone] constructor with a [UtcOffset].
++ * * Use [UtcOffset.asTimeZone] as a convenient way to obtain a fixed-offset time zone.
++ * * Use [TimeZone.of] with an offset-based identifier (for example, `"UTC+03"` or `"+03:00"`).
++ *
++ * ## Usage
++ * ```kotlin
++ * val offset = UtcOffset(hours = 3)
++ * val tz: FixedOffsetTimeZone = offset.asTimeZone()
++ *
++ * val local = LocalDateTime.parse("2016-02-15T16:57")
++ * val instant = local.toInstant(tz)
++ * ```
+  */
+ @Serializable(with = FixedOffsetTimeZoneSerializer::class)
+ public expect class FixedOffsetTimeZone : TimeZone {
+diff --git a/core/common/src/UtcOffset.kt b/core/common/src/UtcOffset.kt
+index 630ee15..9e90697 100644
+--- a/core/common/src/UtcOffset.kt
++++ b/core/common/src/UtcOffset.kt
+@@ -12,12 +12,30 @@ import kotlinx.serialization.Serializable
+ /**
+  * An offset from UTC.
+  *
+- * Examples of these values:
++ * A [UtcOffset] represents a fixed difference between a local civil time and UTC.
++ * It does not contain any time-zone rules (such as daylight saving time); for that, use [TimeZone].
++ *
++ * [UtcOffset] values are typically used:
++ * * as part of parsing/formatting strings that include an offset,
++ * * to obtain a [FixedOffsetTimeZone] via [asTimeZone],
++ * * when you need the offset a [TimeZone] has at a particular [Instant] (see [Instant.offsetIn] or [TimeZone.offsetAt]).
++ *
++ * ## ISO-8601
++ * This type supports ISO-8601-style offsets such as:
+  * - `Z`, an offset of zero;
+  * - `+05`, plus five hours;
+  * - `-02`, minus two hours;
+  * - `+03:30`, plus three hours and thirty minutes;
+  * - `+01:23:45`, plus one hour, 23 minutes, and 45 seconds.
++ *
++ * ## Usage
++ * ```kotlin
++ * val offset = UtcOffset.parse("+03:30")
++ * val tz = offset.asTimeZone()
++ *
++ * val now = Clock.System.now()
++ * val systemOffsetNow = now.offsetIn(TimeZone.currentSystemDefault())
++ * ```
+  */
+ @Serializable(with = UtcOffsetSerializer::class)
+ public expect class UtcOffset {

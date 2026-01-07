@@ -1,0 +1,62 @@
+diff --git a/kotlinx-coroutines-core/common/src/internal/Scopes.kt b/kotlinx-coroutines-core/common/src/internal/Scopes.kt
+index 7e561c83d..c1ee186d7 100644
+--- a/kotlinx-coroutines-core/common/src/internal/Scopes.kt
++++ b/kotlinx-coroutines-core/common/src/internal/Scopes.kt
+@@ -27,6 +27,13 @@ internal open class ScopeCoroutine<in T>(
+         // Resume direct because scope is already in the correct context
+         uCont.resumeWith(recoverResult(state, uCont))
+     }
++
++    /**
++     * Invoked when this coroutine completes *synchronously* in [startUndispatchedOrReturn],
++     * i.e. when the caller is going to get the result directly and [afterResume]/[afterCompletion]
++     * won't be invoked.
++     */
++    internal open fun afterUndispatchedCompletion(state: Any?) {}
+ }
+ 
+ internal class ContextScope(context: CoroutineContext) : CoroutineScope {
+diff --git a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+index 254182b38..65b68d222 100644
+--- a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
++++ b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+@@ -79,6 +79,10 @@ private inline fun <T> ScopeCoroutine<T>.undispatchedResult(
+     if (result === COROUTINE_SUSPENDED) return COROUTINE_SUSPENDED // (1)
+     val state = makeCompletingOnce(result)
+     if (state === COMPLETING_WAITING_CHILDREN) return COROUTINE_SUSPENDED // (2)
++
++    // Completed without suspension: clean up any undispatched-specific resources.
++    afterUndispatchedCompletion(state)
++
+     return if (state is CompletedExceptionally) { // (3)
+         when {
+             shouldThrow(state.cause) -> throw recoverStackTrace(state.cause, uCont)
+diff --git a/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt b/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
+index ae8275f86..c9770864e 100644
+--- a/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
++++ b/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
+@@ -184,8 +184,9 @@ internal actual class UndispatchedCoroutine<in T>actual constructor (
+      * It is a well-established pattern to wrap various activities into system-specific undispatched
+      * `withContext` for the sake of logging, MDC, tracing etc., meaning that there exists thousands of
+      * undispatched coroutines.
+-     * Each access to Java's [ThreadLocal] leaves a footprint in the corresponding Thread's `ThreadLocalMap`
+-     * that is cleared automatically as soon as the associated thread-local (-> UndispatchedCoroutine) is garbage collected.
++     * Each access to Java's [ThreadLocal] leaves a footprint in the corresponding Thread's `ThreadLocalMap`.
++     * If the thread-local instance becomes unreachable, its entry may still retain the value until the map performs
++     * stale-entry cleanup; hence we try to remove entries eagerly with [ThreadLocal.remove].
+      * When such coroutines are promoted to old generation, `ThreadLocalMap`s become bloated and an arbitrary accesses to thread locals
+      * start to consume significant amount of CPU because these maps are open-addressed and cleaned up incrementally on each access.
+      * (You can read more about this effect as "GC nepotism").
+@@ -253,6 +254,12 @@ internal actual class UndispatchedCoroutine<in T>actual constructor (
+         }
+     }
+ 
++    override fun afterUndispatchedCompletion(state: Any?) {
++        // When completing without suspension, [afterResume] is not invoked.
++        // Ensure we don't retain the context through the thread-local (see #2930/#4295).
++        if (threadLocalIsSet) threadStateToRecover.remove()
++    }
++
+     override fun afterResume(state: Any?) {
+         if (threadLocalIsSet) {
+             threadStateToRecover.get()?.let { (ctx, value) ->

@@ -1,17 +1,5 @@
-diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 18caaa55..89e34e85 100644
---- a/CHANGELOG.md
-+++ b/CHANGELOG.md
-@@ -224,6 +224,7 @@ Previously the default value for `.editorconfig` property `max_line_length` was
- 
- ### Added
- 
-+* Wrap annotations before the primary constructor to separate lines when using `ktlint_official` code style in `annotation` rule. ([#1908](https://github.com/pinterest/ktlint/issues/1908))
- * Add new experimental rule `no-empty-first-line-in-class-body` for `ktlint_official` code style. This rule disallows a class to start with a blank line. This rule can also be run for other code styles but then its needs to be explicitly enabled.
- * Add new experimental rule `if-else-bracing` for `ktlint_official` code style. This rules enforces consistent usage of braces in all branches of a singe if or if-else-if statement. This rule can also be run for other code styles but then its needs to be explicitly enabled.
- * Add new experimental rule `no-consecutive-comments` for `ktlint_official` code style. This rule disallows consecutive comments except EOL comments. This rule can also be run for other code styles but then its needs to be explicitly enabled.
 diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
-index bdddca08..26c4d4af 100644
+index bdddca08..7f4f3853 100644
 --- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
 +++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
 @@ -6,6 +6,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
@@ -22,7 +10,7 @@ index bdddca08..26c4d4af 100644
  import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PROJECTION
  import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
  import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT
-@@ -18,6 +19,7 @@ import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRu
+@@ -18,10 +19,12 @@ import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRu
  import com.pinterest.ktlint.rule.engine.core.api.RuleId
  import com.pinterest.ktlint.rule.engine.core.api.children
  import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
@@ -30,7 +18,12 @@ index bdddca08..26c4d4af 100644
  import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
  import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
  import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
-@@ -78,6 +80,7 @@ public class AnnotationRule :
+ import com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf
++import com.pinterest.ktlint.rule.engine.core.api.indent
+ import com.pinterest.ktlint.rule.engine.core.api.isCodeLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpace
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+@@ -78,6 +81,7 @@ public class AnnotationRule :
          id = "annotation",
          usesEditorConfigProperties =
              setOf(
@@ -38,164 +31,193 @@ index bdddca08..26c4d4af 100644
                  INDENT_SIZE_PROPERTY,
                  INDENT_STYLE_PROPERTY,
              ),
-@@ -127,6 +130,11 @@ public class AnnotationRule :
+@@ -127,6 +131,12 @@ public class AnnotationRule :
      ) {
          require(node.elementType == ANNOTATION_ENTRY)
  
-+        if (codeStyle == ktlint_official && node.isPrimaryConstructorAnnotation()) {
-+            visitPrimaryConstructorAnnotation(node, emit, autoCorrect)
++        if (codeStyle == ktlint_official && node.primaryConstructorOrNull() != null) {
++            // In ktlint_official code style, annotations before constructor should be wrapped
++            visitAnnotationEntryOnPrimaryConstructor(node, emit, autoCorrect)
 +            return
 +        }
 +
          if (node.isAnnotationEntryWithValueArgumentList() &&
              node.treeParent.treeParent.elementType != VALUE_PARAMETER &&
              node.treeParent.treeParent.elementType != VALUE_ARGUMENT &&
-@@ -254,6 +262,97 @@ public class AnnotationRule :
+@@ -254,6 +264,13 @@ public class AnnotationRule :
              ?.takeIf { it.treeParent.elementType == TYPE_PROJECTION }
              ?.treeParent
  
-+    private fun ASTNode.isPrimaryConstructorAnnotation() =
++    private fun ASTNode.primaryConstructorOrNull() =
 +        takeIf { elementType == ANNOTATION_ENTRY }
 +            ?.takeIf { it.treeParent.elementType == MODIFIER_LIST }
 +            ?.treeParent
 +            ?.takeIf { it.treeParent.elementType == PRIMARY_CONSTRUCTOR }
-+            .let { it != null }
-+
-+    private fun visitPrimaryConstructorAnnotation(
-+        node: ASTNode,
-+        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
-+        autoCorrect: Boolean,
-+    ) {
-+        val expectedIndent = getNewlineWithIndentForPrimaryConstructorAnnotation(node)
-+        if (node.isFirstAnnotationEntry()) {
-+            // Annotation before constructor should be on separate line from class identifier:
-+            //    data class Foo @Bar1 constructor()
-+            // should be formatted as:
-+            //    data class Foo
-+            //        @Bar1
-+            //        constructor()
-+            node
-+                .firstChildLeafOrSelf()
-+                .prevLeaf()
-+                ?.takeIf { it.elementType == WHITE_SPACE && !it.textContains('\n') }
-+                ?.let {
-+                    emit(node.startOffset, "Expected newline before annotation", true)
-+                    if (autoCorrect) {
-+                        node.firstChildLeafOrSelf().upsertWhitespaceBeforeMe(expectedIndent)
-+                    }
-+                }
-+        }
-+        if (node.isFollowedByOtherAnnotationEntryOnTheSameLine()) {
-+            // Each annotation should be on a separate line:
-+            //    data class Foo @Bar1 @Bar2 constructor()
-+            // should be formatted as:
-+            //    data class Foo
-+            //        @Bar1
-+            //        @Bar2
-+            //        constructor()
-+            emit(node.startOffset, "Expected each annotation to be on a separate line", true)
-+            if (autoCorrect) {
-+                node.lastChildLeafOrSelf().nextLeaf()?.upsertWhitespaceBeforeMe(expectedIndent)
-+            }
-+        }
-+        if (node.isLastAnnotationEntry()) {
-+            // Last annotation should be on separate line from constructor keyword (or visibility modifier):
-+            //    data class Foo @Bar1 constructor()
-+            //    data class Foo @Bar1 internal constructor()
-+            // should be formatted as:
-+            //    data class Foo
-+            //        @Bar1
-+            //        constructor()
-+            //    data class Foo
-+            //        @Bar1
-+            //        internal constructor()
-+            node
-+                .lastChildLeafOrSelf()
-+                .nextLeaf()
-+                ?.takeIf { it.elementType == WHITE_SPACE && !it.textContains('\n') }
-+                ?.let { whiteSpaceAfterAnnotation ->
-+                    val nextCodeLeaf = whiteSpaceAfterAnnotation.nextCodeLeaf()
-+                    if (nextCodeLeaf != null) {
-+                        emit(nextCodeLeaf.startOffset, "Expected newline", true)
-+                        if (autoCorrect) {
-+                            nextCodeLeaf.upsertWhitespaceBeforeMe(expectedIndent)
-+                        }
-+                    }
-+                }
-+        }
-+    }
-+
-+    private fun getNewlineWithIndentForPrimaryConstructorAnnotation(node: ASTNode): String {
-+        // For primary constructor annotations, the indent should be computed from the CLASS element
-+        // node.treeParent = MODIFIER_LIST
-+        // node.treeParent.treeParent = PRIMARY_CONSTRUCTOR
-+        // node.treeParent.treeParent.treeParent = CLASS
-+        val classNode =
-+            node
-+                .treeParent
-+                .treeParent
-+                .treeParent
-+        val nodeBeforeClass = classNode.treePrev
-+        // Make sure we only insert a single newline
-+        val classIndent =
-+            nodeBeforeClass
-+                ?.text
-+                .orEmpty()
-+                .substringAfterLast('\n')
-+        return "\n".plus(classIndent).plus(indentConfig.indent)
-+    }
++            ?.treeParent
 +
      private fun ASTNode.isPrecededByAnnotationOnAnotherLine(): Boolean {
          val firstAnnotation = treeParent.findChildByType(ANNOTATION_ENTRY)
          return siblings(forward = false)
-diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTest.kt
-index 57c1aa1e..0f1013cc 100644
---- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTest.kt
-+++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTest.kt
-@@ -1,5 +1,7 @@
- package com.pinterest.ktlint.ruleset.standard.rules
+@@ -435,6 +452,73 @@ public class AnnotationRule :
+         }
+     }
  
++    private fun visitAnnotationEntryOnPrimaryConstructor(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        require(node.elementType == ANNOTATION_ENTRY)
++        require(codeStyle == ktlint_official)
++        val primaryConstructor = node.primaryConstructorOrNull()
++        require(primaryConstructor != null)
++
++        val hasMultipleAnnotations = node.isPrecededByOtherAnnotationEntry() || node.isFollowedByOtherAnnotationEntry()
++        val hasAnnotationWithParameter = node.isAnnotationEntryWithValueArgumentList() ||
++            node.treeParent.children().any { it.elementType == ANNOTATION_ENTRY && it.isAnnotationEntryWithValueArgumentList() }
++
++        if (hasMultipleAnnotations || hasAnnotationWithParameter) {
++            // In ktlint_official, when there are multiple annotations before constructor or any annotation has parameters,
++            // each annotation should be on a separate line
++            // Annotations should be indented one level from the class
++            val expectedIndent = primaryConstructor.treeParent.indent().plus(indentConfig.indent)
++
++            if (node.isFirstAnnotationEntry()) {
++                // First annotation should be on a new line after the class name
++                if (!node.firstChildLeafOrSelf().prevLeaf().isWhiteSpaceWithNewline()) {
++                    emit(
++                        node.startOffset,
++                        "Expected newline before annotation",
++                        true,
++                    )
++                    if (autoCorrect) {
++                        node
++                            .firstChildLeafOrSelf()
++                            .upsertWhitespaceBeforeMe(expectedIndent)
++                    }
++                }
++            }
++
++            if (node.isPrecededByOtherAnnotationEntryOnTheSameLine()) {
++                // Each annotation should be on its own line
++                emit(
++                    node.startOffset,
++                    "Expected newline before annotation",
++                    true,
++                )
++                if (autoCorrect) {
++                    node
++                        .firstChildLeafOrSelf()
++                        .upsertWhitespaceBeforeMe(expectedIndent)
++                }
++            }
++
++            if (node.isLastAnnotationEntry() && node.isOnSameLineAsAnnotatedConstruct()) {
++                // The constructor keyword should be on a new line after the last annotation
++                emit(
++                    node.findAnnotatedConstruct().startOffset,
++                    "Expected newline before 'constructor' keyword",
++                    true,
++                )
++                if (autoCorrect) {
++                    node
++                        .lastChildLeafOrSelf()
++                        .nextCodeLeaf()
++                        ?.upsertWhitespaceBeforeMe(expectedIndent)
++                }
++            }
++        }
++    }
++
+     private fun getNewlineWithIndent(modifierListRoot: ASTNode): String {
+         val nodeBeforeAnnotations =
+             modifierListRoot
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleConstructorTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleConstructorTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleConstructorTest.kt
+@@ -0,0 +1,128 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
 +import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
 +import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
- import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
- import com.pinterest.ktlint.test.LintViolation
- import org.junit.jupiter.api.Nested
-@@ -734,4 +736,136 @@ class AnnotationRuleTest {
-                 LintViolation(5, 25, "Multiple annotations should not be placed on the same line as the annotated construct"),
-             ).isFormattedAs(formattedCode)
-     }
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Nested
++import org.junit.jupiter.api.Test
++
++class AnnotationRuleConstructorTest {
++    private val annotationRuleAssertThat = assertThatRule { AnnotationRule() }
 +
 +    @Nested
-+    inner class `Given annotations before the primary constructor with ktlint_official code style` {
++    inner class `Given ktlint_official code style` {
 +        @Test
-+        fun `Given a single annotation before the primary constructor`() {
-+            val code =
-+                """
-+                class Foo @Inject constructor()
-+                """.trimIndent()
-+            val formattedCode =
-+                """
-+                class Foo
-+                    @Inject
-+                    constructor()
-+                """.trimIndent()
-+            annotationRuleAssertThat(code)
-+                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
-+                .hasLintViolations(
-+                    LintViolation(1, 11, "Expected newline before annotation"),
-+                    LintViolation(1, 19, "Expected newline"),
-+                ).isFormattedAs(formattedCode)
-+        }
-+
-+        @Test
-+        fun `Given multiple annotations before the primary constructor`() {
++        fun `Given a class with multiple annotations on constructor`() {
 +            val code =
 +                """
 +                data class Foo @Bar1 @Bar2("bar") @Bar3 @Bar4 constructor(private val foobar: Int) {
 +                    fun foo(): String = "foo"
 +                }
 +                """.trimIndent()
++            // Without IndentationRule, just test annotation rule behavior
 +            val formattedCode =
++                """
++                data class Foo
++                    @Bar1
++                    @Bar2("bar")
++                    @Bar3
++                    @Bar4
++                    constructor(private val foobar: Int) {
++                    fun foo(): String = "foo"
++                }
++                """.trimIndent()
++            @Suppress("ktlint:argument-list-wrapping", "ktlint:max-line-length")
++            annotationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++                .hasLintViolations(
++                    LintViolation(1, 16, "Expected newline before annotation"),
++                    LintViolation(1, 22, "Expected newline before annotation"),
++                    LintViolation(1, 35, "Expected newline before annotation"),
++                    LintViolation(1, 41, "Expected newline before annotation"),
++                    LintViolation(1, 47, "Expected newline before 'constructor' keyword"),
++                ).isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given a class with a single annotation with parameter on constructor`() {
++            val code =
++                """
++                class Foo @Bar("bar") constructor(private val foobar: Int)
++                """.trimIndent()
++            val formattedCode =
++                """
++                class Foo
++                    @Bar("bar")
++                    constructor(private val foobar: Int)
++                """.trimIndent()
++            annotationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++                .hasLintViolations(
++                    LintViolation(1, 11, "Expected newline before annotation"),
++                    LintViolation(1, 23, "Expected newline before 'constructor' keyword"),
++                ).isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given a class with a single annotation without parameter on constructor then do not change`() {
++            val code =
++                """
++                class Foo @Inject internal constructor()
++                """.trimIndent()
++            annotationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a class with already wrapped annotations on constructor`() {
++            val code =
 +                """
 +                data class Foo
 +                    @Bar1
@@ -208,95 +230,42 @@ index 57c1aa1e..0f1013cc 100644
 +                """.trimIndent()
 +            annotationRuleAssertThat(code)
 +                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
-+                .hasLintViolations(
-+                    LintViolation(1, 16, "Expected newline before annotation"),
-+                    LintViolation(1, 16, "Expected each annotation to be on a separate line"),
-+                    LintViolation(1, 22, "Expected each annotation to be on a separate line"),
-+                    LintViolation(1, 35, "Expected each annotation to be on a separate line"),
-+                    LintViolation(1, 41, "Expected each annotation to be on a separate line"),
-+                    LintViolation(1, 47, "Expected newline"),
-+                ).isFormattedAs(formattedCode)
++                .hasNoLintViolations()
 +        }
++    }
 +
++    @Nested
++    inner class `Given non-ktlint_official code style` {
 +        @Test
-+        fun `Given a single annotation without parameters before the primary constructor with internal visibility modifier`() {
++        fun `Given a class with a single annotation on constructor in default style`() {
 +            val code =
 +                """
 +                class Foo @Inject internal constructor()
 +                """.trimIndent()
-+            val formattedCode =
-+                """
-+                class Foo
-+                    @Inject
-+                    internal constructor()
-+                """.trimIndent()
-+            annotationRuleAssertThat(code)
-+                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
-+                .hasLintViolations(
-+                    LintViolation(1, 11, "Expected newline before annotation"),
-+                    LintViolation(1, 19, "Expected newline"),
-+                ).isFormattedAs(formattedCode)
++            annotationRuleAssertThat(code).hasNoLintViolations()
 +        }
 +
 +        @Test
-+        fun `Given annotations already correctly formatted before primary constructor`() {
++        fun `Given a class with multiple annotations without params on constructor in default style`() {
 +            val code =
 +                """
-+                data class Foo
-+                    @Bar1
-+                    @Bar2("bar")
-+                    constructor(private val foobar: Int)
++                class Foo @Bar1 @Bar2 constructor()
 +                """.trimIndent()
-+            annotationRuleAssertThat(code)
-+                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
-+                .hasNoLintViolations()
-+        }
-+
-+        @Test
-+        fun `Given a class with generic type and annotation before primary constructor`() {
-+            val code =
-+                """
-+                class Foo<T> @Inject constructor(val bar: T)
-+                """.trimIndent()
++            // In default (non-ktlint_official) style, multiple annotations on same line as annotated construct
++            // should cause a violation. The constructor keyword is wrapped to a new line.
++            // Note: The existing getNewlineWithIndent uses the space before PRIMARY_CONSTRUCTOR as indent
 +            val formattedCode =
 +                """
-+                class Foo<T>
-+                    @Inject
-+                    constructor(val bar: T)
++                class Foo @Bar1 @Bar2
++                 constructor()
 +                """.trimIndent()
 +            annotationRuleAssertThat(code)
-+                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
-+                .hasLintViolations(
-+                    LintViolation(1, 14, "Expected newline before annotation"),
-+                    LintViolation(1, 22, "Expected newline"),
-+                ).isFormattedAs(formattedCode)
-+        }
-+
-+        @Test
-+        fun `Given annotation before primary constructor inside nested class`() {
-+            val code =
-+                """
-+                class Outer {
-+                    class Inner @Inject constructor()
-+                }
-+                """.trimIndent()
-+            val formattedCode =
-+                """
-+                class Outer {
-+                    class Inner
-+                        @Inject
-+                        constructor()
-+                }
-+                """.trimIndent()
-+            annotationRuleAssertThat(code)
-+                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
-+                .hasLintViolations(
-+                    LintViolation(2, 17, "Expected newline before annotation"),
-+                    LintViolation(2, 25, "Expected newline"),
-+                ).isFormattedAs(formattedCode)
++                .hasLintViolation(1, 23, "Multiple annotations should not be placed on the same line as the annotated construct")
++                .isFormattedAs(formattedCode)
 +        }
 +    }
- }
++}
++
 
 diff --git a/local.properties b/local.properties
 new file mode 100644

@@ -1,0 +1,133 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt b/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt
+index 86a62720f40..241ebc51ca1 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt
+@@ -122,12 +122,22 @@ class SiteCreationServiceManager @Inject constructor(
+             if (createSiteEvent.isError) {
+                 if (createSiteEvent.error.type == SiteStore.NewSiteErrorType.SITE_NAME_EXISTS) {
+                     if (isRetry) {
+-                        // Move to the next step. The site was already created on the server by our previous attempt.
+-                        AppLog.w(
+-                            T.SITE_CREATION,
+-                            "WPCOM site already created but we are in retrying mode so, just move on."
+-                        )
+-                        executePhase(SUCCESS)
++                        // Move to the next step only if we have enough data to identify the previously-created site.
++                        if (createSiteEvent.newSiteRemoteId > 0) {
++                            AppLog.w(
++                                T.SITE_CREATION,
++                                "WPCOM site already created but we are in retrying mode so, just move on."
++                            )
++                            executePhase(SUCCESS)
++                            return@launch
++                        } else {
++                            AppLog.w(
++                                T.SITE_CREATION,
++                                "Received SITE_NAME_EXISTS while retrying but without a valid site id; treating as failure."
++                            )
++                            executePhase(FAILURE)
++                            return@launch
++                        }
+                     } else {
+                         /**
+                          * This state should not happen in production unless the domain suggestion endpoint is broken.
+@@ -136,7 +146,10 @@ class SiteCreationServiceManager @Inject constructor(
+                          */
+                         val errorMsg = "Site already exists - seems like an issue with domain suggestions endpoint"
+                         AppLog.e(T.SITE_CREATION, errorMsg)
+-                        throw IllegalStateException(errorMsg)
++                        // Do not crash the app: treat this as a recoverable failure so the user can retry
++                        // (e.g. after picking another domain) or cancel the flow.
++                        executePhase(FAILURE)
++                        return@launch
+                     }
+                 } else {
+                     executePhase(FAILURE)
+
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManagerSiteNameExistsTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManagerSiteNameExistsTest.kt
+new file mode 100644
+--- /dev/null
++++ b/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManagerSiteNameExistsTest.kt
+@@ -0,0 +1,82 @@
++package org.wordpress.android.ui.sitecreation.services
++
++import kotlinx.coroutines.ExperimentalCoroutinesApi
++import org.assertj.core.api.Assertions.assertThat
++import org.junit.Before
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.mockito.Mock
++import org.mockito.junit.MockitoJUnitRunner
++import org.mockito.kotlin.argumentCaptor
++import org.mockito.kotlin.times
++import org.mockito.kotlin.verify
++import org.mockito.kotlin.whenever
++import org.wordpress.android.BaseUnitTest
++import org.wordpress.android.fluxc.Dispatcher
++import org.wordpress.android.fluxc.store.SiteStore.NewSiteError
++import org.wordpress.android.fluxc.store.SiteStore.NewSiteErrorType.SITE_NAME_EXISTS
++import org.wordpress.android.fluxc.store.SiteStore.OnNewSiteCreated
++import org.wordpress.android.ui.sitecreation.misc.SiteCreationTracker
++import org.wordpress.android.ui.sitecreation.services.SiteCreationServiceManager.SiteCreationServiceManagerListener
++import org.wordpress.android.ui.sitecreation.services.SiteCreationServiceState.SiteCreationStep.CREATE_SITE
++import org.wordpress.android.ui.sitecreation.services.SiteCreationServiceState.SiteCreationStep.FAILURE
++import org.wordpress.android.ui.sitecreation.services.SiteCreationServiceState.SiteCreationStep.IDLE
++import org.wordpress.android.ui.sitecreation.usecases.CreateSiteUseCase
++
++private const val LANGUAGE_ID = "lang_id"
++private const val TIMEZONE_ID = "timezone_id"
++
++private val DUMMY_SITE_DATA: SiteCreationServiceData = SiteCreationServiceData(
++    123,
++    "slug",
++    "domain",
++    null,
++    true,
++)
++
++@ExperimentalCoroutinesApi
++@RunWith(MockitoJUnitRunner::class)
++class SiteCreationServiceManagerSiteNameExistsTest : BaseUnitTest() {
++    @Mock
++    lateinit var useCase: CreateSiteUseCase
++
++    @Mock
++    lateinit var dispatcher: Dispatcher
++
++    @Mock
++    lateinit var serviceListener: SiteCreationServiceManagerListener
++
++    @Mock
++    lateinit var tracker: SiteCreationTracker
++
++    private lateinit var manager: SiteCreationServiceManager
++
++    @Before
++    fun setUp() {
++        manager = SiteCreationServiceManager(
++            useCase,
++            dispatcher,
++            tracker,
++            testDispatcher()
++        )
++    }
++
++    @Test
++    fun verifySiteNameExistsOnFirstAttemptDoesNotCrashAndUpdatesFailureState() = test {
++        val siteExistsErrorEvent = OnNewSiteCreated().apply {
++            error = NewSiteError(SITE_NAME_EXISTS, "")
++        }
++        whenever(useCase.createSite(DUMMY_SITE_DATA, LANGUAGE_ID, TIMEZONE_ID))
++            .thenReturn(siteExistsErrorEvent)
++
++        manager.onStart(LANGUAGE_ID, TIMEZONE_ID, null, DUMMY_SITE_DATA, serviceListener)
++
++        argumentCaptor<SiteCreationServiceState>().apply {
++            verify(serviceListener, times(3)).updateState(capture())
++            assertThat(allValues[0]).isEqualTo(SiteCreationServiceState(IDLE))
++            assertThat(allValues[1]).isEqualTo(SiteCreationServiceState(CREATE_SITE))
++            assertThat(allValues[2]).isEqualTo(SiteCreationServiceState(FAILURE))
++        }
++    }
++}
++

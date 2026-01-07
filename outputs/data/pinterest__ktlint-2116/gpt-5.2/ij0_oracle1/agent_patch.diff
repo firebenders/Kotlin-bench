@@ -1,0 +1,169 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 39ae35af..e28ed08c 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -17,8 +17,10 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS_BODY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLOSING_QUOTE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.COLON
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.COMMA
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONDITION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONSTRUCTOR_DELEGATION_CALL
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONSTRUCTOR_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONTEXT_RECEIVER_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.DELEGATED_SUPER_TYPE_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.DESTRUCTURING_DECLARATION
+@@ -605,13 +607,63 @@ public class IndentationRule :
+             }
+ 
+         val primaryConstructor = node.findChildByType(PRIMARY_CONSTRUCTOR)
+-        if (codeStyle == ktlint_official && primaryConstructor != null) {
+-            // Indent both constructor and super type list
+-            nextToAstNode =
++        val hasExplicitPrimaryConstructor = primaryConstructor?.findChildByType(CONSTRUCTOR_KEYWORD) != null
++
++        if (codeStyle == ktlint_official && hasExplicitPrimaryConstructor) {
++            val classIndent = currentIndent()
++            val endOfClass = nextToAstNode
++
++            val superTypeList = node.findChildByType(SUPER_TYPE_LIST)
++            val superTypeListEnd = superTypeList?.lastChildLeafOrSelf()
++            val firstCommaInSuperTypeList = superTypeList?.children()?.firstOrNull { it.elementType == COMMA }
++
++            if (firstCommaInSuperTypeList != null &&
++                superTypeListEnd != null &&
++                endOfClass.startOffset >= superTypeListEnd.startOffset
++            ) {
++                // Split the indentation of the explicit constructor/super type list in 3 sequential, non-overlapping
++                // contexts, so that the additional indentation for the continuation part of the super type list does
++                // not affect indentation before the comma.
++                //
++                //   1. Indent constructor and first super type entry
++                //   2. Extra indent for continuation part of the super type list (starting at the first top-level comma)
++                //   3. Indent the remainder (incl. class body)
++
++                node
++                    .findChildByType(CLASS_BODY)
++                    ?.getPrecedingLeadingCommentsAndWhitespaces()
++                    ?.takeIf { it.startOffset <= endOfClass.startOffset }
++                    ?.let { classBodyStart ->
++                        startIndentContext(
++                            fromAstNode = classBodyStart,
++                            toAstNode = endOfClass,
++                            nodeIndent = classIndent,
++                        )
++                    }
++
+                 startIndentContext(
+-                    fromAstNode = primaryConstructor.getPrecedingLeadingCommentsAndWhitespaces(),
+-                    toAstNode = nextToAstNode,
+-                ).prevCodeLeaf()
++                    fromAstNode = firstCommaInSuperTypeList,
++                    toAstNode = superTypeListEnd,
++                    nodeIndent = classIndent + indentConfig.indent,
++                )
++
++                val beforeComma =
++                    requireNotNull(firstCommaInSuperTypeList.prevCodeLeaf()) { "Can not find code leaf before comma in super type list" }
++
++                nextToAstNode =
++                    startIndentContext(
++                        fromAstNode = primaryConstructor!!.getPrecedingLeadingCommentsAndWhitespaces(),
++                        toAstNode = beforeComma,
++                        nodeIndent = classIndent,
++                    ).prevCodeLeaf()
++            } else {
++                // Indent both constructor and super type list (Issue 1916)
++                nextToAstNode =
++                    startIndentContext(
++                        fromAstNode = primaryConstructor!!.getPrecedingLeadingCommentsAndWhitespaces(),
++                        toAstNode = endOfClass,
++                    ).prevCodeLeaf()
++            }
+         } else {
+             node
+                 .findChildByType(SUPER_TYPE_LIST)
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleClassHeaderRegressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleClassHeaderRegressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleClassHeaderRegressionTest.kt
+@@ -0,0 +1,70 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.BeforeEach
++import org.junit.jupiter.api.Test
++
++internal class IndentationRuleClassHeaderRegressionTest {
++    @BeforeEach
++    internal fun setUp() {
++        System.setProperty("KTLINT_UNIT_TEST_TRACE", "off")
++    }
++
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Given a class with multiline super type list but without explicit constructor then class body should not be indented`() {
++        val code =
++            """
++            class Foo(
++                val bar1: Bar,
++                val bar2: Bar,
++            ) : FooBar(bar1, bar2),
++                BarFoo1,
++                BarFoo2 {
++                // body
++            }
++            """.trimIndent()
++
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++
++    }
++
++    @Test
++    fun `Given a class with explicit constructor and multiline super type list then class body should not be indented and super types should be aligned`() {
++        val code =
++            """
++            class Foo
++                constructor(
++                    val bar1: Bar,
++                    val bar2: Bar,
++                ) : FooBar(bar1, bar2),
++                BarFoo1,
++                BarFoo2 {
++                    // body
++                }
++            """.trimIndent()
++
++        val formattedCode =
++            """
++            class Foo
++                constructor(
++                    val bar1: Bar,
++                    val bar2: Bar,
++                ) : FooBar(bar1, bar2),
++                    BarFoo1,
++                    BarFoo2 {
++                // body
++            }
++            """.trimIndent()
++
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

@@ -1,0 +1,138 @@
+diff --git a/docs/faq.md b/docs/faq.md
+index 19e08e64..79d8cbe4 100644
+--- a/docs/faq.md
++++ b/docs/faq.md
+@@ -162,4 +162,4 @@ ktlint_custom-rule-set_custom-rule = disabled # Disables the `custom-rule` rule
+ 
+ ## Why is wildcard import `java.util.*` not reported by the `no-wildcard-imports` rule?
+ 
+-The `no-wildcard-imports` rule forbids wildcard imports, except for imports defined in `.editorconfig` property `ij_kotlin_packages_to_use_import_on_demand`. If ths property is not set explicitly set, it allows wildcards imports like `java.util.*` by default to keep in sync with IntelliJ IDEA behavior.
++The `no-wildcard-imports` rule forbids wildcard imports, except for imports defined in `.editorconfig` property `ij_kotlin_packages_to_use_import_on_demand`. If this property is not set explicitly, it allows wildcard imports like `java.util.*` by default in `intellij_idea` and `android_studio` code styles to keep in sync with IntelliJ IDEA behavior. In `ktlint_official` code style, no wildcard imports are allowed by default.
+diff --git a/docs/rules/configuration-ktlint.md b/docs/rules/configuration-ktlint.md
+index 1239e5d2..bc095bd9 100644
+--- a/docs/rules/configuration-ktlint.md
++++ b/docs/rules/configuration-ktlint.md
+@@ -166,6 +166,10 @@ ij_kotlin_imports_layout=android.**,|,^org.junit.**,kotlin.io.Closeable.*,|,*,^
+ 
+ Wildcard imports can be allowed for specific import paths (Comma-separated list, use "**" as wildcard for package and all subpackages). This setting overrides the no-wildcard-imports rule. This setting is best be used for allowing wildcard imports from libraries like Ktor where extension functions are used in a way that creates a lot of imports.
+ 
++Defaults:
++* `intellij_idea` / `android_studio`: `java.util.*,kotlinx.android.synthetic.**`
++* `ktlint_official`: none
++
+ ```ini
+ [*.{kt,kts}]
+ ij_kotlin_packages_to_use_import_on_demand = java.util.*,kotlinx.android.synthetic.**
+diff --git a/docs/rules/standard.md b/docs/rules/standard.md
+index b298f0c6..1b525b3f 100644
+--- a/docs/rules/standard.md
++++ b/docs/rules/standard.md
+@@ -150,7 +150,11 @@ No wildcard imports except imports listed in `.editorconfig` property `ij_kotlin
+ 
+ !!! warning
+ 
+-    In case property `ij_kotlin_packages_to_use_import_on_demand` is not explicitly set, it allows wildcards imports like `java.util.*` by default to keep in sync with IntelliJ IDEA behavior. To disallow *all* wildcard imports, add property below to your `.editorconfig`:
++    In case property `ij_kotlin_packages_to_use_import_on_demand` is not explicitly set, it allows wildcard imports like `java.util.*` by default in `intellij_idea` and `android_studio` code styles to keep in sync with IntelliJ IDEA behavior.
++
++    In `ktlint_official` code style, no wildcard imports are allowed by default.
++
++    To disallow *all* wildcard imports explicitly (for any code style), add property below to your `.editorconfig`:
+     ```editorconfig
+     [*.{kt,kts}]
+     ij_kotlin_packages_to_use_import_on_demand = nothing
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoWildcardImportsRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoWildcardImportsRule.kt
+index 66cead15..af23163a 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoWildcardImportsRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoWildcardImportsRule.kt
+@@ -43,7 +43,16 @@ public class NoWildcardImportsRule :
+         private const val WILDCARD_WITH_SUBPACKAGES = "**"
+ 
+         private fun parseAllowedWildcardImports(allowedWildcardImports: String): List<PatternEntry> {
+-            val importsList = allowedWildcardImports.split(",").onEach { it.trim() }
++            // Special value to disallow all wildcard imports
++            if (allowedWildcardImports.isBlank() || allowedWildcardImports.trim().equals("nothing", ignoreCase = true)) {
++                return emptyList()
++            }
++
++            val importsList =
++                allowedWildcardImports
++                    .split(",")
++                    .map { it.trim() }
++                    .filter { it.isNotBlank() }
+ 
+             return importsList.map { import ->
+                 if (import.endsWith(WILDCARD_WITH_SUBPACKAGES)) { // java.**
+@@ -93,7 +102,14 @@ public class NoWildcardImportsRule :
+                  * https://github.com/JetBrains/kotlin/blob/ffdab473e28d0d872136b910eb2e0f4beea2e19c/idea/formatter/src/org/jetbrains/kotlin/idea/core/formatter/KotlinCodeStyleSettings.java#L81-L82
+                  */
+                 defaultValue = parseAllowedWildcardImports("java.util.*,kotlinx.android.synthetic.**"),
+-                propertyWriter = { it.joinToString(separator = ",") },
++                // In ktlint_official code style, do not allow any wildcard imports by default
++                ktlintOfficialCodeStyleDefaultValue = emptyList(),
++                propertyWriter = { patterns ->
++                    patterns
++                        .takeIf { it.isNotEmpty() }
++                        ?.joinToString(separator = ",")
++                        ?: "nothing"
++                },
+             )
+     }
+ }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoWildcardImportsRuleKtlintOfficialCodeStyleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoWildcardImportsRuleKtlintOfficialCodeStyleTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoWildcardImportsRuleKtlintOfficialCodeStyleTest.kt
+@@ -0,0 +1,44 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
++import com.pinterest.ktlint.ruleset.standard.rules.NoWildcardImportsRule.Companion.IJ_KOTLIN_PACKAGES_TO_USE_IMPORT_ON_DEMAND
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++class NoWildcardImportsRuleKtlintOfficialCodeStyleTest {
++    private val noWildcardImportsRuleAssertThat = assertThatRule { NoWildcardImportsRule() }
++
++    @Test
++    fun `Given ktlint_official code style and packagesToUseImportOnDemandProperty is not set then IntelliJ default wildcard imports are violations`() {
++        val code =
++            """
++            import java.util.*
++            import kotlinx.android.synthetic.main.layout_name.*
++            """.trimIndent()
++
++        noWildcardImportsRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasLintViolationsWithoutAutoCorrect(
++                LintViolation(1, 1, "Wildcard import"),
++                LintViolation(2, 1, "Wildcard import"),
++            )
++    }
++
++    @Test
++    fun `Given ktlint_official code style and packagesToUseImportOnDemandProperty explicitly allows java util then java util wildcard import is not a violation`() {
++        val code =
++            """
++            import java.util.*
++            """.trimIndent()
++
++        noWildcardImportsRuleAssertThat(code)
++            .withEditorConfigOverride(
++                CODE_STYLE_PROPERTY to ktlint_official,
++                IJ_KOTLIN_PACKAGES_TO_USE_IMPORT_ON_DEMAND to "java.util.*",
++            )
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

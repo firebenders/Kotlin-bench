@@ -1,17 +1,17 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 27702328..155928f2 100644
+index 27702328..60e629d0 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
 @@ -12,6 +12,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
  
  ### Fixed
  
-+* Do not require mutable collections (e.g. `MutableList`, `MutableMap`, `MutableSet`) to have a SCREAMING_SNAKE_CASE name when declared in an object or as top-level property. According to the Kotlin style guide, values that are (deeply) immutable should use SCREAMING_SNAKE_CASE, but mutable collections can be modified and thus should not use SCREAMING_SNAKE_CASE `property-naming`
++* Do not require mutable collection property names to be in SCREAMING_SNAKE_CASE. Mutable collection types (e.g., `MutableList`, `MutableMap`, `MutableSet`, `ArrayList`, `HashMap`, etc.) are not considered constants and should be written in lower camel case `property-naming`
  * Allow to disable ktlint in `.editorconfig` for a glob ([#2100](https://github.com/pinterest/ktlint/issues/2100))
  * Fix wrapping of nested function literals `wrapping` ([#2106](https://github.com/pinterest/ktlint/issues/2106))
  * Do not indent class body for classes having a long super type list in code style `ktlint_official` as it is inconsistent compared to other class bodies `indent` [#2115](https://github.com/pinterest/ktlint/issues/2115)
 diff --git a/documentation/snapshot/docs/rules/experimental.md b/documentation/snapshot/docs/rules/experimental.md
-index 5e574268..39209426 100644
+index 5e574268..34270d00 100644
 --- a/documentation/snapshot/docs/rules/experimental.md
 +++ b/documentation/snapshot/docs/rules/experimental.md
 @@ -657,6 +657,11 @@ Enforce naming of property.
@@ -19,32 +19,24 @@ index 5e574268..39209426 100644
              get() = _elementList
      }
 +
-+    // Mutable collection properties use lower camel case
 +    object Foo {
-+        val fooMap: MutableMap<String, String> = mutableMapOf()
++        // Mutable collections as val should be in lower camel case
++        val mutableMapProperty: MutableMap<String, Any> = mutableMapOf()
 +    }
      ```
  === "[:material-heart-off-outline:](#) Disallowed"
  
-@@ -681,10 +686,15 @@ Enforce naming of property.
-         val elementList2: List<Element>
-             get() = _elementList2
-     }
-+
-+    // Mutable collection properties should use lower camel case, not screaming snake case
-+    object Foo {
-+        val FOO_MAP: MutableMap<String, String> = mutableMapOf()
-+    }
+@@ -684,7 +689,7 @@ Enforce naming of property.
      ```
  
  !!! note
 -    Top level `val` properties and `const val` properties have to be written in screaming snake notation. Local `val` and `const val` are written in lower camel case.
-+    Top level `val` properties and `const val` properties have to be written in screaming snake notation. Local `val` and `const val` are written in lower camel case. Mutable collection properties (e.g., `MutableList`, `MutableMap`, `MutableSet`) should use lower camel case, even when defined at top level or in objects, as they can be modified.
++    Top level `val` properties and `val` properties in `object`s have to be written in screaming snake notation. Exception: Mutable collection types (e.g., `MutableList`, `MutableMap`, `MutableSet`, `ArrayList`, `HashMap`, etc.) are not considered constants and should be written in lower camel case. `const val` properties always require screaming snake notation. Local `val` and `const val` are written in lower camel case.
  
  This rule can also be suppressed with the IntelliJ IDEA inspection suppression `PropertyName`.
  
 diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
-index 79f1e477..e8af7b6f 100644
+index 79f1e477..f4bbeef5 100644
 --- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
 +++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
 @@ -11,6 +11,9 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OVERRIDE_KEYWORD
@@ -68,129 +60,117 @@ index 79f1e477..e8af7b6f 100644
 +                        visitConstProperty(identifier, emit)
 +                    }
 +                    (property.isTopLevelValue() || property.isObjectValue()) &&
-+                        !property.hasMutableType() -> {
++                        !property.isMutableProperty() -> {
                          visitConstProperty(identifier, emit)
                      }
                      else -> {
-@@ -138,6 +143,22 @@ public class PropertyNamingRule :
-             }
-             ?: false
+@@ -129,6 +134,20 @@ public class PropertyNamingRule :
+             containsValKeyword() &&
+             !hasModifier(OVERRIDE_KEYWORD)
  
 +    /**
-+     * Checks if the property has a mutable type (e.g., MutableList, MutableMap, MutableSet).
-+     * Mutable types should not use SCREAMING_SNAKE_CASE as they can be modified.
-+     * See: https://developer.android.com/kotlin/style-guide#non-constant_names
++     * A property is considered mutable if its type is a mutable collection type. A mutable collection property
++     * should not be considered as constant even when it is declared as `val` since its contents can still be changed.
++     * See: https://developer.android.com/kotlin/style-guide#constant_names
 +     */
-+    private fun ASTNode.hasMutableType(): Boolean {
-+        val typeName =
-+            findChildByType(TYPE_REFERENCE)
-+                ?.findChildByType(USER_TYPE)
-+                ?.findChildByType(REFERENCE_EXPRESSION)
-+                ?.findChildByType(IDENTIFIER)
-+                ?.text
-+                ?: return false
-+        return typeName in MUTABLE_TYPES
-+    }
++    private fun ASTNode.isMutableProperty() =
++        findChildByType(TYPE_REFERENCE)
++            ?.findChildByType(USER_TYPE)
++            ?.findChildByType(REFERENCE_EXPRESSION)
++            ?.findChildByType(IDENTIFIER)
++            ?.text
++            ?.let { it in MUTABLE_COLLECTION_TYPES }
++            ?: false
 +
-     private fun ASTNode.hasPublicProperty(identifier: String) =
-         treeParent
-             .children()
-@@ -150,6 +171,15 @@ public class PropertyNamingRule :
+     private fun ASTNode.isBackingProperty() =
+         takeIf { hasModifier(PRIVATE_KEYWORD) }
+             ?.findChildByType(IDENTIFIER)
+@@ -150,6 +169,19 @@ public class PropertyNamingRule :
          val SCREAMING_SNAKE_CASE_REGEXP = "[A-Z][_A-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
          val BACKING_PROPERTY_LOWER_CAMEL_CASE_REGEXP = "_[a-z][a-zA-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
          const val SERIAL_VERSION_UID_PROPERTY_NAME = "serialVersionUID"
-+        val MUTABLE_TYPES =
++        val MUTABLE_COLLECTION_TYPES =
 +            setOf(
 +                "MutableCollection",
 +                "MutableList",
 +                "MutableMap",
 +                "MutableSet",
-+                "MutableIterator",
-+                "MutableListIterator",
++                "ArrayList",
++                "ArrayDeque",
++                "HashSet",
++                "HashMap",
++                "LinkedHashMap",
++                "LinkedHashSet",
 +            )
      }
  }
  
 diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleTest.kt
-index 1fbf6136..75405b9c 100644
+index 1fbf6136..4f57b3b0 100644
 --- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleTest.kt
 +++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleTest.kt
-@@ -208,4 +208,82 @@ class PropertyNamingRuleTest {
+@@ -208,4 +208,68 @@ class PropertyNamingRuleTest {
              propertyNamingRuleAssertThat(code).hasNoLintViolations()
          }
      }
 +
 +    @Nested
-+    inner class `Given a mutable property in object` {
++    inner class `Given mutable collection property` {
 +        @ParameterizedTest(name = "Type: {0}")
 +        @ValueSource(
 +            strings = [
++                "MutableCollection",
 +                "MutableList",
 +                "MutableMap",
 +                "MutableSet",
-+                "MutableCollection",
++                "ArrayList",
++                "ArrayDeque",
++                "HashSet",
++                "HashMap",
++                "LinkedHashMap",
++                "LinkedHashSet",
 +            ],
 +        )
-+        fun `Given an object val property with mutable type and lower camel case name then do not emit`(
-+            mutableType: String,
++        fun `Given an object val property with mutable collection type in camelCase then do not emit`(
++            mutableCollectionType: String,
 +        ) {
 +            val code =
 +                """
 +                object Foo {
-+                    val someCollection: $mutableType<String> = mutableListOf()
++                    val someCollection: $mutableCollectionType<Any> = TODO()
 +                }
 +                """.trimIndent()
 +            propertyNamingRuleAssertThat(code).hasNoLintViolations()
 +        }
 +
-+        @ParameterizedTest(name = "Type: {0}")
-+        @ValueSource(
-+            strings = [
-+                "MutableList",
-+                "MutableMap",
-+                "MutableSet",
-+                "MutableCollection",
-+            ],
-+        )
-+        fun `Given a companion object val property with mutable type and lower camel case name then do not emit`(
-+            mutableType: String,
-+        ) {
++        @Test
++        fun `Given a companion object val property with mutable map type in camelCase then do not emit`() {
 +            val code =
 +                """
 +                class Foo {
 +                    companion object {
-+                        val someCollection: $mutableType<String> = mutableListOf()
++                        val someMap: MutableMap<String, Any> = mutableMapOf()
 +                    }
 +                }
 +                """.trimIndent()
 +            propertyNamingRuleAssertThat(code).hasNoLintViolations()
 +        }
 +
-+        @ParameterizedTest(name = "Type: {0}")
-+        @ValueSource(
-+            strings = [
-+                "MutableList",
-+                "MutableMap",
-+                "MutableSet",
-+                "MutableCollection",
-+            ],
-+        )
-+        fun `Given a top level val property with mutable type and lower camel case name then do not emit`(
-+            mutableType: String,
-+        ) {
++        @Test
++        fun `Given a top level val property with mutable collection type in camelCase then do not emit`() {
 +            val code =
 +                """
-+                val someCollection: $mutableType<String> = mutableListOf()
++                val someList: MutableList<String> = mutableListOf()
 +                """.trimIndent()
 +            propertyNamingRuleAssertThat(code).hasNoLintViolations()
 +        }
 +
 +        @Test
-+        fun `Given an object val property with mutable type and screaming snake case name then emit`() {
++        fun `Given an object val property with mutable collection type in invalid casing then do emit`() {
 +            val code =
 +                """
 +                object Foo {
-+                    val SOME_COLLECTION: MutableList<String> = mutableListOf()
++                    val Some_Map: MutableMap<String, Any> = mutableMapOf()
 +                }
 +                """.trimIndent()
 +            propertyNamingRuleAssertThat(code)

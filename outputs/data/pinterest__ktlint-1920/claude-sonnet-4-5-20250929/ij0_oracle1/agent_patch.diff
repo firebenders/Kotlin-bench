@@ -1,0 +1,142 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+index bdddca08..35723032 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+@@ -4,8 +4,10 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATED_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONSTRUCTOR_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE_ANNOTATION_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIMARY_CONSTRUCTOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PROJECTION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT
+@@ -18,6 +20,7 @@ import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRu
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.children
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
+@@ -28,6 +31,7 @@ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+ import com.pinterest.ktlint.rule.engine.core.api.lastChildLeafOrSelf
+ import com.pinterest.ktlint.rule.engine.core.api.nextCodeLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
++import com.pinterest.ktlint.rule.engine.core.api.nextSibling
+ import com.pinterest.ktlint.rule.engine.core.api.prevCodeLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe
+@@ -78,6 +82,7 @@ public class AnnotationRule :
+         id = "annotation",
+         usesEditorConfigProperties =
+             setOf(
++                CODE_STYLE_PROPERTY,
+                 INDENT_SIZE_PROPERTY,
+                 INDENT_STYLE_PROPERTY,
+             ),
+@@ -130,7 +135,9 @@ public class AnnotationRule :
+         if (node.isAnnotationEntryWithValueArgumentList() &&
+             node.treeParent.treeParent.elementType != VALUE_PARAMETER &&
+             node.treeParent.treeParent.elementType != VALUE_ARGUMENT &&
+-            node.isNotReceiverTargetAnnotation()
++            node.isNotReceiverTargetAnnotation() &&
++            // Skip constructor annotations in ktlint_official as they are handled separately
++            !(codeStyle == ktlint_official && node.treeParent.nextSibling { it.elementType == PRIMARY_CONSTRUCTOR } != null)
+         ) {
+             // Disallow:
+             //     @Foo class Bar
+@@ -143,6 +150,58 @@ public class AnnotationRule :
+             checkForAnnotationWithParameterToBePlacedOnSeparateLine(node, emit, autoCorrect)
+         }
+ 
++        // In ktlint_official code style, wrap all annotations before constructor
++        if (codeStyle == ktlint_official &&
++            node.treeParent.elementType == MODIFIER_LIST &&
++            node.isBeforePrimaryConstructor() &&
++            node.isOnSameLineAsAnnotatedConstruct()
++        ) {
++            if (node.isFirstAnnotationEntry()) {
++                // First annotation should be on a new line after class name
++                node.treeParent.prevCodeLeaf()?.let { prevCodeLeaf ->
++                    emit(
++                        prevCodeLeaf.startOffset + prevCodeLeaf.textLength,
++                        "Expected newline after '${prevCodeLeaf.text}'",
++                        true,
++                    )
++                    if (autoCorrect) {
++                        node
++                            .firstChildLeafOrSelf()
++                            .upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                    }
++                }
++            }
++            if (node.isPrecededByOtherAnnotationEntryOnTheSameLine()) {
++                // Each annotation should be on its own line
++                emit(
++                    node.startOffset,
++                    "Annotation must be placed on a separate line when code style is ktlint_official",
++                    true,
++                )
++                if (autoCorrect) {
++                    node
++                        .firstChildLeafOrSelf()
++                        .upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                }
++            }
++            if (node.isLastAnnotationEntry() && node.isPrecededByOtherAnnotationEntry()) {
++                // Constructor keyword should be on a new line after last annotation
++                emit(
++                    node.findAnnotatedConstruct().startOffset,
++                    "Expected newline before '${node.findAnnotatedConstruct().text}'",
++                    true,
++                )
++                if (autoCorrect) {
++                    node
++                        .lastChildLeafOrSelf()
++                        .nextCodeLeaf()
++                        ?.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                }
++            }
++            // Skip other checks for constructor annotations in ktlint_official
++            return
++        }
++
+         if (node.isOnSameLineAsAnnotatedConstruct()) {
+             if (node.isPrecededByAnnotationOnAnotherLine()) {
+                 // Code below is disallowed
+@@ -164,6 +223,8 @@ public class AnnotationRule :
+             if (node.treeParent.elementType != ANNOTATION &&
+                 node.treeParent.treeParent.elementType != VALUE_PARAMETER &&
+                 node.treeParent.treeParent.elementType != VALUE_ARGUMENT &&
++                // Skip constructor annotations in ktlint_official as they are handled separately
++                !(codeStyle == ktlint_official && node.isBeforePrimaryConstructor()) &&
+                 node.isPrecededByOtherAnnotationEntryOnTheSameLine() &&
+                 node.isLastAnnotationEntry()
+             ) {
+@@ -261,6 +322,15 @@ public class AnnotationRule :
+             .any { it.isWhiteSpaceWithNewline() }
+     }
+ 
++    private fun ASTNode.isBeforePrimaryConstructor(): Boolean {
++        // Check if the annotated construct is a CONSTRUCTOR_KEYWORD
++        return try {
++            findAnnotatedConstruct().elementType == CONSTRUCTOR_KEYWORD
++        } catch (e: Exception) {
++            false
++        }
++    }
++
+     private fun checkForAnnotationWithParameterToBePlacedOnSeparateLine(
+         node: ASTNode,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

@@ -59,88 +59,76 @@ index a275f03b41..91b51abaf1 100644
  
      // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
 diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
-index f13e3c77a2..1021166cf6 100644
+index f13e3c77a2..a7ef435ee9 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
 @@ -235,11 +235,16 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
          if (mNoteEditorBundle != null) {
              mAllFieldsNull = false
              // loading from the note editor
-+            // Calculate cardIndex from mOrdinal before calling setCurrentCardFromNoteEditorBundle
-+            cardIndex = getCardIndexFromOrdinal(col)
++            // Initialize cardIndex from the ordinal passed from the note editor
++            cardIndex = getInitialCardIndexFromOrdinal(col)
              val toPreview = setCurrentCardFromNoteEditorBundle(col)
              if (toPreview != null) {
                  cardCount = toPreview.note().numberOfCardsEphemeral()
                  if (cardCount >= 2) {
                      previewLayout!!.showNavigationButtons()
-+                    // Set button states based on initial cardIndex
++                    // Update navigation button states based on initial cardIndex
 +                    previewLayout!!.setPrevButtonEnabled(isPrevBtnEnabled(cardIndex))
 +                    previewLayout!!.setNextButtonEnabled(isNextBtnEnabled(cardIndex))
                  }
              }
          } else {
-@@ -329,6 +334,33 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+@@ -329,6 +334,28 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
          return mutableListOf(*ret)
      }
  
 +    /**
-+     * Converts the ordinal (mOrdinal) to a card index.
-+     * For cloze notes, the ordinal is the ord value (0-based), and we need to find its position
-+     * in the list of cloze numbers.
-+     * For non-cloze notes, ordinal equals cardIndex.
++     * Computes the initial card index from the ordinal value passed from the note editor.
++     * For cloze note types, ordinal (ord) is different from card index.
++     * For example, with `{{c1::A}} {{c3::B}}`, ord 2 (c3) corresponds to card index 1.
 +     */
-+    private fun getCardIndexFromOrdinal(col: Collection): Int {
-+        if (mEditedNotetype == null) return mOrdinal
-+
-+        if (mEditedNotetype!!.isCloze) {
-+            // Create a temporary note to get the cloze numbers
-+            val n = col.newNote(mEditedNotetype!!)
-+            val fieldValues = getBundleEditFields(mNoteEditorBundle)
-+            for (i in fieldValues.indices) {
-+                if (i < n.fields.size) {
-+                    n.setField(i, fieldValues[i])
-+                }
-+            }
-+            val clozeNumbers = col.clozeNumbersInNote(n)
-+            // mOrdinal is 0-based (ord), clozeNumbers are 1-based (e.g., [1, 3] for c1, c3)
-+            val index = clozeNumbers.indexOf(mOrdinal + 1)
-+            return if (index >= 0) index else 0
++    private fun getInitialCardIndexFromOrdinal(col: Collection): Int {
++        if (mEditedNotetype == null) {
++            return 0
 +        }
-+
-+        return mOrdinal
++        val fieldValues = getBundleEditFields(mNoteEditorBundle)
++        if (fieldValues.isEmpty()) {
++            return 0
++        }
++        val n = col.newNote(mEditedNotetype!!)
++        var i = 0
++        while (i < fieldValues.size && i < n.fields.size) {
++            n.setField(i, fieldValues[i])
++            i++
++        }
++        return n.ordToCardIndex(mOrdinal)
 +    }
 +
      /**
       * This method generates a note from a sample model, or fails if invalid
       * @param index The index in the templates for the model. NOT `ord`
-diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/CardTemplatePreviewerTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/CardTemplatePreviewerTest.kt
-index 6e7391ffbc..3174de6541 100644
---- a/AnkiDroid/src/test/java/com/ichi2/anki/CardTemplatePreviewerTest.kt
-+++ b/AnkiDroid/src/test/java/com/ichi2/anki/CardTemplatePreviewerTest.kt
-@@ -29,7 +29,6 @@ import com.ichi2.utils.stringIterable
- import org.hamcrest.CoreMatchers.*
- import org.hamcrest.MatcherAssert.assertThat
- import org.junit.Assert
--import org.junit.Ignore
- import org.junit.Test
- import org.junit.jupiter.api.assertThrows
- import org.junit.runner.RunWith
-@@ -340,7 +339,6 @@ class CardTemplatePreviewerTest : RobolectricTest() {
+@@ -476,3 +503,20 @@ private fun Note.cardIndexToOrd(index: Int): Int {
+         else -> index
      }
- 
-     @Test
--    @Ignore("Issue 14694")
-     fun `The ordinal provided is used (standard) - Issue 14694`() {
-         val fields: MutableList<NoteService.NoteField?> = arrayListOf(
-             Field(0, "Hello"),
-@@ -368,7 +366,6 @@ class CardTemplatePreviewerTest : RobolectricTest() {
-     }
- 
-     @Test
--    @Ignore("Issue 14694")
-     fun `The ordinal provided is used (cloze)- Issue 14694`() {
-         val fields: MutableList<NoteService.NoteField?> = arrayListOf(
-             Field(0, "{{c1::Hello}} {{c3::World}}"),
+ }
++
++/**
++ * Given a card 'ord', returns the card index
++ * This is the reverse of [cardIndexToOrd]
++ */
++private fun Note.ordToCardIndex(ord: Int): Int {
++    return when {
++        this.notetype.isCloze -> {
++            val clozeNumbers = col.clozeNumbersInNote(this)
++            // ord is 0-indexed, cloze numbers are 1-indexed
++            val index = clozeNumbers.indexOf(ord + 1)
++            // If not found (e.g., empty card), default to 0
++            if (index >= 0) index else 0
++        }
++        else -> ord
++    }
++}
 diff --git a/gradle.properties b/gradle.properties
 index 13992ecd31..b06b0f2c12 100644
 --- a/gradle.properties

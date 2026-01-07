@@ -49,7 +49,7 @@ index 5daff4f4c4..13018a52f2 100644
      // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
      // and there's no no-op version for release build. Usage has been disabled for release
 diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
-index 01bb151f93..139b04445e 100644
+index 01bb151f93..08d467a42c 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
 @@ -40,7 +40,6 @@ import org.jsoup.Jsoup
@@ -60,7 +60,7 @@ index 01bb151f93..139b04445e 100644
  import java.nio.file.Paths
  
  private typealias Union<A, B> = Pair<A, B>
-@@ -357,14 +356,12 @@ fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
+@@ -357,14 +356,13 @@ fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
              val attrValue = elem.attr(attr)
              if (attrValue.isEmpty()) continue
  
@@ -70,9 +70,10 @@ index 01bb151f93..139b04445e 100644
 -                continue
 -            }
 -            if (attrUri.scheme != null) continue
-+            // Check if it already has a scheme (e.g., http://, file://)
-+            // We use a simple prefix check to avoid URI parsing issues with special
-+            // characters like '#' which would be interpreted as fragment identifiers
++            // Skip sources that already have a URL scheme (http://, https://, file://, etc.)
++            // We use a simple contains check instead of URI parsing because filenames may contain
++            // special characters like '#' which would be incorrectly interpreted as URL fragments.
++            // Issue: https://github.com/ankidroid/Anki-Android/issues/16032
 +            if (attrValue.contains("://")) continue
  
 -            val path = Paths.get(mediaDir, attrUri.path).toString()
@@ -80,24 +81,6 @@ index 01bb151f93..139b04445e 100644
              val newUri = getFileUri(path)
  
              elem.attr(attr, newUri.toString())
-diff --git a/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt b/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
-index c0ae21f061..7f239c6932 100644
---- a/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
-+++ b/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
-@@ -81,9 +81,10 @@ class TemplateManagerTest {
-     }
- 
-     @Test
--    fun `parseSourcesToFileScheme - invalid sources not parsed`() {
--        val result = parseSourcesToFileScheme("<img src=\"m#gent%nki.png\">", "any_directory")
--        assertEquals("""<img src="m#gent%nki.png">""", result)
-+    fun `parseSourcesToFileScheme - filenames with hash are parsed`() {
-+        val mediaDir = "storage/emulated/0/AnkiDroid/collection.media"
-+        val result = parseSourcesToFileScheme("<img src=\"image#1.png\">", mediaDir)
-+        assertEquals("""<img src="file:///$mediaDir/image%231.png">""", result)
-     }
- 
-     @Test
 diff --git a/gradle.properties b/gradle.properties
 index 13992ecd31..b06b0f2c12 100644
 --- a/gradle.properties
@@ -130,3 +113,82 @@ index df05afef76..4d2ca9684e 100644
  }
  
  dependencyResolutionManagement {
+
+diff --git a/AnkiDroid/src/test/java/com/ichi2/libanki/HashFilenameTest.kt b/AnkiDroid/src/test/java/com/ichi2/libanki/HashFilenameTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/test/java/com/ichi2/libanki/HashFilenameTest.kt
+@@ -0,0 +1,73 @@
++/*
++ *  Copyright (c) 2024 Brayan Oliveira <brayandso.dev@gmail.com>
++ *
++ *  This program is free software; you can redistribute it and/or modify it under
++ *  the terms of the GNU General Public License as published by the Free Software
++ *  Foundation; either version 3 of the License, or (at your option) any later
++ *  version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT ANY
++ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
++ *  PARTICULAR PURPOSE. See the GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along with
++ *  this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++package com.ichi2.libanki
++
++import org.junit.jupiter.api.Test
++import kotlin.test.assertEquals
++
++/**
++ * Tests for handling filenames with special characters like '#'.
++ * See: https://github.com/ankidroid/Anki-Android/issues/16032
++ */
++@Suppress("HtmlUnknownTarget", "HtmlRequiredAltAttribute")
++class HashFilenameTest {
++
++    /**
++     * Verifies that filenames with '#' character are properly parsed and encoded.
++     * The '#' should be encoded as '%23' in the file:// URL.
++     */
++    @Test
++    fun `parseSourcesToFileScheme - handles filename with hash character`() {
++        val mediaDir = "storage/emulated/0/AnkiDroid/collection.media"
++        val result = parseSourcesToFileScheme("<img src=\"image#1.png\">", mediaDir)
++        assertEquals("""<img src="file:///$mediaDir/image%231.png">""", result)
++    }
++
++    @Test
++    fun `parseSourcesToFileScheme - handles filename with multiple hash characters`() {
++        val mediaDir = "storage/emulated/0/AnkiDroid/collection.media"
++        val result = parseSourcesToFileScheme("<img src=\"file#1#test.jpg\">", mediaDir)
++        assertEquals("""<img src="file:///$mediaDir/file%231%23test.jpg">""", result)
++    }
++
++    @Test
++    fun `parseSourcesToFileScheme - handles filename with hash and other special chars`() {
++        val mediaDir = "storage/emulated/0/AnkiDroid/collection.media"
++        val result = parseSourcesToFileScheme("<img src=\"photo#2024@home.png\">", mediaDir)
++        assertEquals("""<img src="file:///$mediaDir/photo%232024@home.png">""", result)
++    }
++
++    @Test
++    fun `parseSourcesToFileScheme - handles filename with hash and percent`() {
++        val mediaDir = "storage/emulated/0/AnkiDroid/collection.media"
++        val result = parseSourcesToFileScheme("<img src=\"m#gent%nki.png\">", mediaDir)
++        assertEquals("""<img src="file:///$mediaDir/m%23gent%25nki.png">""", result)
++    }
++
++    @Test
++    fun `getFileUri - properly encodes hash character`() {
++        val uri = getFileUri("/storage/media/test#image.png")
++        assertEquals("file:///storage/media/test%23image.png", uri.toString())
++    }
++
++    @Test
++    fun `parseVideos - handles video filename with hash character`() {
++        val mediaDir = "storage/emulated/0/AnkiDroid/collection.media"
++        val result = parseVideos("[sound:video#1.mp4]", mediaDir)
++        assertEquals("""<video src="file:///$mediaDir/video%231.mp4" controls controlsList="nodownload"></video>""", result)
++    }
++}
++

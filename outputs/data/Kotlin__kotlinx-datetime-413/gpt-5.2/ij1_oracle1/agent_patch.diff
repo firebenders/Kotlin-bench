@@ -1,0 +1,141 @@
+diff --git a/core/common/src/internal/format/FormatStructure.kt b/core/common/src/internal/format/FormatStructure.kt
+index 64644e8..b6636d8 100644
+--- a/core/common/src/internal/format/FormatStructure.kt
++++ b/core/common/src/internal/format/FormatStructure.kt
+@@ -37,16 +37,16 @@ internal class ConstantFormatStructure<in T>(
+         operations = when {
+             string.isEmpty() -> emptyList()
+             else -> buildList {
+-                val suffix = if (string[0].isDigit()) {
+-                    add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(string.takeWhile { it.isDigit() }))))
+-                    string.dropWhile { it.isDigit() }
++                val suffix = if (string[0].isAsciiDigit()) {
++                    add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(string.takeWhile { it.isAsciiDigit() }))))
++                    string.dropWhile { it.isAsciiDigit() }
+                 } else {
+                     string
+                 }
+                 if (suffix.isNotEmpty()) {
+-                    if (suffix[suffix.length - 1].isDigit()) {
+-                        add(PlainStringParserOperation(suffix.dropLastWhile { it.isDigit() }))
+-                        add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(suffix.takeLastWhile { it.isDigit() }))))
++                    if (suffix[suffix.length - 1].isAsciiDigit()) {
++                        add(PlainStringParserOperation(suffix.dropLastWhile { it.isAsciiDigit() }))
++                        add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(suffix.takeLastWhile { it.isAsciiDigit() }))))
+                     } else {
+                         add(PlainStringParserOperation(suffix))
+                     }
+diff --git a/core/common/src/internal/format/parser/NumberConsumer.kt b/core/common/src/internal/format/parser/NumberConsumer.kt
+index 6813e2e..0b4aa3d 100644
+--- a/core/common/src/internal/format/parser/NumberConsumer.kt
++++ b/core/common/src/internal/format/parser/NumberConsumer.kt
+@@ -66,7 +66,7 @@ internal class UnsignedIntConsumer<in Receiver>(
+     override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when {
+         maxLength != null && input.length > maxLength -> NumberConsumptionError.TooManyDigits(maxLength)
+         minLength != null && input.length < minLength -> NumberConsumptionError.TooFewDigits(minLength)
+-        else -> when (val result = input.toIntOrNull()) {
++        else -> when (val result = input.toAsciiIntOrNull()) {
+             null -> NumberConsumptionError.ExpectedInt
+             else -> setter.setWithoutReassigning(storage, if (multiplyByMinus1) -result else result)
+         }
+@@ -84,7 +84,7 @@ internal class ReducedIntConsumer<in Receiver>(
+     private val baseMod = base % modulo
+     private val baseFloor = base - baseMod
+ 
+-    override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when (val result = input.toIntOrNull()) {
++    override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when (val result = input.toAsciiIntOrNull()) {
+         null -> NumberConsumptionError.ExpectedInt
+         else -> setter.setWithoutReassigning(storage, if (result >= baseMod) {
+             baseFloor + result
+@@ -121,7 +121,7 @@ internal class FractionPartConsumer<in Receiver>(
+     override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when {
+         minLength != null && input.length < minLength -> NumberConsumptionError.TooFewDigits(minLength)
+         maxLength != null && input.length > maxLength -> NumberConsumptionError.TooManyDigits(maxLength)
+-        else -> when (val numerator = input.toIntOrNull()) {
++        else -> when (val numerator = input.toAsciiIntOrNull(maxDigits = 9)) {
+             null -> NumberConsumptionError.TooManyDigits(9)
+             else -> setter.setWithoutReassigning(storage, DecimalFraction(numerator, input.length))
+         }
+@@ -135,3 +135,20 @@ private fun <Object, Type> AssignableField<Object, Type>.setWithoutReassigning(
+     val conflictingValue = trySetWithoutReassigning(receiver, value) ?: return null
+     return NumberConsumptionError.Conflicting(conflictingValue)
+ }
++
++/**
++ * Kotlin/JVM's `String.toInt()`/`toIntOrNull()` is Unicode-aware (via `Character.digit`) and accepts e.g. Arabic-Indic
++ * and full-width digits. The datetime parsing API is intentionally ASCII-only.
++ */
++private fun String.toAsciiIntOrNull(maxDigits: Int? = null): Int? {
++    if (isEmpty()) return null
++    if (maxDigits != null && length > maxDigits) return null
++    var result = 0
++    for (ch in this) {
++        val digit = ch.code - '0'.code
++        if (digit !in 0..9) return null
++        if (result > (Int.MAX_VALUE - digit) / 10) return null
++        result = result * 10 + digit
++    }
++    return result
++}
+diff --git a/core/common/src/internal/format/parser/ParserOperation.kt b/core/common/src/internal/format/parser/ParserOperation.kt
+index 6ac3a1c..b6a2ab2 100644
+--- a/core/common/src/internal/format/parser/ParserOperation.kt
++++ b/core/common/src/internal/format/parser/ParserOperation.kt
+@@ -15,8 +15,8 @@ internal interface ParserOperation<in Output> {
+ internal class PlainStringParserOperation<Output>(val string: String) : ParserOperation<Output> {
+     init {
+         require(string.isNotEmpty()) { "Empty string is not allowed" }
+-        require(!string[0].isDigit()) { "String '$string' starts with a digit" }
+-        require(!string[string.length - 1].isDigit()) { "String '$string' ends with a digit" }
++        require(!string[0].isAsciiDigit()) { "String '$string' starts with a digit" }
++        require(!string[string.length - 1].isAsciiDigit()) { "String '$string' ends with a digit" }
+     }
+ 
+     override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {
+@@ -77,7 +77,7 @@ internal class NumberSpanParserOperation<Output>(
+         if (startIndex + minLength > input.length)
+             return ParseResult.Error(startIndex) { "Unexpected end of input: yet to parse $whatThisExpects" }
+         var digitsInRow = 0
+-        while (startIndex + digitsInRow < input.length && input[startIndex + digitsInRow].isDigit()) {
++        while (startIndex + digitsInRow < input.length && input[startIndex + digitsInRow].isAsciiDigit()) {
+             ++digitsInRow
+         }
+         if (digitsInRow < minLength)
+@@ -429,3 +429,8 @@ private fun <Object, Type> AssignableField<Object, Type>.setWithoutReassigning(
+         }
+     }
+ }
++
++/**
++ * `Char.isDigit()` is Unicode-aware; datetime parsing in this module is intentionally ASCII-only.
++ */
++internal fun Char.isAsciiDigit(): Boolean = this in '0'..'9'
+
+diff --git a/core/common/test/format/NonAsciiDigitParsingTest.kt b/core/common/test/format/NonAsciiDigitParsingTest.kt
+new file mode 100644
+--- /dev/null
++++ b/core/common/test/format/NonAsciiDigitParsingTest.kt
+@@ -0,0 +1,23 @@
++/*
++ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
++ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
++ */
++
++package kotlinx.datetime.test.format
++
++import kotlinx.datetime.*
++import kotlinx.datetime.format.*
++import kotlin.test.Test
++import kotlin.test.assertFailsWith
++
++class NonAsciiDigitParsingTest {
++
++    @Test
++    fun testLocalDateParseRejectsNonAsciiDigits() {
++        LocalDate.Formats.ISO_BASIC.assertCanNotParse("2０2４٠٩０６")
++        assertFailsWith<DateTimeFormatException> {
++            LocalDate.parse("2０2４٠٩０６", LocalDate.Formats.ISO_BASIC)
++        }
++    }
++}
++

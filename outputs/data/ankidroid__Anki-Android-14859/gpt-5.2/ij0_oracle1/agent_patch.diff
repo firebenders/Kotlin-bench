@@ -1,0 +1,260 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index c7bb17d62d..e9e3f2b8b6 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.6'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -226,12 +225,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -246,12 +245,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -361,7 +354,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+index 8f8b62c9a3..f99d522404 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+@@ -254,18 +254,28 @@ open class CardBrowser :
+         ChangeManager.subscribe(this)
+     }
+ 
++    private fun sortTypeConfigKey(mode: CardsOrNotes): String =
++        if (mode == CARDS) SortType.CONFIG_KEY_CARD_SORT_TYPE else SortType.CONFIG_KEY_NOTE_SORT_TYPE
++
++    private fun sortBackwardsConfigKey(mode: CardsOrNotes): String =
++        if (mode == CARDS) "sortBackwards" else "browserNoteSortBackwards"
++
+     @VisibleForTesting(otherwise = VisibleForTesting.PROTECTED)
+     fun changeCardOrder(which: SortType) {
++        val preferences = baseContext.sharedPrefs()
++        val sortTypeKey = sortTypeConfigKey(cardsOrNotes)
++        val sortBackwardsKey = sortBackwardsConfigKey(cardsOrNotes)
++
+         if (which != mOrder) {
+             mOrder = which
+             mOrderAsc = false
+-            which.save(getColUnsafe.config, baseContext.sharedPrefs())
+-            getColUnsafe.config.set("sortBackwards", mOrderAsc)
++            which.save(getColUnsafe.config, preferences, sortTypeKey)
++            getColUnsafe.config.set(sortBackwardsKey, mOrderAsc)
+             searchCards()
+         } else if (which != SortType.NO_SORTING) {
+             // if the same element is selected again, reverse the order
+             mOrderAsc = !mOrderAsc
+-            getColUnsafe.config.set("sortBackwards", mOrderAsc)
++            getColUnsafe.config.set(sortBackwardsKey, mOrderAsc)
+             mCards.reverse()
+             updateList()
+         }
+@@ -466,8 +476,6 @@ open class CardBrowser :
+         registerExternalStorageListener()
+         val preferences = baseContext.sharedPrefs()
+ 
+-        mOrder = SortType.fromCol(col.config, preferences)
+-        mOrderAsc = col.config.get("sortBackwards") ?: false
+         mCards.reset()
+         // Create a spinner for column 1
+         val cardsColumn1Spinner = findViewById<Spinner>(R.id.browser_column1_spinner)
+@@ -582,6 +590,8 @@ open class CardBrowser :
+             showFilteredDecks = true
+         )
+         cardsOrNotes = CardsOrNotes.fromCollection(col)
++        mOrder = SortType.fromCol(col.config, preferences, sortTypeConfigKey(cardsOrNotes))
++        mOrderAsc = col.config.get(sortBackwardsConfigKey(cardsOrNotes)) ?: false
+         isTruncated = this.sharedPrefs().getBoolean("isTruncated", false)
+         deckSpinnerSelection!!.initializeActionBarDeckSpinner(this.supportActionBar!!)
+         selectDeckAndSave(deckId)
+@@ -1196,8 +1206,17 @@ open class CardBrowser :
+ 
+     fun switchCardOrNote(newCardsMode: CardsOrNotes) {
+         launchCatchingTask {
+-            withCol { newCardsMode.saveToCollection(this) }
++            val preferences = baseContext.sharedPrefs()
++            val (order, orderAsc) = withCol {
++                newCardsMode.saveToCollection(this)
++                val sortTypeKey = sortTypeConfigKey(newCardsMode)
++                val sortBackwardsKey = sortBackwardsConfigKey(newCardsMode)
++                SortType.fromCol(config, preferences, sortTypeKey) to (config.get(sortBackwardsKey) ?: false)
++            }
++
+             cardsOrNotes = newCardsMode
++            mOrder = order
++            mOrderAsc = orderAsc
+             searchCards()
+         }
+     }
+@@ -2504,7 +2523,7 @@ suspend fun searchForCards(
+     cardsOrNotes: CardsOrNotes
+ ): MutableList<CardBrowser.CardCache> {
+     return withCol {
+-        (if (cardsOrNotes == CARDS) findCards(query, order) else findOneCardByNote(query)).asSequence()
++        (if (cardsOrNotes == CARDS) findCards(query, order) else findOneCardByNote(query, order)).asSequence()
+             .toCardCache(this, cardsOrNotes)
+             .toMutableList()
+     }
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt b/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
+index cc42c2f540..cf64f94180 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
+@@ -47,10 +47,14 @@ enum class SortType(val ankiSortType: String?, val cardBrowserLabelIndex: Int) {
+     REVIEWS("cardReps", 8),
+     LAPSES("cardLapses", 9);
+ 
+-    fun save(config: Config, preferences: SharedPreferences) {
+-        // in the case of 'no sorting', we still need a sort type.
+-        // The inverse is handled in `fromCol`
+-        config.set("sortType", this.ankiSortType ?: SORT_FIELD.ankiSortType)
++    fun save(
++        config: Config,
++        preferences: SharedPreferences,
++        sortTypeConfigKey: String = CONFIG_KEY_CARD_SORT_TYPE
++    ) {
++        // In the case of 'no sorting', we still need a sort type.
++        // The inverse is handled in `fromCol`.
++        config.set(sortTypeConfigKey, this.ankiSortType ?: SORT_FIELD.ankiSortType)
+         preferences.edit {
+             putBoolean("cardBrowserNoSorting", this@SortType == NO_SORTING)
+         }
+@@ -61,8 +65,15 @@ enum class SortType(val ankiSortType: String?, val cardBrowserLabelIndex: Int) {
+         if (this == NO_SORTING) SortOrder.NoOrdering() else SortOrder.UseCollectionOrdering()
+ 
+     companion object {
+-        fun fromCol(config: Config, preferences: SharedPreferences): SortType {
+-            val colOrder = config.get<String>("sortType")
++        const val CONFIG_KEY_CARD_SORT_TYPE: String = "sortType"
++        const val CONFIG_KEY_NOTE_SORT_TYPE: String = "noteSortType"
++
++        fun fromCol(
++            config: Config,
++            preferences: SharedPreferences,
++            sortTypeConfigKey: String = CONFIG_KEY_CARD_SORT_TYPE
++        ): SortType {
++            val colOrder = config.get<String>(sortTypeConfigKey)
+             val type = entries.firstOrNull { it.ankiSortType == colOrder } ?: NO_SORTING
+             if (type == SORT_FIELD && preferences.getBoolean("cardBrowserNoSorting", false)) {
+                 return NO_SORTING
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt
+index b5a1b2a621..0e004e3d20 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt
+@@ -409,23 +409,40 @@ open class Collection(
+ 
+     /** Return a list of card ids  */
+     @RustCleanup("Remove in V16.") // Not in libAnki
+-    fun findOneCardByNote(query: String): List<CardId> {
++    fun findOneCardByNote(
++        query: String,
++        order: SortOrder = SortOrder.NoOrdering()
++    ): List<CardId> {
+         // This function shouldn't exist and CardBrowser should be modified to use Notes,
+-        // so not much effort was expended here
++        // so not much effort was expended here.
++        //
++        // When used by CardBrowser's "Notes" mode, it is expected to honor the provided sort order.
++
++        val noteIds = findNotes(query, order)
++        if (noteIds.isEmpty()) {
++            return emptyList()
++        }
++
++        // Select the card with the lowest `ord` to show, while preserving the note ordering.
++        //
++        // Note: do not use bound variables for each entry, as searches can exceed SQLite's variable limit.
++        val wantedValues = noteIds.withIndex().joinToString(",") { (idx, nid) -> "($nid,$idx)" }
+ 
+-        val noteIds = findNotes(query, SortOrder.NoOrdering())
+-        // select the card with the lowest `ord` to show
+         return db.queryLongList(
+             """
+-SELECT c.id
+-FROM (
++WITH wanted(nid, pos) AS (VALUES $wantedValues),
++card_with_min_ord AS (
+   SELECT nid, MIN(ord) AS ord
+   FROM cards
+-  WHERE nid IN ${Utils.ids2str(noteIds)} 
++  WHERE nid IN (SELECT nid FROM wanted)
+   GROUP BY nid
+-) AS card_with_min_ord
+-JOIN cards AS c ON card_with_min_ord.nid = c.nid AND card_with_min_ord.ord = c.ord;
+-            """.trimMargin()
++)
++SELECT c.id
++FROM wanted
++JOIN card_with_min_ord ON wanted.nid = card_with_min_ord.nid
++JOIN cards AS c ON card_with_min_ord.nid = c.nid AND card_with_min_ord.ord = c.ord
++ORDER BY wanted.pos;
++            """.trimIndent()
+         )
+     }
+ 
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

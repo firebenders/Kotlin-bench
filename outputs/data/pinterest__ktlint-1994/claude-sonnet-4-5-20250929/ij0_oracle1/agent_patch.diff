@@ -1,0 +1,123 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index cba7fb04..c05e11d3 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -13,6 +13,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ * Print absolute path of file in lint violations when flag "--relative" is not specified in Ktlint CLI ([#1963](https://github.com/pinterest/ktlint/issues/1963)) 
+ * Handle parameter `--code-style=android_studio` in Ktlint CLI identical to deprecated parameter `--android` ([#1982](https://github.com/pinterest/ktlint/issues/1982))
+ * Prevent nullpointer exception (NPE) if class without body is followed by multiple blank lines until end of file `no-consecutive-blank-lines` ([#1987](https://github.com/pinterest/ktlint/issues/1987))
++* Fix internal error when line starts with `||` operator in `indent` rule
+ 
+ ### Changed
+ * Separated Baseline functionality out of `ktlint-cli` into separate `ktlint-baseline` module for API consumers
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 81142c41..c802acac 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -1091,7 +1091,7 @@ public class IndentationRule :
+     private fun ASTNode?.isElvisOperator() =
+         this != null &&
+             elementType == OPERATION_REFERENCE &&
+-            firstChildNode.elementType == ELVIS
++            firstChildNode?.elementType == ELVIS
+ 
+     private fun ASTNode.acceptableTrailingSpaces(): String {
+         require(elementType == WHITE_SPACE)
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleOrOperatorTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleOrOperatorTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleOrOperatorTest.kt
+@@ -0,0 +1,84 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++/**
++ * Test for the bug fix: Starting a line with || causes internal error from ktlint --format
++ * See: https://github.com/pinterest/ktlint/issues/...
++ */
++internal class IndentationRuleOrOperatorTest {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Given a line starting with OR operator should not throw NPE`() {
++        val code =
++            """
++            package com.my.lint.rules
++
++            import com.pinterest.ktlint.rule.engine.core.api.Rule
++            import com.pinterest.ktlint.rule.engine.core.api.RuleId
++            import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++
++            class BreakKtlintFormatRule : Rule(
++                RuleId("my-ruleset:my-rule-id"),
++                Rule.About(maintainer = "Me", repositoryUrl = "repositoryUrl", issueTrackerUrl = "issueTrackerUrl")
++            ) {
++
++                override fun beforeVisitChildNodes(
++                    node: ASTNode,
++                    autoCorrect: Boolean,
++                    emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit
++                ) {
++
++                    if (node.text.contains("this")
++                        || node.text.contains("that")
++                    ) {
++                        emit(node.startOffset, "My violation detail", false)
++                    }
++                }
++            }
++            """.trimIndent()
++        // The test should not throw an exception. If it completes without error, the fix is working.
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a line starting with OR operator in if condition should not throw NPE`() {
++        val code =
++            """
++            fun test() {
++                if (foo
++                    || bar
++                ) {
++                    println("test")
++                }
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a line starting with OR operator in return statement should not throw NPE`() {
++        val code =
++            """
++            fun test(): Boolean {
++                return foo
++                    || bar
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a line starting with OR operator in value assignment should not throw NPE`() {
++        val code =
++            """
++            val result = condition1
++                || condition2
++                || condition3
++            """.trimIndent()
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

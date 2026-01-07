@@ -1,0 +1,119 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+index bdddca08..1261fcc6 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+@@ -6,6 +6,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE_ANNOTATION_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIMARY_CONSTRUCTOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PROJECTION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT
+@@ -18,10 +19,12 @@ import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRu
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.children
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf
++import com.pinterest.ktlint.rule.engine.core.api.indent
+ import com.pinterest.ktlint.rule.engine.core.api.isCodeLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpace
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+@@ -143,6 +146,35 @@ public class AnnotationRule :
+             checkForAnnotationWithParameterToBePlacedOnSeparateLine(node, emit, autoCorrect)
+         }
+ 
++        if (codeStyle == ktlint_official &&
++            node.isPrimaryConstructor()
++        ) {
++            if (node.isFirstAnnotationEntry()) {
++                if (node.isOnSameLineAsAnnotatedConstruct() &&
++                    (node.isAnnotationEntryWithValueArgumentList() || node.isFollowedByOtherAnnotationEntryOnTheSameLine())
++                ) {
++                    node
++                        .treeParent
++                        .treeParent
++                        .prevLeaf()
++                        ?.takeIf { it.isWhiteSpace() && !it.textContains('\n') }
++                        ?.let {
++                            emit(node.startOffset, "Annotation must be placed on a separate line", true)
++                            if (autoCorrect) {
++                                it.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                            }
++                        }
++                }
++            } else {
++                if (node.isPrecededByOtherAnnotationEntryOnTheSameLine()) {
++                    emit(node.startOffset, "Annotation must be placed on a separate line", true)
++                    if (autoCorrect) {
++                        node.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                    }
++                }
++            }
++        }
++
+         if (node.isOnSameLineAsAnnotatedConstruct()) {
+             if (node.isPrecededByAnnotationOnAnotherLine()) {
+                 // Code below is disallowed
+@@ -198,7 +230,7 @@ public class AnnotationRule :
+                     // But following is allowed:
+                     //   var foo: List<@[Foo1 Foo2] String>
+                     //   fun foo(@Bar1 @Bar2 bar) {}
+-                    if (node.isFollowedByOtherAnnotationEntryOnTheSameLine() &&
++                    if ((node.isFollowedByOtherAnnotationEntryOnTheSameLine() || node.isAnnotationEntryWithValueArgumentList()) &&
+                         node.isFirstAnnotationEntry()
+                     ) {
+                         emit(startOfList.startOffset, "Expected newline after '${startOfList.text}'", true)
+@@ -435,7 +467,13 @@ public class AnnotationRule :
+         }
+     }
+ 
++    private fun ASTNode.isPrimaryConstructor() =
++        treeParent.elementType == MODIFIER_LIST && treeParent.treeParent.elementType == PRIMARY_CONSTRUCTOR
++
+     private fun getNewlineWithIndent(modifierListRoot: ASTNode): String {
++        if (modifierListRoot.treeParent.elementType == PRIMARY_CONSTRUCTOR) {
++            return modifierListRoot.treeParent.treeParent.indent().plus(indentConfig.indent)
++        }
+         val nodeBeforeAnnotations =
+             modifierListRoot
+                 .treeParent
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 50f8b7f2..2ce14ffc 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -48,6 +48,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OBJECT_DECLARATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OPEN_QUOTE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OPERATION_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PARENTHESIZED
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIMARY_CONSTRUCTOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY_ACCESSOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.RBRACE
+@@ -585,6 +586,14 @@ public class IndentationRule :
+                     toAstNode = superTypeList.lastChildLeafOrSelf(),
+                 ).prevCodeLeaf()
+             }
++        node
++            .findChildByType(PRIMARY_CONSTRUCTOR)
++            ?.let { primaryConstructor ->
++                nextToAstNode = startIndentContext(
++                    fromAstNode = primaryConstructor.getPrecedingLeadingCommentsAndWhitespaces(),
++                    toAstNode = primaryConstructor.lastChildLeafOrSelf(),
++                ).prevCodeLeaf()
++            }
+ 
+         // Leading annotations and comments should be indented at same level as class itself
+         startIndentContext(
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

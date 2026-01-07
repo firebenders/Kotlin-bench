@@ -1,0 +1,278 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 39ae35af..49abfe95 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -19,6 +19,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLOSING_QUOTE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.COLON
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONDITION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONSTRUCTOR_DELEGATION_CALL
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONSTRUCTOR_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONTEXT_RECEIVER_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.DELEGATED_SUPER_TYPE_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.DESTRUCTURING_DECLARATION
+@@ -605,23 +606,25 @@ public class IndentationRule :
+             }
+ 
+         val primaryConstructor = node.findChildByType(PRIMARY_CONSTRUCTOR)
+-        if (codeStyle == ktlint_official && primaryConstructor != null) {
+-            // Indent both constructor and super type list
++        val hasExplicitConstructorKeyword = primaryConstructor?.findChildByType(CONSTRUCTOR_KEYWORD) != null
++
++        // Handle super type list separately (if present) to ensure proper indentation
++        val superTypeList = node.findChildByType(SUPER_TYPE_LIST)
++        if (superTypeList != null) {
++            nextToAstNode =
++                startIndentContext(
++                    fromAstNode = superTypeList.getPrecedingLeadingCommentsAndWhitespaces(),
++                    toAstNode = superTypeList.lastChildLeafOrSelf(),
++                ).prevCodeLeaf()
++        }
++
++        if (codeStyle == ktlint_official && hasExplicitConstructorKeyword) {
++            // Indent constructor and everything after it (including class body) when explicit constructor keyword is used
+             nextToAstNode =
+                 startIndentContext(
+-                    fromAstNode = primaryConstructor.getPrecedingLeadingCommentsAndWhitespaces(),
++                    fromAstNode = primaryConstructor!!.getPrecedingLeadingCommentsAndWhitespaces(),
+                     toAstNode = nextToAstNode,
+                 ).prevCodeLeaf()
+-        } else {
+-            node
+-                .findChildByType(SUPER_TYPE_LIST)
+-                ?.let { superTypeList ->
+-                    nextToAstNode =
+-                        startIndentContext(
+-                            fromAstNode = superTypeList.getPrecedingLeadingCommentsAndWhitespaces(),
+-                            toAstNode = superTypeList.lastChildLeafOrSelf(),
+-                        ).prevCodeLeaf()
+-                }
+         }
+ 
+         // Leading annotations and comments should be indented at same level as class itself
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleClassBodyTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleClassBodyTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleClassBodyTest.kt
+@@ -0,0 +1,170 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for indentation of class bodies when classes have multiline super type lists.
++ * This test class specifically addresses the issues described in the GitHub issue about
++ * incorrect indentation with ktlint_official code style.
++ */
++class IndentationRuleClassBodyTest {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Given a class without explicit constructor keyword but with multiline super type list - body should not be indented`() {
++        val code =
++            """
++            class Foo(
++                val bar1: Bar,
++                val bar2: Bar,
++            ) : FooBar(bar1, bar2),
++                BarFoo1,
++                BarFoo2 {
++                // body
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a class with explicit constructor keyword and multiline super type list - super type list should be indented properly`() {
++        val code =
++            """
++            class Foo
++                constructor(
++                    val bar1: Bar,
++                    val bar2: Bar,
++                ) : FooBar(bar1, bar2),
++                    BarFoo1,
++                    BarFoo2 {
++                    // body
++                }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a class with explicit constructor keyword and multiline super type list with wrong indentation - should be corrected`() {
++        val code =
++            """
++            class Foo
++                constructor(
++                    val bar1: Bar,
++                    val bar2: Bar,
++                ) : FooBar(bar1, bar2),
++                BarFoo1,
++                BarFoo2 {
++                // body
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            class Foo
++                constructor(
++                    val bar1: Bar,
++                    val bar2: Bar,
++                ) : FooBar(bar1, bar2),
++                    BarFoo1,
++                    BarFoo2 {
++                    // body
++                }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasLintViolations(
++                com.pinterest.ktlint.test.LintViolation(6, 1, "Unexpected indentation (0) (should be 4)"),
++                com.pinterest.ktlint.test.LintViolation(7, 1, "Unexpected indentation (0) (should be 4)"),
++                com.pinterest.ktlint.test.LintViolation(8, 1, "Unexpected indentation (4) (should be 8)"),
++                com.pinterest.ktlint.test.LintViolation(9, 1, "Unexpected indentation (0) (should be 4)"),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a class without explicit constructor keyword with single line super type - body should not be indented`() {
++        val code =
++            """
++            class Foo(
++                val bar1: Bar,
++                val bar2: Bar,
++            ) : FooBar(bar1, bar2) {
++                // body
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a class with explicit constructor keyword and single line super type - body should be indented`() {
++        val code =
++            """
++            class Foo
++                constructor(
++                    val bar1: Bar,
++                    val bar2: Bar,
++                ) : FooBar(bar1, bar2) {
++                    // body
++                }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a class without explicit constructor and no super type - body should not be indented`() {
++        val code =
++            """
++            class Foo(
++                val bar1: Bar,
++                val bar2: Bar,
++            ) {
++                // body
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a class with explicit constructor and no super type - body should be indented`() {
++        val code =
++            """
++            class Foo
++                constructor(
++                    val bar1: Bar,
++                    val bar2: Bar,
++                ) {
++                    // body
++                }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a class with multiline super type list but no parameters - body should not be indented`() {
++        val code =
++            """
++            class Foo : FooBar(),
++                BarFoo1,
++                BarFoo2 {
++                // body
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++
+
+diff --git a/test_indentation_issue.kt b/test_indentation_issue.kt
+new file mode 100644
+--- /dev/null
++++ b/test_indentation_issue.kt
+@@ -0,0 +1,37 @@
++// Test case 1: Class without explicit constructor but with multiline super type list
++// This should NOT indent the body
++class Foo(
++    val bar1: Bar,
++    val bar2: Bar,
++) : FooBar(bar1, bar2),
++    BarFoo1,
++    BarFoo2 {
++    // body
++}
++
++// Test case 2: Class with explicit constructor and multiline super type list
++// The super type list should be indented at constructor level
++class Foo2
++    constructor(
++        val bar1: Bar,
++        val bar2: Bar,
++    ) : FooBar(bar1, bar2),
++        BarFoo1,
++        BarFoo2 {
++    // body
++}
++
++// Test case 3: Class with explicit constructor and annotations (from issue #1916)
++// This should indent both constructor and body
++class Foo3
++    @Bar1 @Bar2
++    constructor(
++        foo1: Foo1,
++        foo2: Foo2,
++    ) : Foobar(
++        "foobar1",
++        "foobar2",
++    ) {
++        fun foo() = "foo"
++    }
++

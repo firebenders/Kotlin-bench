@@ -1,0 +1,520 @@
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
+index 3a70af99..744b21c8 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
+@@ -118,7 +118,7 @@ internal object SuppressionLocatorBuilder {
+             .trim()
+             .split(" ")
+             .takeIf { it.isNotEmpty() }
+-            ?.takeIf { it[0] == KTLINT_DISABLE || it[0] == formatterTags.formatterTagOff }
++            ?.takeIf { it[0] == formatterTags.formatterTagOff }
+             ?.let { parts ->
+                 CommentSuppressionHint(
+                     this,
+@@ -135,13 +135,13 @@ internal object SuppressionLocatorBuilder {
+             .split(" ")
+             .takeIf { it.isNotEmpty() }
+             ?.let { parts ->
+-                if (parts[0] == KTLINT_DISABLE || parts[0] == formatterTags.formatterTagOff) {
++                if (parts[0] == formatterTags.formatterTagOff) {
+                     CommentSuppressionHint(
+                         this,
+                         HashSet(parts.tailToRuleIds()),
+                         BLOCK_START,
+                     )
+-                } else if (parts[0] == KTLINT_ENABLE || parts[0] == formatterTags.formatterTagOn) {
++                } else if (parts[0] == formatterTags.formatterTagOn) {
+                     CommentSuppressionHint(
+                         this,
+                         HashSet(parts.tailToRuleIds()),
+@@ -305,6 +305,4 @@ internal object SuppressionLocatorBuilder {
+         }
+     }
+ 
+-    private const val KTLINT_DISABLE = "ktlint-disable"
+-    private const val KTLINT_ENABLE = "ktlint-enable"
+ }
+diff --git a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilderTest.kt b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilderTest.kt
+index c0acb7df..e6ab7da6 100644
+--- a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilderTest.kt
++++ b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilderTest.kt
+@@ -37,25 +37,31 @@ class SuppressionLocatorBuilderTest {
+     }
+ 
+     @Test
+-    fun `Given that a NoFooIdentifierRule violation is suppressed with an EOL-comment to disable all rules then do not find a violation`() {
++    fun `Given that an EOL comment ktlint-disable is used then it is no longer suppressing the violation`() {
+         val code =
+             """
+             val foo = "foo" // ktlint-disable
+             """.trimIndent()
+-        assertThat(lint(code)).isEmpty()
++        assertThat(lint(code)).containsExactly(
++            lintError(1, 5, "standard:no-foo-identifier-standard"),
++            lintError(1, 5, "$NON_STANDARD_RULE_SET_ID:no-foo-identifier"),
++        )
+     }
+ 
+     @Test
+-    fun `Given that a NoFooIdentifierRule violation is suppressed with an EOL-comment for the specific rule then do not find a violation`() {
++    fun `Given that an EOL comment ktlint-disable for a specific rule is used then it is no longer suppressing the violation`() {
+         val code =
+             """
+             val foo = "foo" // ktlint-disable no-foo-identifier-standard $NON_STANDARD_RULE_SET_ID:no-foo-identifier
+             """.trimIndent()
+-        assertThat(lint(code)).isEmpty()
++        assertThat(lint(code)).containsExactly(
++            lintError(1, 5, "standard:no-foo-identifier-standard"),
++            lintError(1, 5, "$NON_STANDARD_RULE_SET_ID:no-foo-identifier"),
++        )
+     }
+ 
+     @Test
+-    fun `Given that a NoFooIdentifierRule violation is suppressed with a block comment for all rules then do not find a violation in that block`() {
++    fun `Given that a block comment ktlint-disable is used then it is no longer suppressing the violation`() {
+         val code =
+             """
+             /* ktlint-disable */
+@@ -64,13 +70,15 @@ class SuppressionLocatorBuilderTest {
+             val fooReported = "foo"
+             """.trimIndent()
+         assertThat(lint(code)).containsExactly(
++            lintError(2, 5, "standard:no-foo-identifier-standard"),
++            lintError(2, 5, "$NON_STANDARD_RULE_SET_ID:no-foo-identifier"),
+             lintError(4, 5, "standard:no-foo-identifier-standard"),
+             lintError(4, 5, "$NON_STANDARD_RULE_SET_ID:no-foo-identifier"),
+         )
+     }
+ 
+     @Test
+-    fun `Given that a NoFooIdentifierRule violation is suppressed with a block comment for a specific rule then do not find a violation for that rule in that block`() {
++    fun `Given that a block comment ktlint-disable for a specific rule is used then it is no longer suppressing the violation`() {
+         val code =
+             """
+             /* ktlint-disable no-foo-identifier-standard $NON_STANDARD_RULE_SET_ID:no-foo-identifier */
+@@ -79,6 +87,8 @@ class SuppressionLocatorBuilderTest {
+             val fooReported = "foo"
+             """.trimIndent()
+         assertThat(lint(code)).containsExactly(
++            lintError(2, 5, "standard:no-foo-identifier-standard"),
++            lintError(2, 5, "$NON_STANDARD_RULE_SET_ID:no-foo-identifier"),
+             lintError(4, 5, "standard:no-foo-identifier-standard"),
+             lintError(4, 5, "$NON_STANDARD_RULE_SET_ID:no-foo-identifier"),
+         )
+@@ -215,21 +225,26 @@ class SuppressionLocatorBuilderTest {
+     }
+ 
+     @Test
+-    fun `Given an invalid rule id then ignore it without throwing an exception`() {
++    fun `Given an invalid rule id in @Suppress annotation then ignore it without throwing an exception`() {
++        // Invalid rule IDs are ignored but don't suppress violations
+         val code =
+             """
+             @file:Suppress("ktlint:standard:SOME-INVALID-RULE-ID-1")
+ 
+             @Suppress("ktlint:standard:SOME-INVALID-RULE-ID-2")
+             class Foo {
+-                /* ktlint-disable standard:SOME-INVALID-RULE-ID-3 */
+                 fun foo() {
+-                    val fooNotReported = "foo" // ktlint-disable standard:SOME-INVALID-RULE-ID-4
++                    val fooReported = "foo"
+                 }
+-                /* ktlint-enable standard:SOME-INVALID-RULE-ID-3 */
+             }
+             """.trimIndent()
+-        assertThat(lint(code)).isEmpty()
++        // Violations are still reported because the invalid rule IDs don't suppress them
++        assertThat(lint(code)).containsExactly(
++            lintError(5, 9, "standard:no-foo-identifier-standard"),
++            lintError(5, 9, "$NON_STANDARD_RULE_SET_ID:no-foo-identifier"),
++            lintError(6, 13, "standard:no-foo-identifier-standard"),
++            lintError(6, 13, "$NON_STANDARD_RULE_SET_ID:no-foo-identifier"),
++        )
+     }
+ 
+     @Nested
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/StandardRuleSetProvider.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/StandardRuleSetProvider.kt
+index fa7b0ff1..62e22815 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/StandardRuleSetProvider.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/StandardRuleSetProvider.kt
+@@ -30,6 +30,7 @@ import com.pinterest.ktlint.ruleset.standard.rules.IfElseWrappingRule
+ import com.pinterest.ktlint.ruleset.standard.rules.ImportOrderingRule
+ import com.pinterest.ktlint.ruleset.standard.rules.IndentationRule
+ import com.pinterest.ktlint.ruleset.standard.rules.KdocWrappingRule
++import com.pinterest.ktlint.ruleset.standard.rules.KtlintSuppressionRule
+ import com.pinterest.ktlint.ruleset.standard.rules.MaxLineLengthRule
+ import com.pinterest.ktlint.ruleset.standard.rules.ModifierListSpacingRule
+ import com.pinterest.ktlint.ruleset.standard.rules.ModifierOrderRule
+@@ -115,6 +116,7 @@ public class StandardRuleSetProvider :
+             RuleProvider { ImportOrderingRule() },
+             RuleProvider { IndentationRule() },
+             RuleProvider { KdocWrappingRule() },
++            RuleProvider { KtlintSuppressionRule() },
+             RuleProvider { MaxLineLengthRule() },
+             RuleProvider { ModifierListSpacingRule() },
+             RuleProvider { ModifierOrderRule() },
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRule.kt
+index 25fd1092..40a0ef38 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRule.kt
+@@ -84,18 +84,15 @@ public class MaxLineLengthRule :
+                                 errorOffset.add(parsedLine.offset)
+                             }
+                         } else {
+-                            // Allow ktlint-disable comments to exceed max line length
+-                            if (!el.text.startsWith("// ktlint-disable")) {
+-                                // if comment is the only thing on the line - fine, otherwise emit an error
+-                                val prevLeaf = el.prevCodeSibling()
+-                                if (prevLeaf != null && prevLeaf.startOffset >= parsedLine.offset) {
+-                                    // fixme:
+-                                    // normally we would emit here but due to API limitations we need to hold off until
+-                                    // node spanning the same offset is 'visit'ed
+-                                    // (for ktlint-disable directive to have effect (when applied))
+-                                    // this will be rectified in the upcoming release(s)
+-                                    errorOffset.add(parsedLine.offset)
+-                                }
++                            // if comment is the only thing on the line - fine, otherwise emit an error
++                            val prevLeaf = el.prevCodeSibling()
++                            if (prevLeaf != null && prevLeaf.startOffset >= parsedLine.offset) {
++                                // fixme:
++                                // normally we would emit here but due to API limitations we need to hold off until
++                                // node spanning the same offset is 'visit'ed
++                                // (for @Suppress annotation to have effect (when applied))
++                                // this will be rectified in the upcoming release(s)
++                                errorOffset.add(parsedLine.offset)
+                             }
+                         }
+                     }
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRule.kt
+index 08b99363..e51babde 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRule.kt
+@@ -47,7 +47,6 @@ public class NoSingleLineBlockCommentRule :
+                     ?: node.lastChildLeafOrSelf()
+ 
+             if (!node.textContains('\n') &&
+-                !node.isKtlintSuppressionDirective() &&
+                 afterBlockComment.nextLeaf().isWhitespaceWithNewlineOrNull()
+             ) {
+                 emit(node.startOffset, "Replace the block comment with an EOL comment", true)
+@@ -66,16 +65,6 @@ public class NoSingleLineBlockCommentRule :
+     }
+ 
+     private fun ASTNode?.isWhitespaceWithNewlineOrNull() = this == null || this.isWhiteSpaceWithNewline()
+-
+-    // TODO: Remove when ktlint suppression directive in comments are no longer supported
+-    private fun ASTNode?.isKtlintSuppressionDirective() =
+-        this
+-            ?.text
+-            ?.removePrefix("/*")
+-            ?.removeSuffix("*/")
+-            ?.trim()
+-            ?.let { it.startsWith("ktlint-enable") || it.startsWith("ktlint-disable") }
+-            ?: false
+ }
+ 
+ public val NO_SINGLE_LINE_BLOCK_COMMENT_RULE_ID: RuleId = NoSingleLineBlockCommentRule().ruleId
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
+index 5e816c0b..275be18e 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
+@@ -4238,7 +4238,8 @@ internal class IndentationRuleTest {
+     @Nested
+     inner class `Issue 631 - Given some suppression directive in the middle of a file` {
+         @Test
+-        fun `Issue 631 - Given some code for which indentation is disabled with ktlint-disable-enable-block then do not fix indentation of that block only`() {
++        fun `Issue 631 - Given some code for which indentation is disabled with ktlint-disable-enable-block then do fix indentation because ktlint-disable is no longer supported`() {
++            // ktlint-disable directives in comments are no longer supported
+             val code =
+                 """
+                 val fooWithIndentationFixing1: String =
+@@ -4253,7 +4254,23 @@ internal class IndentationRuleTest {
+                     "foo" +
+                         "bar"
+                 """.trimIndent()
+-            indentationRuleAssertThat(code).hasNoLintViolations()
++            val formattedCode =
++                """
++                val fooWithIndentationFixing1: String =
++                    "foo" +
++                        "bar"
++                // ktlint-disable indent
++                val fooWithIndentationFixingSuppressed: String =
++                    "foo" +
++                        "bar"
++                // ktlint-enable indent
++                val fooWithIndentationFixing2: String =
++                    "foo" +
++                        "bar"
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .hasLintViolation(7, 1, "Unexpected indentation (4) (should be 8)")
++                .isFormattedAs(formattedCode)
+         }
+ 
+         @Test
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRuleTest.kt
+index 470cb747..d991f108 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRuleTest.kt
+@@ -106,7 +106,8 @@ class MaxLineLengthRuleTest {
+     @Nested
+     inner class `Given some error suppression` {
+         @Test
+-        fun `Given some code followed by a ktlint-disable directive which causes the line length to be exceeded then do not return a lint error for that line`() {
++        fun `Given some code followed by a ktlint-disable directive then do return a lint error because ktlint-disable is no longer supported`() {
++            // ktlint-disable directives in comments are no longer supported and no longer suppress violations
+             val code =
+                 """
+                 // $MAX_LINE_LENGTH_MARKER          $EOL_CHAR
+@@ -114,11 +115,12 @@ class MaxLineLengthRuleTest {
+                 """.trimIndent()
+             maxLineLengthRuleAssertThat(code)
+                 .setMaxLineLength()
+-                .hasNoLintViolations()
++                .hasLintViolationWithoutAutoCorrect(2, 1, "Exceeded max line length (37)")
+         }
+ 
+         @Test
+-        fun `Given code that is wrapped into a ktlint-disable block then do no return lint errors for lines in this block`() {
++        fun `Given code that is wrapped into a ktlint-disable block then do return lint errors because ktlint-disable is no longer supported`() {
++            // ktlint-disable directives in comments are no longer supported and no longer suppress violations
+             val code =
+                 """
+                 // $MAX_LINE_LENGTH_MARKER          $EOL_CHAR
+@@ -135,6 +137,8 @@ class MaxLineLengthRuleTest {
+                 .setMaxLineLength()
+                 .hasLintViolationsWithoutAutoCorrect(
+                     LintViolation(3, 1, "Exceeded max line length (37)"),
++                    LintViolation(5, 1, "Exceeded max line length (37)"),
++                    LintViolation(6, 1, "Exceeded max line length (37)"),
+                     LintViolation(8, 1, "Exceeded max line length (37)"),
+                 )
+         }
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRuleTest.kt
+index 68eefbd9..5f1ff804 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRuleTest.kt
+@@ -4,6 +4,7 @@ import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue
+ import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
+ import org.junit.jupiter.api.Nested
+ import org.junit.jupiter.api.Test
+ 
+@@ -165,15 +166,26 @@ class NoSingleLineBlockCommentRuleTest {
+     }
+ 
+     @Test
+-    fun `Given single line block comments to disable or enable ktlint then do not reformat`() {
++    fun `Given single line block comments to disable or enable ktlint then reformat to EOL comments`() {
++        // ktlint-disable and ktlint-enable directives are no longer supported, so these comments
++        // should be treated as regular block comments and converted to EOL comments
+         val code =
+             """
+             /* ktlint-disable foo-rule-id bar-rule-id */
+             val foo = "foo"
+             /* ktlint-enable foo-rule-id bar-rule-id */
+             """.trimIndent()
++        val formattedCode =
++            """
++            // ktlint-disable foo-rule-id bar-rule-id
++            val foo = "foo"
++            // ktlint-enable foo-rule-id bar-rule-id
++            """.trimIndent()
+         noSingleLineBlockCommentRuleAssertThat(code)
+             .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
+-            .hasNoLintViolations()
++            .hasLintViolations(
++                LintViolation(1, 1, "Replace the block comment with an EOL comment"),
++                LintViolation(3, 1, "Replace the block comment with an EOL comment"),
++            ).isFormattedAs(formattedCode)
+     }
+ }
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PackageNameRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PackageNameRuleTest.kt
+index 508e17eb..8e591ad9 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PackageNameRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PackageNameRuleTest.kt
+@@ -81,12 +81,13 @@ class PackageNameRuleTest {
+     }
+ 
+     @Test
+-    fun `Given a package name containing an forbidden character and the rule is suppressed via ktlint directive in comment then do not emit`() {
++    fun `Given a package name containing a forbidden character and the ktlint directive in comment is no longer supported then do emit`() {
++        // ktlint-disable directives in comments are no longer supported
+         val code =
+             """
+             package foo.foo_bar // ktlint-disable package-name
+             """.trimIndent()
+-        packageNameRuleAssertThat(code).hasNoLintViolations()
++        packageNameRuleAssertThat(code).hasLintViolationWithoutAutoCorrect(1, 9, "Package name must not contain underscore")
+     }
+ 
+     @Test
+
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/KtlintSuppressionRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/KtlintSuppressionRule.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/KtlintSuppressionRule.kt
+@@ -0,0 +1,152 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK_COMMENT
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.EOL_COMMENT
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpace
++import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
++import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
++import com.pinterest.ktlint.ruleset.standard.StandardRule
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
++
++/**
++ * Disallows usage of the old "ktlint-disable" and "ktlint-enable" directives. Those directives are no longer supported.
++ * The "@Suppress" or "@SuppressWarnings" annotations should be used instead.
++ */
++public class KtlintSuppressionRule : StandardRule(id = "ktlint-suppression") {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        when (node.elementType) {
++            EOL_COMMENT -> visitEolComment(node, emit, autoCorrect)
++            BLOCK_COMMENT -> visitBlockComment(node, emit, autoCorrect)
++        }
++    }
++
++    private fun visitEolComment(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        val text =
++            node
++                .text
++                .removePrefix("//")
++                .trim()
++        if (text.startsWith(KTLINT_DISABLE)) {
++            emit(
++                node.startOffset,
++                "@Suppress annotation should be used instead of the 'ktlint-disable' directive",
++                true,
++            )
++            if (autoCorrect) {
++                removeEolComment(node)
++            }
++        }
++    }
++
++    private fun removeEolComment(node: ASTNode) {
++        // Remove preceding whitespace on same line
++        node
++            .prevLeaf()
++            ?.takeIf { it.isWhiteSpace() && !it.textContains('\n') }
++            ?.let { (it as LeafPsiElement).rawRemove() }
++        (node as LeafPsiElement).rawRemove()
++    }
++
++    private fun visitBlockComment(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        val text =
++            node
++                .text
++                .removePrefix("/*")
++                .removeSuffix("*/")
++                .trim()
++        when {
++            text.startsWith(KTLINT_DISABLE) -> {
++                emit(
++                    node.startOffset,
++                    "@Suppress annotation should be used instead of the 'ktlint-disable' directive",
++                    true,
++                )
++                if (autoCorrect) {
++                    removeBlockComment(node)
++                }
++            }
++            text.startsWith(KTLINT_ENABLE) -> {
++                emit(
++                    node.startOffset,
++                    "The 'ktlint-enable' directive is obsolete after migrating to suppress annotations",
++                    true,
++                )
++                if (autoCorrect) {
++                    removeBlockComment(node)
++                }
++            }
++        }
++    }
++
++    private fun removeBlockComment(node: ASTNode) {
++        // Check if comment is on its own line
++        val prevLeaf = node.prevLeaf()
++        val nextLeaf = node.nextLeaf()
++
++        val prevIsNewline = prevLeaf?.isWhiteSpace() == true && prevLeaf.textContains('\n')
++        val nextIsNewline = nextLeaf?.isWhiteSpace() == true && nextLeaf.textContains('\n')
++
++        when {
++            prevIsNewline && nextIsNewline -> {
++                // Comment is on its own line, remove the entire line
++                (node as LeafPsiElement).rawRemove()
++                // Remove the whitespace before (keeping only content after last newline)
++                if (prevLeaf?.isWhiteSpace() == true && prevLeaf.textContains('\n')) {
++                    val prevText = prevLeaf.text
++                    val newText = prevText.substringAfterLast('\n')
++                    if (newText.isEmpty()) {
++                        (prevLeaf as LeafPsiElement).rawRemove()
++                    } else {
++                        (prevLeaf as LeafPsiElement).rawReplaceWithText("\n$newText")
++                    }
++                }
++            }
++            prevIsNewline && nextLeaf == null -> {
++                // Comment is at end of file on its own line
++                (node as LeafPsiElement).rawRemove()
++                if (prevLeaf?.isWhiteSpace() == true && prevLeaf.textContains('\n')) {
++                    val prevText = prevLeaf.text
++                    // Keep content before the last newline (remove the newline before comment)
++                    val newText = prevText.substringBeforeLast('\n')
++                    if (newText.isEmpty()) {
++                        (prevLeaf as LeafPsiElement).rawRemove()
++                    } else {
++                        (prevLeaf as LeafPsiElement).rawReplaceWithText(newText)
++                    }
++                }
++            }
++            else -> {
++                // Comment is inline, just remove the comment and surrounding whitespace
++                if (prevLeaf?.isWhiteSpace() == true && !prevLeaf.textContains('\n')) {
++                    (prevLeaf as LeafPsiElement).rawRemove()
++                }
++                (node as LeafPsiElement).rawRemove()
++                if (nextLeaf?.isWhiteSpace() == true && !nextLeaf.textContains('\n')) {
++                    (nextLeaf as LeafPsiElement).rawRemove()
++                }
++            }
++        }
++    }
++
++    private companion object {
++        const val KTLINT_DISABLE = "ktlint-disable"
++        const val KTLINT_ENABLE = "ktlint-enable"
++    }
++}
++
++public val KTLINT_SUPPRESSION_RULE_ID: RuleId = KtlintSuppressionRule().ruleId
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

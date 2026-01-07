@@ -1,0 +1,208 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index b44f38d88b..663f10abe4 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.6'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -226,12 +225,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -246,12 +245,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -361,7 +354,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+index 7fbc60b4f1..ac34c1064f 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+@@ -544,7 +544,7 @@ open class CardBrowser :
+                 // click on whole cell triggers select
+                 val cb = view!!.findViewById<CheckBox>(R.id.card_checkbox)
+                 cb.toggle()
+-                viewModel.selectRowAtPosition(position)
++                viewModel.toggleRowSelectionAtPosition(position)
+             } else {
+                 // load up the card selected on the list
+                 val clickedCardId = viewModel.getCardIdAtPosition(position)
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {
+
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserRowSelectionTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserRowSelectionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserRowSelectionTest.kt
+@@ -0,0 +1,107 @@
++/*
++ *  Copyright (c) 2026 AnkiDroid Contributors
++ *
++ *  This program is free software; you can redistribute it and/or modify it under
++ *  the terms of the GNU General Public License as published by the Free Software
++ *  Foundation; either version 3 of the License, or (at your option) any later
++ *  version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT ANY
++ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
++ *  PARTICULAR PURPOSE. See the GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along with
++ *  this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++package com.ichi2.anki
++
++import androidx.test.ext.junit.runners.AndroidJUnit4
++import com.ichi2.anki.browser.CardBrowserViewModel
++import org.hamcrest.MatcherAssert.assertThat
++import org.hamcrest.Matchers.equalTo
++import org.junit.Test
++import org.junit.runner.RunWith
++
++/**
++ * Tests for card browser row selection behavior
++ * Specifically tests the fix for: Card remains selected even after unselecting it
++ */
++@RunWith(AndroidJUnit4::class)
++class CardBrowserRowSelectionTest : RobolectricTest() {
++
++    /**
++     * Tests that toggleRowSelectionAtPosition correctly adds a row when not selected
++     */
++    @Test
++    fun toggleRowSelectionAtPosition_addsRowWhenNotSelected() {
++        val browser = getBrowserWithNotes(3)
++        val viewModel = browser.viewModel
++
++        // Initially no rows selected
++        assertThat("No rows should be selected initially", viewModel.selectedRowCount(), equalTo(0))
++
++        // Toggle position 0 (should add it)
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat("One row should be selected after toggle", viewModel.selectedRowCount(), equalTo(1))
++        assertThat("Position 0 should be selected", viewModel.selectedRows.contains(viewModel.getRowAtPosition(0)), equalTo(true))
++    }
++
++    /**
++     * Tests that toggleRowSelectionAtPosition correctly removes a row when already selected
++     */
++    @Test
++    fun toggleRowSelectionAtPosition_removesRowWhenSelected() {
++        val browser = getBrowserWithNotes(3)
++        val viewModel = browser.viewModel
++
++        // Select position 0
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat("One row should be selected", viewModel.selectedRowCount(), equalTo(1))
++
++        // Toggle position 0 again (should remove it)
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat("No rows should be selected after untoggle", viewModel.selectedRowCount(), equalTo(0))
++        assertThat("Position 0 should not be selected", viewModel.selectedRows.contains(viewModel.getRowAtPosition(0)), equalTo(false))
++    }
++
++    /**
++     * Tests the bug scenario: Select card 1, then select card 2 and unselect card 1
++     * This should result in only card 2 being selected
++     */
++    @Test
++    fun toggleRowSelection_correctlyHandlesMultipleToggles() {
++        val browser = getBrowserWithNotes(3)
++        val viewModel = browser.viewModel
++
++        // Select position 0
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat("One row should be selected", viewModel.selectedRowCount(), equalTo(1))
++        assertThat("Position 0 should be selected", viewModel.selectedRows.contains(viewModel.getRowAtPosition(0)), equalTo(true))
++
++        // Select position 1
++        viewModel.toggleRowSelectionAtPosition(1)
++        assertThat("Two rows should be selected", viewModel.selectedRowCount(), equalTo(2))
++        assertThat("Position 0 should still be selected", viewModel.selectedRows.contains(viewModel.getRowAtPosition(0)), equalTo(true))
++        assertThat("Position 1 should be selected", viewModel.selectedRows.contains(viewModel.getRowAtPosition(1)), equalTo(true))
++
++        // Unselect position 0
++        viewModel.toggleRowSelectionAtPosition(0)
++        assertThat("Only one row should be selected", viewModel.selectedRowCount(), equalTo(1))
++        assertThat("Position 0 should not be selected", viewModel.selectedRows.contains(viewModel.getRowAtPosition(0)), equalTo(false))
++        assertThat("Position 1 should still be selected", viewModel.selectedRows.contains(viewModel.getRowAtPosition(1)), equalTo(true))
++    }
++
++    /**
++     * Helper method to create a browser with a specific number of notes
++     */
++    private fun getBrowserWithNotes(count: Int): CardBrowser {
++        for (i in 0 until count) {
++            addNoteUsingBasicModel("Front $i", "Back $i")
++        }
++        return CardBrowser().also {
++            startActivityNormallyOpenCollectionWithIntent(it, CardBrowser.createIntent(targetContext, null))
++            advanceRobolectricLooperWithSleep()
++        }
++    }
++}
++

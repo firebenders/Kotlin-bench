@@ -1,0 +1,151 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index c802acac..626f554b 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -1242,34 +1242,31 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+ 
+                 val prefixLength = node.getCommonPrefixLength()
+                 val prevLeaf = node.prevLeaf()
+-                val correctedExpectedIndent =
+-                    if (node.isRawStringLiteralReturnInFunctionBodyBlock()) {
+-                        // Allow:
+-                        //   fun foo(): String {
+-                        //       return """
+-                        //           some text
+-                        //           """.trimIndent
+-                        //   }
+-                        node
+-                            .indent(false)
+-                            .plus(indentConfig.indent)
+-                    } else if (node.isRawStringLiteralFunctionBodyExpression()) {
+-                        // Allow:
+-                        //   fun foo(
+-                        //       bar: String
+-                        //   ) = """
+-                        //       $bar
+-                        //       """.trimIndent
+-                        node
+-                            .indent(false)
+-                            .plus(indentConfig.indent)
+-                    } else if (prevLeaf?.text == "\n") {
++                val indentOfLineContainingRawStringLiteral = node.indent(false)
++                val preferredExpectedIndent: String
++                val alternativeExpectedIndent: String?
++                when {
++                    node.isRawStringLiteralReturnInFunctionBodyBlock() ||
++                        node.isRawStringLiteralFunctionBodyExpression() -> {
++                        // Allow both:
++                        // - Preferred: indent the closing quotes one level deeper than the line containing the "return" or "="
++                        // - Alternative: align the closing quotes with the indentation of that line (for consistency with properties)
++                        preferredExpectedIndent = indentOfLineContainingRawStringLiteral.plus(indentConfig.indent)
++                        alternativeExpectedIndent = indentOfLineContainingRawStringLiteral
++                    }
++
++                    prevLeaf?.text == "\n" -> {
+                         // In case the opening quotes are placed at the start of the line, then the closing quotes
+                         // should have no indent as well.
+-                        ""
+-                    } else {
+-                        expectedIndent
++                        preferredExpectedIndent = ""
++                        alternativeExpectedIndent = null
+                     }
++
++                    else -> {
++                        preferredExpectedIndent = expectedIndent
++                        alternativeExpectedIndent = null
++                    }
++                }
+                 node.children()
+                     .forEach {
+                         if (it.prevLeaf()?.text == "\n" &&
+@@ -1283,7 +1280,7 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+                                 if (it.isIndentBeforeClosingQuote()) {
+                                     it.text.splitIndentAt(it.text.length)
+                                 } else if (it.isVariableStringTemplateEntry() && it.isFirstNonBlankElementOnLine()) {
+-                                    it.getFirstElementOnSameLine().text.splitIndentAt(correctedExpectedIndent.length)
++                                    it.getFirstElementOnSameLine().text.splitIndentAt(preferredExpectedIndent.length)
+                                 } else {
+                                     it.text.splitIndentAt(prefixLength)
+                                 }
+@@ -1298,10 +1295,14 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+                                 )
+                                 if (autoCorrect) {
+                                     (it.firstChildNode as LeafPsiElement).rawReplaceWithText(
+-                                        correctedExpectedIndent + actualContent,
++                                        preferredExpectedIndent + actualContent,
+                                     )
+                                 }
+-                            } else if (actualIndent != correctedExpectedIndent && it.isIndentBeforeClosingQuote()) {
++                            } else if (
++                                it.isIndentBeforeClosingQuote() &&
++                                actualIndent != preferredExpectedIndent &&
++                                actualIndent != alternativeExpectedIndent
++                            ) {
+                                 // It is a deliberate choice not to fix the indents inside the string literal except the line which only contains
+                                 // the closing quotes.
+                                 emit(
+@@ -1312,11 +1313,11 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+                                 if (autoCorrect) {
+                                     if (it.firstChildNode == null) {
+                                         (it as LeafPsiElement).rawInsertBeforeMe(
+-                                            LeafPsiElement(REGULAR_STRING_PART, correctedExpectedIndent),
++                                            LeafPsiElement(REGULAR_STRING_PART, preferredExpectedIndent),
+                                         )
+                                     } else {
+                                         (it.firstChildNode as LeafPsiElement).rawReplaceWithText(
+-                                            correctedExpectedIndent + actualContent,
++                                            preferredExpectedIndent + actualContent,
+                                         )
+                                     }
+                                 }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleMultilineStringClosingQuotesConsistencyTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleMultilineStringClosingQuotesConsistencyTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleMultilineStringClosingQuotesConsistencyTest.kt
+@@ -0,0 +1,36 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.MULTILINE_STRING_QUOTE
++import org.junit.jupiter.api.Test
++
++internal class IndentationRuleMultilineStringClosingQuotesConsistencyTest {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Given a raw string literal as function body expression then allow the closing quotes aligned with function indentation`() {
++        val code =
++            """
++            fun foo() = $MULTILINE_STRING_QUOTE
++                some text
++            $MULTILINE_STRING_QUOTE.trimIndent()
++            """.trimIndent()
++
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a raw string literal returned from a function block then allow the closing quotes aligned with return indentation`() {
++        val code =
++            """
++            fun foo2(): String {
++                return $MULTILINE_STRING_QUOTE
++                    some text
++                $MULTILINE_STRING_QUOTE.trimIndent()
++            }
++            """.trimIndent()
++
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

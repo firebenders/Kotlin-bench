@@ -1,0 +1,378 @@
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+index eec63c77..63f6c6eb 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+@@ -139,37 +139,53 @@ public class KtLintRuleEngine(
+         var mutated = false
+         val errors = mutableSetOf<Pair<LintError, Boolean>>()
+         val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+-        visitorProvider
+-            .visitor()
+-            .invoke { rule ->
+-                ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
+-                    tripped = true
+-                    if (canBeAutoCorrected) {
+-                        mutated = true
+-                        /**
+-                         * Rebuild the suppression locator after each change in the AST as the offsets of the
+-                         * suppression hints might have changed.
+-                         */
+-                        ruleExecutionContext.rebuildSuppressionLocator()
+-                    }
+-                    val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+-                    errors.add(
+-                        Pair(
+-                            LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
+-                            // It is assumed that a rule that emits that an error can be autocorrected, also
+-                            // does correct the error.
+-                            canBeAutoCorrected,
+-                        ),
+-                    )
+-                    // In trace mode report the violation immediately. The order in which violations are actually found might be different
+-                    // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
+-                    // violations are being solved.
+-                    LOGGER.trace {
+-                        "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
+-                            canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
++
++        // Repeat format step until no more errors are found which can be auto-corrected, up to a maximum of 3 reruns (4 total runs)
++        val maxRuns = 4
++        var currentRun = 0
++        var wasAutoCorrected: Boolean
++
++        do {
++            currentRun++
++            wasAutoCorrected = false
++
++            LOGGER.trace { "Format run $currentRun for file '${code.fileNameOrStdin()}'" }
++
++            visitorProvider
++                .visitor()
++                .invoke { rule ->
++                    ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
++                        tripped = true
++                        if (canBeAutoCorrected) {
++                            mutated = true
++                            wasAutoCorrected = true
++                            /**
++                             * Rebuild the suppression locator after each change in the AST as the offsets of the
++                             * suppression hints might have changed.
++                             */
++                            ruleExecutionContext.rebuildSuppressionLocator()
++                        }
++                        val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
++                        errors.add(
++                            Pair(
++                                LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
++                                // It is assumed that a rule that emits that an error can be autocorrected, also
++                                // does correct the error.
++                                canBeAutoCorrected,
++                            ),
++                        )
++                        // In trace mode report the violation immediately. The order in which violations are actually found might be different
++                        // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
++                        // violations are being solved.
++                        LOGGER.trace {
++                            "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
++                                canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
++                        }
+                     }
+                 }
+-            }
++        } while (wasAutoCorrected && currentRun < maxRuns)
++
++        // After all format passes, do a final lint pass to collect any remaining violations
+         if (tripped) {
+             visitorProvider
+                 .visitor()
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/StringTemplateIndentRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/StringTemplateIndentRule.kt
+index 78ba388e..fe729177 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/StringTemplateIndentRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/StringTemplateIndentRule.kt
+@@ -242,7 +242,10 @@ public class StringTemplateIndentRule :
+         autoCorrect: Boolean,
+     ) {
+         val firstNodeAfterOpeningQuotes = node.firstChildNode.nextLeaf() ?: return
+-        if (firstNodeAfterOpeningQuotes.text.isNotBlank()) {
++        // Check if the text is not blank and doesn't already start with a newline (to ensure idempotency when format runs multiple times)
++        val startsWithNewline = firstNodeAfterOpeningQuotes.text.contains("\n") &&
++            firstNodeAfterOpeningQuotes.text.substringBefore("\n").isBlank()
++        if (firstNodeAfterOpeningQuotes.text.isNotBlank() && !startsWithNewline) {
+             emit(
+                 firstNodeAfterOpeningQuotes.startOffset + firstNodeAfterOpeningQuotes.text.length,
+                 "Missing newline after the opening quotes of the raw string literal",
+@@ -309,7 +312,10 @@ public class StringTemplateIndentRule :
+         autoCorrect: Boolean,
+     ) {
+         val lastNodeBeforeClosingQuotes = node.lastChildNode.prevLeaf() ?: return
+-        if (lastNodeBeforeClosingQuotes.text.isNotBlank()) {
++        // Check if the text is not blank and doesn't already have a newline at the end (to ensure idempotency when format runs multiple times)
++        val endsWithNewline = lastNodeBeforeClosingQuotes.text.contains("\n") &&
++            lastNodeBeforeClosingQuotes.text.substringAfter("\n", "").isBlank()
++        if (lastNodeBeforeClosingQuotes.text.isNotBlank() && !endsWithNewline) {
+             emit(
+                 lastNodeBeforeClosingQuotes.startOffset + lastNodeBeforeClosingQuotes.text.length,
+                 "Missing newline before the closing quotes of the raw string literal",
+
+diff --git a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/RepeatedFormatIntegrationTest.kt b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/RepeatedFormatIntegrationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/RepeatedFormatIntegrationTest.kt
+@@ -0,0 +1,103 @@
++package com.pinterest.ktlint.rule.engine.api
++
++import com.pinterest.ktlint.rule.engine.core.api.ElementType
++import com.pinterest.ktlint.rule.engine.core.api.Rule
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import org.assertj.core.api.Assertions.assertThat
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafElement
++import org.junit.jupiter.api.Test
++
++/**
++ * Integration test demonstrating a realistic scenario where multiple rules interact
++ * and require multiple passes to fully format the code.
++ */
++class RepeatedFormatIntegrationTest {
++    @Test
++    fun `Given two rules that depend on each other's output, format should automatically rerun to fully correct the code`() {
++        val code = Code.fromSnippet("val x = \"aaa\"")
++
++        val actualFormattedCode =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider { RuleA() },
++                        RuleProvider { RuleB() },
++                    ),
++            ).format(code)
++
++        // RuleA changes "a" to "b", RuleB changes "b" to "c"
++        // Without repeated format: "aaa" -> "baa" (only first pass)
++        // With repeated format: "aaa" -> "baa" -> "cba" -> "ccb" -> "ccc"
++        assertThat(actualFormattedCode).isEqualTo("val x = \"ccc\"")
++    }
++
++    @Test
++    fun `Given code that becomes fully formatted after multiple passes, no errors should remain`() {
++        val code = Code.fromSnippet("val x = \"aa\"")
++
++        val errors = mutableListOf<LintError>()
++        val actualFormattedCode =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider { RuleA() },
++                        RuleProvider { RuleB() },
++                    ),
++            ).format(code) { error, corrected ->
++                if (!corrected) {
++                    errors.add(error)
++                }
++            }
++
++        // After all passes, code should be fully formatted with no remaining errors
++        assertThat(actualFormattedCode).isEqualTo("val x = \"cc\"")
++        assertThat(errors).isEmpty()
++    }
++}
++
++/**
++ * A rule that replaces the first "a" with "b"
++ */
++private class RuleA : Rule(
++    ruleId = RuleId("test:rule-a"),
++    about = About(),
++) {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType == ElementType.REGULAR_STRING_PART && node.text.contains("a")) {
++            emit(node.startOffset, "Replace 'a' with 'b'", true)
++            if (autoCorrect) {
++                val newText = node.text.replaceFirst("a", "b")
++                (node as LeafElement).rawReplaceWithText(newText)
++            }
++        }
++    }
++}
++
++/**
++ * A rule that replaces the first "b" with "c"
++ */
++private class RuleB : Rule(
++    ruleId = RuleId("test:rule-b"),
++    about = About(),
++) {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType == ElementType.REGULAR_STRING_PART && node.text.contains("b")) {
++            emit(node.startOffset, "Replace 'b' with 'c'", true)
++            if (autoCorrect) {
++                val newText = node.text.replaceFirst("b", "c")
++                (node as LeafElement).rawReplaceWithText(newText)
++            }
++        }
++    }
++}
++
+
+diff --git a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/RepeatedFormatTest.kt b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/RepeatedFormatTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/RepeatedFormatTest.kt
+@@ -0,0 +1,140 @@
++package com.pinterest.ktlint.rule.engine.api
++
++import com.pinterest.ktlint.rule.engine.core.api.ElementType
++import com.pinterest.ktlint.rule.engine.core.api.Rule
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import org.assertj.core.api.Assertions.assertThat
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafElement
++import org.junit.jupiter.api.Test
++
++/**
++ * Test that format repeats until no more errors can be auto-corrected (up to 3 times)
++ */
++class RepeatedFormatTest {
++    @Test
++    fun `Given a rule that requires multiple passes to fully format, then format should automatically repeat up to 4 times`() {
++        val code = Code.fromSnippet("val x = \"aaaa\"")
++
++        var formatCallCount = 0
++        val actualFormattedCode =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider {
++                            MultiPassRule { formatCallCount++ }
++                        },
++                    ),
++            ).format(code)
++
++        // The rule replaces "a" with "b" one character at a time
++        // After 4 passes: "aaaa" -> "baaa" -> "bbaa" -> "bbba" -> "bbbb"
++        assertThat(actualFormattedCode).isEqualTo("val x = \"bbbb\"")
++
++        // Verify that format was called multiple times automatically
++        assertThat(formatCallCount).isGreaterThan(1)
++    }
++
++    @Test
++    fun `Given a rule that is fully corrected in one pass, then format should only run once`() {
++        val code = Code.fromSnippet("val x = \"test\"")
++
++        var formatCallCount = 0
++        val actualFormattedCode =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider {
++                            SinglePassRule { formatCallCount++ }
++                        },
++                    ),
++            ).format(code)
++
++        // The rule replaces "test" with "replaced" in a single pass
++        assertThat(actualFormattedCode).isEqualTo("val x = \"replaced\"")
++
++        // Verify that format was called only once
++        assertThat(formatCallCount).isEqualTo(1)
++    }
++
++    @Test
++    fun `Given a rule that never stabilizes, then format should stop after 4 passes`() {
++        val code = Code.fromSnippet("val x = \"aaaaa\"")
++
++        var formatCallCount = 0
++        val actualFormattedCode =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider {
++                            MultiPassRule { formatCallCount++ }
++                        },
++                    ),
++            ).format(code)
++
++        // Verify that format stopped after maximum of 4 passes (1 initial + 3 reruns)
++        assertThat(formatCallCount).isEqualTo(4)
++
++        // After 4 passes the code should be partially corrected
++        assertThat(actualFormattedCode).isEqualTo("val x = \"bbbba\"")
++    }
++}
++
++/**
++ * A rule that requires multiple passes to fully format.
++ * It replaces the first occurrence of "a" with "b" in each pass.
++ */
++private class MultiPassRule(
++    private val onFormat: () -> Unit = {},
++) : Rule(
++    ruleId = RuleId("test:multi-pass"),
++    about = About(),
++) {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType == ElementType.REGULAR_STRING_PART && node.text.contains("a")) {
++            // Only count format passes, not lint passes
++            if (autoCorrect) {
++                onFormat()
++            }
++            emit(node.startOffset, "Replace 'a' with 'b'", true)
++            if (autoCorrect) {
++                // Replace only the first 'a' with 'b' to force multiple passes
++                val newText = node.text.replaceFirst("a", "b")
++                (node as LeafElement).rawReplaceWithText(newText)
++            }
++        }
++    }
++}
++
++/**
++ * A rule that fully corrects the code in a single pass.
++ */
++private class SinglePassRule(
++    private val onFormat: () -> Unit = {},
++) : Rule(
++    ruleId = RuleId("test:single-pass"),
++    about = About(),
++) {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType == ElementType.REGULAR_STRING_PART && node.text == "test") {
++            // Only count format passes, not lint passes
++            if (autoCorrect) {
++                onFormat()
++            }
++            emit(node.startOffset, "Replace 'test' with 'replaced'", true)
++            if (autoCorrect) {
++                (node as LeafElement).rawReplaceWithText("replaced")
++            }
++        }
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

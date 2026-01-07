@@ -1,0 +1,130 @@
+diff --git a/kotlinx-coroutines-core/common/src/Delay.kt b/kotlinx-coroutines-core/common/src/Delay.kt
+index ba06d9778..f3d8250ff 100644
+--- a/kotlinx-coroutines-core/common/src/Delay.kt
++++ b/kotlinx-coroutines-core/common/src/Delay.kt
+@@ -156,6 +156,14 @@ internal val CoroutineContext.delay: Delay get() = get(ContinuationInterceptor)
+ /**
+  * Convert this duration to its millisecond value.
+  * Positive durations are coerced at least `1`.
++ * Durations with sub-millisecond components are rounded up.
+  */
+-internal fun Duration.toDelayMillis(): Long =
+-    if (this > Duration.ZERO) inWholeMilliseconds.coerceAtLeast(1) else 0
++internal fun Duration.toDelayMillis(): Long = if (this > Duration.ZERO) {
++    val millis = inWholeMilliseconds
++    val nanos = inWholeNanoseconds
++    // For very large durations where nanos overflows, just return millis
++    if (nanos == Long.MAX_VALUE) millis
++    // Round up sub-millisecond part
++    else if (nanos % 1_000_000 != 0L) millis + 1
++    else millis.coerceAtLeast(1)
++} else 0
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/common/test/ToDelayMillisTest.kt b/kotlinx-coroutines-core/common/test/ToDelayMillisTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/ToDelayMillisTest.kt
+@@ -0,0 +1,88 @@
++/*
++ * Copyright 2016-2023 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines
++
++import kotlin.test.*
++import kotlin.time.*
++import kotlin.time.Duration.Companion.milliseconds
++import kotlin.time.Duration.Companion.nanoseconds
++import kotlin.time.Duration.Companion.microseconds
++import kotlin.time.Duration.Companion.seconds
++
++class ToDelayMillisTest {
++
++    @Test
++    fun testZeroDuration() {
++        assertEquals(0, Duration.ZERO.toDelayMillis())
++    }
++
++    @Test
++    fun testNegativeDuration() {
++        assertEquals(0, (-1).milliseconds.toDelayMillis())
++        assertEquals(0, (-1).seconds.toDelayMillis())
++        assertEquals(0, (-1).nanoseconds.toDelayMillis())
++    }
++
++    @Test
++    fun testSubMillisecondDurationsRoundUp() {
++        // Any positive sub-millisecond duration should round up to 1ms
++        assertEquals(1, 1.nanoseconds.toDelayMillis())
++        assertEquals(1, 500.nanoseconds.toDelayMillis())
++        assertEquals(1, 999999.nanoseconds.toDelayMillis())
++        assertEquals(1, 1.microseconds.toDelayMillis())
++        assertEquals(1, 500.microseconds.toDelayMillis())
++        assertEquals(1, 999.microseconds.toDelayMillis())
++    }
++
++    @Test
++    fun testExactMilliseconds() {
++        // Exact milliseconds should not be rounded
++        assertEquals(1, 1.milliseconds.toDelayMillis())
++        assertEquals(2, 2.milliseconds.toDelayMillis())
++        assertEquals(1000, 1.seconds.toDelayMillis())
++    }
++
++    @Test
++    fun testMillisecondsWithSubMillisPart() {
++        // Durations with sub-millisecond parts should round up
++        // 998ms + 902752ns = 998.902752ms -> should round up to 999ms
++        assertEquals(999, (998.milliseconds + 902752.nanoseconds).toDelayMillis())
++        
++        // 1ms + 1ns = 1.000001ms -> should round up to 2ms
++        assertEquals(2, (1.milliseconds + 1.nanoseconds).toDelayMillis())
++        
++        // 1ms + 500us = 1.5ms -> should round up to 2ms
++        assertEquals(2, (1.milliseconds + 500.microseconds).toDelayMillis())
++        
++        // 1ms + 999999ns = 1.999999ms -> should round up to 2ms
++        assertEquals(2, (1.milliseconds + 999999.nanoseconds).toDelayMillis())
++    }
++
++    @Test
++    fun testInfiniteDuration() {
++        // Duration.INFINITE should return Long.MAX_VALUE
++        assertEquals(Long.MAX_VALUE, Duration.INFINITE.toDelayMillis())
++    }
++
++    @Test
++    fun testLargeDurations() {
++        // Large durations (but not infinite) should still work correctly
++        val largeDuration = Long.MAX_VALUE.milliseconds
++        assertEquals(Long.MAX_VALUE, largeDuration.toDelayMillis())
++    }
++
++    @Test
++    fun testIssueReproducer() {
++        // Reproducer from issue: 998ms + 902752ns should delay for 999ms (rounded up)
++        // not 998ms (truncated)
++        val expectedDuration = 998.milliseconds + 902752.nanoseconds
++        val delayMillis = expectedDuration.toDelayMillis()
++        
++        // The bug was that this would return 998 (truncating the nanoseconds)
++        // The fix ensures it returns 999 (rounding up)
++        assertTrue(delayMillis >= 999, "Expected at least 999ms, but got $delayMillis")
++    }
++}
++

@@ -1,0 +1,184 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
+index ae7573bd..86e78b2c 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
+@@ -86,37 +86,51 @@ public class ParameterListWrappingRule :
+         autoCorrect: Boolean,
+     ) {
+         require(node.elementType == NULLABLE_TYPE)
++
++        // Only wrap nullable function types when wrapping the function type as a whole resolves the max line length
++        // violation. When the function type itself is too long to fit on a single line, then wrapping the parameter list
++        // is preferred.
++        if ((node.column - 1 + node.textLength) <= maxLineLength) {
++            return
++        }
++
++        val functionTypeNode = node.findChildByType(FUNCTION_TYPE) ?: return
++        val valueParameterListNode = functionTypeNode.findChildByType(VALUE_PARAMETER_LIST) ?: return
++        if (valueParameterListNode.findChildByType(VALUE_PARAMETER) == null) {
++            return
++        }
++        if (valueParameterListNode.textContains('\n')) {
++            return
++        }
++
++        val indentSize = indentConfig.childIndentOf(node).substringAfterLast('\n').length
++        val functionTypeFitsOnSingleLineWhenWrapped = indentSize + functionTypeNode.textLength <= maxLineLength
++        if (!functionTypeFitsOnSingleLineWhenWrapped) {
++            return
++        }
++
+         node
+-            .takeUnless {
+-                // skip when max line length is not exceedd
+-                (node.column - 1 + node.textLength) <= maxLineLength
+-            }?.findChildByType(FUNCTION_TYPE)
+-            ?.findChildByType(VALUE_PARAMETER_LIST)
+-            ?.takeIf { it.findChildByType(VALUE_PARAMETER) != null }
+-            ?.takeUnless { it.textContains('\n') }
+-            ?.let {
+-                node
+-                    .children()
+-                    .forEach {
+-                        when (it.elementType) {
+-                            LPAR -> {
+-                                emit(
+-                                    it.startOffset,
+-                                    "Parameter of nullable type should be on a separate line (unless the type fits on a single line)",
+-                                    true,
+-                                )
+-                                if (autoCorrect) {
+-                                    it.upsertWhitespaceAfterMe(indentConfig.childIndentOf(node))
+-                                }
+-                            }
+-                            RPAR -> {
+-                                emit(it.startOffset, errorMessage(it), true)
+-                                if (autoCorrect) {
+-                                    it.upsertWhitespaceBeforeMe(indentConfig.parentIndentOf(node))
+-                                }
+-                            }
++            .children()
++            .forEach {
++                when (it.elementType) {
++                    LPAR -> {
++                        emit(
++                            it.startOffset,
++                            "Parameter of nullable type should be on a separate line (unless the type fits on a single line)",
++                            true,
++                        )
++                        if (autoCorrect) {
++                            it.upsertWhitespaceAfterMe(indentConfig.childIndentOf(node))
+                         }
+                     }
++
++                    RPAR -> {
++                        emit(it.startOffset, errorMessage(it), true)
++                        if (autoCorrect) {
++                            it.upsertWhitespaceBeforeMe(indentConfig.parentIndentOf(node))
++                        }
++                    }
++                }
+             }
+     }
+ 
+@@ -126,7 +140,7 @@ public class ParameterListWrappingRule :
+             codeStyle != ktlint_official && isPartOfFunctionLiteralInNonKtlintOfficialCodeStyle() -> false
+             codeStyle == ktlint_official && isPartOfFunctionLiteralStartingOnSameLineAsClosingParenthesisOfPrecedingReferenceExpression() ->
+                 false
+-            isFunctionTypeWrappedInNullableType() -> false
++            isPartOfNullableFunctionTypeThatCanBeWrappedToSatisfyMaxLineLength() -> false
+             textContains('\n') -> true
+             codeStyle == ktlint_official && containsAnnotatedParameter() -> true
+             exceedsMaxLineLength() -> true
+@@ -159,9 +173,22 @@ public class ParameterListWrappingRule :
+             }
+     }
+ 
+-    private fun ASTNode.isFunctionTypeWrappedInNullableType(): Boolean {
++    private fun ASTNode.isPartOfNullableFunctionTypeThatCanBeWrappedToSatisfyMaxLineLength(): Boolean {
+         require(elementType == VALUE_PARAMETER_LIST)
+-        return treeParent.elementType == FUNCTION_TYPE && treeParent?.treeParent?.elementType == NULLABLE_TYPE
++
++        if (textContains('\n')) {
++            return false
++        }
++
++        val functionTypeNode = treeParent.takeIf { it.elementType == FUNCTION_TYPE } ?: return false
++        val nullableTypeNode = functionTypeNode.treeParent?.takeIf { it.elementType == NULLABLE_TYPE } ?: return false
++
++        if ((nullableTypeNode.column - 1 + nullableTypeNode.textLength) <= maxLineLength) {
++            return false
++        }
++
++        val indentSize = indentConfig.childIndentOf(nullableTypeNode).substringAfterLast('\n').length
++        return indentSize + functionTypeNode.textLength <= maxLineLength
+     }
+ 
+     private fun ASTNode.containsAnnotatedParameter(): Boolean {
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue1324NullableFunctionTypeWrappingTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue1324NullableFunctionTypeWrappingTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue1324NullableFunctionTypeWrappingTest.kt
+@@ -0,0 +1,52 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++class Issue1324NullableFunctionTypeWrappingTest {
++    private val parameterListWrappingRuleAssertThat =
++        assertThatRule(
++            provider = { ParameterListWrappingRule() },
++            additionalRuleProviders =
++                setOf(
++                    // Apply the IndentationRule always as additional rule, so that the formattedCode in the unit test looks
++                    // correct.
++                    RuleProvider { IndentationRule() },
++                ),
++        )
++
++    @Test
++    fun `Given a nullable function type which exceeds max line length due to its parameter list then wrap the parameter list`() {
++        val code =
++            """
++            val foo1: ((s1: String, s2: String, s3: String, s4: String, s5: String, s6: String) -> Unit)? = null
++            """.trimIndent()
++        val formattedCode =
++            """
++            val foo1: ((
++                s1: String,
++                s2: String,
++                s3: String,
++                s4: String,
++                s5: String,
++                s6: String
++            ) -> Unit)? = null
++            """.trimIndent()
++
++        parameterListWrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 80)
++            .hasLintViolations(
++                LintViolation(1, 13, "Parameter should start on a newline"),
++                LintViolation(1, 25, "Parameter should start on a newline"),
++                LintViolation(1, 37, "Parameter should start on a newline"),
++                LintViolation(1, 49, "Parameter should start on a newline"),
++                LintViolation(1, 61, "Parameter should start on a newline"),
++                LintViolation(1, 73, "Parameter should start on a newline"),
++                LintViolation(1, 83, "Missing newline before \")\""),
++            ).isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

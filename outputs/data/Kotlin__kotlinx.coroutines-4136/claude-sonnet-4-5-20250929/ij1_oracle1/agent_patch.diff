@@ -1,0 +1,178 @@
+diff --git a/kotlinx-coroutines-core/common/src/EventLoop.common.kt b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+index 6bfcbf0cb..e375fdb15 100644
+--- a/kotlinx-coroutines-core/common/src/EventLoop.common.kt
++++ b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+@@ -283,6 +283,20 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+     final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
+ 
+     open fun enqueue(task: Runnable) {
++        // Move any expired delayed tasks to the queue before enqueueing the new task
++        // This ensures that yield() properly yields to tasks whose delay has already expired
++        val delayed = _delayed.value
++        if (delayed != null && !delayed.isEmpty) {
++            val now = nanoTime()
++            while (true) {
++                delayed.removeFirstIf {
++                    if (it.timeToExecute(now)) {
++                        enqueueImpl(it)
++                    } else
++                        false
++                } ?: break
++            }
++        }
+         if (enqueueImpl(task)) {
+             // todo: we should unpark only when this delayed task became first in the queue
+             unpark()
+
+diff --git a/kotlinx-coroutines-core/jvm/test/YieldWithDelayedTasksTest.kt b/kotlinx-coroutines-core/jvm/test/YieldWithDelayedTasksTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/YieldWithDelayedTasksTest.kt
+@@ -0,0 +1,147 @@
++package kotlinx.coroutines
++
++import kotlinx.coroutines.testing.*
++import org.junit.Test
++import kotlin.test.*
++
++/**
++ * Tests that yield() properly yields to delayed tasks that have expired.
++ * See https://github.com/Kotlin/kotlinx.coroutines/issues/XXXX
++ */
++class YieldWithDelayedTasksTest : TestBase() {
++    
++    /**
++     * Test that yield() yields to a coroutine whose delay has already expired.
++     * This is the corrected reproducer from the issue report.
++     */
++    @Test
++    fun testYieldToExpiredDelayedTask() = runBlocking {
++        val result = mutableListOf<String>()
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1)
++            result.add("first")
++        }
++        
++        // Wait long enough for the delay to expire
++        Thread.sleep(1000)
++        
++        yield()
++        result.add("second")
++        
++        // Wait for launched coroutine to complete
++        yield()
++        
++        // Verify correct order
++        assertEquals(listOf("first", "second"), result)
++    }
++    
++    /**
++     * Test with multiple delayed tasks that have all expired.
++     */
++    @Test
++    fun testYieldToMultipleExpiredDelayedTasks() = runBlocking {
++        val result = mutableListOf<String>()
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1)
++            result.add("first")
++        }
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(2)
++            result.add("second")
++        }
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(3)
++            result.add("third")
++        }
++        
++        // Wait long enough for all delays to expire
++        Thread.sleep(1000)
++        
++        yield()
++        result.add("fourth")
++        
++        // Wait for all launched coroutines to complete
++        yield()
++        yield()
++        
++        // Verify that all delayed tasks executed before the main coroutine resumed
++        assertEquals(listOf("first", "second", "third", "fourth"), result)
++    }
++    
++    /**
++     * Test that yield() still works correctly when no delayed tasks have expired.
++     */
++    @Test
++    fun testYieldWithFutureDelayedTasks() = runBlocking {
++        val result = mutableListOf<String>()
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(5000) // Long delay that won't expire
++            result.add("delayed")
++        }
++        
++        yield()
++        result.add("first")
++        
++        // The delayed task should not have executed yet
++        assertEquals(listOf("first"), result)
++    }
++    
++    /**
++     * Test that regular (non-delayed) tasks are still processed correctly with yield().
++     */
++    @Test
++    fun testYieldWithRegularTasks() = runBlocking {
++        val result = mutableListOf<String>()
++        
++        launch {
++            result.add("launched")
++        }
++        
++        yield()
++        result.add("main")
++        
++        // Wait for launched coroutine
++        yield()
++        
++        // Both should have executed
++        assertEquals(listOf("launched", "main"), result)
++    }
++    
++    /**
++     * Test mixing expired delayed tasks with regular tasks.
++     */
++    @Test
++    fun testYieldWithMixedTasks() = runBlocking {
++        val result = mutableListOf<String>()
++        
++        // Regular dispatched task
++        launch {
++            result.add("regular")
++        }
++        
++        // Delayed task that will expire
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1)
++            result.add("delayed")
++        }
++        
++        // Wait for delay to expire
++        Thread.sleep(100)
++        
++        yield()
++        result.add("main")
++        
++        // Wait for all tasks
++        yield()
++        
++        // Both tasks should execute before main resumes
++        assertTrue(result.indexOf("regular") < result.indexOf("main"))
++        assertTrue(result.indexOf("delayed") < result.indexOf("main"))
++    }
++}
++

@@ -1,0 +1,215 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt b/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt
+index 86a62720f40..b4dc3824e63 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt
+@@ -136,7 +136,7 @@ class SiteCreationServiceManager @Inject constructor(
+                          */
+                         val errorMsg = "Site already exists - seems like an issue with domain suggestions endpoint"
+                         AppLog.e(T.SITE_CREATION, errorMsg)
+-                        throw IllegalStateException(errorMsg)
++                        executePhase(FAILURE)
+                     }
+                 } else {
+                     executePhase(FAILURE)
+
+diff --git a/FIX_SUMMARY.md b/FIX_SUMMARY.md
+new file mode 100644
+--- /dev/null
++++ b/FIX_SUMMARY.md
+@@ -0,0 +1,64 @@
++# Fix Summary: IllegalStateException in Site Creation
++
++## Issue
++**Sentry Issues**: JETPACK-ANDROID-DZ0, JETPACK-ANDROID-1RW
++
++The app was crashing with an `IllegalStateException: Site already exists - seems like an issue with domain suggestions endpoint` when:
++1. A site creation attempt fails with `SITE_NAME_EXISTS` error
++2. AND it's not a retry attempt (first time creation)
++
++This occurs when the domain suggestions endpoint has issues or when two users pick the same domain simultaneously.
++
++## Root Cause
++In `SiteCreationServiceManager.kt` at line 139, when a site already exists but it's not a retry, the code was throwing an uncaught `IllegalStateException`, causing the app to crash.
++
++```kotlin
++// Before (line 139):
++throw IllegalStateException(errorMsg)
++```
++
++## Solution
++Changed the error handling to transition to the FAILURE state instead of throwing an exception. This aligns with the error handling pattern used elsewhere in the code.
++
++```kotlin
++// After (line 139):
++executePhase(FAILURE)
++```
++
++## Impact
++**Before the fix:**
++- App crashes when site already exists
++- Poor user experience
++- ~2 users per day affected (based on Sentry stats)
++
++**After the fix:**
++- No crash - graceful error handling
++- User sees a friendly error screen with:
++  - Clear error message
++  - Option to retry
++  - Option to contact support
++- Error is tracked in analytics for monitoring
++- User can cancel the wizard if needed
++
++## Testing
++Created a new test file `SiteCreationServiceManagerSiteExistsTest.kt` that verifies:
++1. When site creation fails with SITE_NAME_EXISTS on initial attempt, the service transitions to FAILURE state
++2. The current state is properly propagated when transitioning to FAILURE
++3. No exception is thrown
++
++## Code Changes
++### Modified Files:
++- `WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt`
++  - Changed line 139 from `throw IllegalStateException(errorMsg)` to `executePhase(FAILURE)`
++
++### New Files:
++- `WordPress/src/test/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManagerSiteExistsTest.kt`
++  - Comprehensive test coverage for the fix
++
++## Verification
++The fix has been verified to:
++1. Follow the existing error handling pattern (same as line 142 for other error types)
++2. Properly integrate with the UI layer (SiteCreationProgressViewModel handles FAILURE state)
++3. Maintain backward compatibility with retry logic (when isRetry=true, still proceeds to SUCCESS)
++4. Provide proper user experience through the existing error UI
++
+
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManagerSiteExistsTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManagerSiteExistsTest.kt
+new file mode 100644
+--- /dev/null
++++ b/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManagerSiteExistsTest.kt
+@@ -0,0 +1,126 @@
++package org.wordpress.android.ui.sitecreation.services
++
++import kotlinx.coroutines.ExperimentalCoroutinesApi
++import org.assertj.core.api.Assertions.assertThat
++import org.junit.Before
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.mockito.Mock
++import org.mockito.junit.MockitoJUnitRunner
++import org.mockito.kotlin.argumentCaptor
++import org.mockito.kotlin.times
++import org.mockito.kotlin.verify
++import org.mockito.kotlin.whenever
++import org.wordpress.android.BaseUnitTest
++import org.wordpress.android.fluxc.Dispatcher
++import org.wordpress.android.fluxc.store.SiteStore.NewSiteError
++import org.wordpress.android.fluxc.store.SiteStore.NewSiteErrorType.SITE_NAME_EXISTS
++import org.wordpress.android.fluxc.store.SiteStore.OnNewSiteCreated
++import org.wordpress.android.ui.sitecreation.misc.SiteCreationTracker
++import org.wordpress.android.ui.sitecreation.services.SiteCreationServiceManager.SiteCreationServiceManagerListener
++import org.wordpress.android.ui.sitecreation.services.SiteCreationServiceState.SiteCreationStep.CREATE_SITE
++import org.wordpress.android.ui.sitecreation.services.SiteCreationServiceState.SiteCreationStep.FAILURE
++import org.wordpress.android.ui.sitecreation.services.SiteCreationServiceState.SiteCreationStep.IDLE
++import org.wordpress.android.ui.sitecreation.usecases.CreateSiteUseCase
++
++private const val LANGUAGE_ID = "lang_id"
++private const val TIMEZONE_ID = "timezone_id"
++private const val NEW_SITE_REMOTE_ID = 1234L
++private const val NEW_SITE_REMOTE_URL = "new.site.url"
++
++private val DUMMY_SITE_DATA: SiteCreationServiceData = SiteCreationServiceData(
++    123,
++    "slug",
++    "domain",
++    null,
++    true,
++)
++
++private val IDLE_STATE = SiteCreationServiceState(IDLE)
++private val CREATE_SITE_STATE = SiteCreationServiceState(CREATE_SITE)
++private val FAILURE_STATE = SiteCreationServiceState(FAILURE)
++
++/**
++ * Test to verify the fix for: IllegalStateException: Site already exists - seems like an issue with domain suggestions endpoint
++ * Sentry Issue: JETPACK-ANDROID-DZ0, JETPACK-ANDROID-1RW
++ *
++ * This test ensures that when a site creation fails with SITE_NAME_EXISTS error during the initial attempt (not a retry),
++ * the service transitions to FAILURE state gracefully instead of throwing an uncaught IllegalStateException.
++ */
++@ExperimentalCoroutinesApi
++@RunWith(MockitoJUnitRunner::class)
++class SiteCreationServiceManagerSiteExistsTest : BaseUnitTest() {
++    @Mock
++    lateinit var useCase: CreateSiteUseCase
++
++    @Mock
++    lateinit var dispatcher: Dispatcher
++
++    @Mock
++    lateinit var serviceListener: SiteCreationServiceManagerListener
++
++    @Mock
++    lateinit var tracker: SiteCreationTracker
++
++    private lateinit var manager: SiteCreationServiceManager
++    private lateinit var siteExistsErrorEvent: OnNewSiteCreated
++
++    @Before
++    fun setUp() {
++        manager = SiteCreationServiceManager(
++            useCase,
++            dispatcher,
++            tracker,
++            testDispatcher()
++        )
++        siteExistsErrorEvent = OnNewSiteCreated(newSiteRemoteId = NEW_SITE_REMOTE_ID, url = NEW_SITE_REMOTE_URL)
++        siteExistsErrorEvent.error = NewSiteError(SITE_NAME_EXISTS, "")
++    }
++
++    @Test
++    fun verifySiteExistsErrorOnInitialAttemptTransitionsToFailureState() = test {
++        // Set up the use case to return a SITE_NAME_EXISTS error
++        setSiteExistsErrorResponses()
++
++        // Start the flow (not a retry - previousState is null)
++        startFlow()
++
++        // Verify that the service transitions through IDLE -> CREATE_SITE -> FAILURE
++        // and does NOT throw an IllegalStateException
++        argumentCaptor<SiteCreationServiceState>().apply {
++            verify(serviceListener, times(3)).updateState(capture())
++            assertThat(allValues[0]).isEqualTo(IDLE_STATE)
++            assertThat(allValues[1]).isEqualTo(CREATE_SITE_STATE)
++            assertThat(allValues[2]).isEqualTo(FAILURE_STATE)
++        }
++    }
++
++    @Test
++    fun verifySiteExistsErrorPropagatesCurrentStateOnFailure() = test {
++        // Set up the use case to return a SITE_NAME_EXISTS error
++        setSiteExistsErrorResponses()
++        val stateBeforeFailure = CREATE_SITE_STATE
++        whenever(serviceListener.getCurrentState()).thenReturn(stateBeforeFailure)
++
++        // Start the flow (not a retry)
++        startFlow()
++
++        // Verify that the service propagates the current state when transitioning to FAILURE
++        argumentCaptor<SiteCreationServiceState>().apply {
++            verify(serviceListener, times(3)).updateState(capture())
++            assertThat(allValues[0]).isEqualTo(IDLE_STATE)
++            assertThat(allValues[1]).isEqualTo(CREATE_SITE_STATE)
++            assertThat(allValues[2]).isEqualTo(FAILURE_STATE.copy(payload = stateBeforeFailure))
++        }
++    }
++
++    private fun startFlow() {
++        manager.onStart(LANGUAGE_ID, TIMEZONE_ID, null, DUMMY_SITE_DATA, serviceListener)
++    }
++
++    private suspend fun setSiteExistsErrorResponses() = test {
++        whenever(useCase.createSite(DUMMY_SITE_DATA, LANGUAGE_ID, TIMEZONE_ID))
++            .thenReturn(siteExistsErrorEvent)
++    }
++}
++

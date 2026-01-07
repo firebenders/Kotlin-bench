@@ -1,0 +1,137 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index a95b57bcac..05c3928238 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.9.0'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -228,12 +227,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -248,12 +247,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -365,7 +358,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.5.1'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+index 61c9f6f9e1..4be820faa7 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+@@ -102,6 +102,7 @@ import com.ichi2.utils.HandlerUtils.executeFunctionWithDelay
+ import com.ichi2.utils.HandlerUtils.newHandler
+ import com.ichi2.utils.HashUtil.hashSetInit
+ import com.ichi2.utils.WebViewDebugging.initializeDebugging
++import com.ichi2.utils.AssetHelper.guessMimeType
+ import com.squareup.seismic.ShakeDetector
+ import kotlinx.coroutines.Job
+ import kotlinx.coroutines.runBlocking
+@@ -2261,11 +2262,39 @@ abstract class AbstractFlashcardViewer :
+             request: WebResourceRequest
+         ): WebResourceResponse? {
+             val url = request.url
++            val urlString = url.toString()
++
+             if (request.method == "GET") {
++                // First try the asset loader
+                 loader!!.shouldInterceptRequest(url)?.let { return it }
+-            }
+-            if (url.toString().startsWith("file://")) {
+-                url.path?.let { path -> migrationService?.migrateFileImmediately(File(path)) }
++
++                // Handle file:// URLs from media directory to enable JavaScript access (same-origin policy)
++                //
++                // Background: When SVG files are loaded with file:// scheme and the HTML is loaded via http://,
++                // JavaScript cannot access the SVG's contentDocument due to CORS (same-origin policy).
++                // This causes: "Uncaught TypeError: Cannot read properties of null (reading 'querySelectorAll')"
++                //
++                // Solution: Intercept file:// requests and serve them through the WebView itself, making them
++                // appear to come from the same origin. This allows JavaScript to access SVG contentDocument.
++                if (urlString.startsWith("file://")) {
++                    url.path?.let { path ->
++                        val file = File(path)
++                        // Check if the file exists and is in the media directory (for security)
++                        val mediaDir = CollectionHelper.getMediaDirectory(this@AbstractFlashcardViewer)
++                        if (file.exists() && file.absolutePath.startsWith(mediaDir.absolutePath)) {
++                            migrationService?.migrateFileImmediately(file)
++                            try {
++                                val inputStream = FileInputStream(file)
++                                val mimeType = guessMimeType(file.name)
++                                Timber.d("Intercepting file:// request: %s (MIME type: %s)", file.name, mimeType)
++                                // Serve with proper MIME type to enable JavaScript access
++                                return WebResourceResponse(mimeType, "UTF-8", inputStream)
++                            } catch (e: Exception) {
++                                Timber.w(e, "Failed to serve file: %s", file.name)
++                            }
++                        }
++                    }
++                }
+             }
+             return null
+         }
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index df05afef76..4d2ca9684e 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

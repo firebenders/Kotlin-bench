@@ -1,0 +1,48 @@
+diff --git a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+index de1522526..d006206ac 100644
+--- a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
++++ b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+@@ -37,13 +37,22 @@ private fun <E : Throwable> createConstructor(clz: Class<E>): Ctor {
+     /*
+     * Try to reflectively find constructor(), constructor(message, cause), constructor(cause) or constructor(message).
+     * Exceptions are shared among coroutines, so we should copy exception before recovering current stacktrace.
++    *
++    * Note: reflection does not guarantee constructor ordering, so we explicitly prefer "best" signatures.
+     */
+-    val constructors = clz.constructors.sortedByDescending { it.parameterTypes.size }
+-    for (constructor in constructors) {
+-        val result = createSafeConstructor(constructor)
+-        if (result != null) return result
+-    }
+-    return nullResult
++    val constructors = clz.constructors
++
++    fun findCtor(vararg parameterTypes: Class<*>): Constructor<*>? =
++        constructors.firstOrNull { it.parameterTypes.contentEquals(parameterTypes) }
++
++    // Best to worst
++    return (
++        findCtor(String::class.java, Throwable::class.java)?.let(::createSafeConstructor)
++            ?: findCtor(Throwable::class.java)?.let(::createSafeConstructor)
++            ?: findCtor(String::class.java)?.let(::createSafeConstructor)
++            ?: findCtor()?.let(::createSafeConstructor)
++            ?: nullResult
++        )
+ }
+ 
+ private fun createSafeConstructor(constructor: Constructor<*>): Ctor? {
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */

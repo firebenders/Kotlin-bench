@@ -59,10 +59,21 @@ index 1af3690550..87f8f6bd44 100644
  
      // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
 diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
-index 8943ce3a58..0c124cf88f 100644
+index 8943ce3a58..21474a40a6 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
-@@ -1658,14 +1658,6 @@ abstract class AbstractFlashcardViewer :
+@@ -841,10 +841,6 @@ abstract class AbstractFlashcardViewer :
+         }
+     }
+ 
+-    private fun getRecommendedEase(easy: Boolean): Int {
+-        return if (easy) EASE_4 else EASE_3
+-    }
+-
+     open fun answerCard(@BUTTON_TYPE ease: Int) {
+         launchCatchingTask {
+             if (mInAnswer) {
+@@ -1658,14 +1654,6 @@ abstract class AbstractFlashcardViewer :
                      flipOrAnswerCard(EASE_4)
                      true
                  }
@@ -129,77 +140,81 @@ index 4b3d8dbadd..53df3b9917 100644
                  MARK -> from(unicode('*', CardSide.BOTH))
                  BURY_CARD -> from(unicode('-', CardSide.BOTH))
 diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/servicelayer/PreferenceUpgradeService.kt b/AnkiDroid/src/main/java/com/ichi2/anki/servicelayer/PreferenceUpgradeService.kt
-index 6b5ea4b0ac..680e0668bb 100644
+index 6b5ea4b0ac..d1f8293f4e 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/anki/servicelayer/PreferenceUpgradeService.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/anki/servicelayer/PreferenceUpgradeService.kt
 @@ -89,6 +89,7 @@ object PreferenceUpgradeService {
                  yield(UpgradeFetchMedia())
                  yield(UpgradeAppLocale())
                  yield(RemoveScrollingButtons())
-+                yield(UpgradeRecommendedCommandsToEase3And4())
++                yield(UpgradeAnswerRecommendedBindings())
              }
  
              /** Returns a list of preference upgrade classes which have not been applied */
-@@ -240,8 +241,8 @@ object PreferenceUpgradeService {
+@@ -240,8 +241,10 @@ object PreferenceUpgradeService {
                  Pair(3, ViewerCommand.FLIP_OR_ANSWER_EASE2),
                  Pair(4, ViewerCommand.FLIP_OR_ANSWER_EASE3),
                  Pair(5, ViewerCommand.FLIP_OR_ANSWER_EASE4),
 -                Pair(6, ViewerCommand.FLIP_OR_ANSWER_RECOMMENDED),
 -                Pair(7, ViewerCommand.FLIP_OR_ANSWER_BETTER_THAN_RECOMMENDED),
++                // 6 and 7 were FLIP_OR_ANSWER_RECOMMENDED and FLIP_OR_ANSWER_BETTER_THAN_RECOMMENDED
++                // which are now removed and mapped to EASE3 and EASE4
 +                Pair(6, ViewerCommand.FLIP_OR_ANSWER_EASE3),
 +                Pair(7, ViewerCommand.FLIP_OR_ANSWER_EASE4),
                  Pair(8, ViewerCommand.UNDO),
                  Pair(9, ViewerCommand.EDIT),
                  Pair(10, ViewerCommand.MARK),
-@@ -408,6 +409,53 @@ object PreferenceUpgradeService {
+@@ -408,6 +411,55 @@ object PreferenceUpgradeService {
                  preferences.edit { remove("scrolling_buttons") }
              }
          }
 +
 +        /**
-+         * Migrates bindings from the removed FLIP_OR_ANSWER_RECOMMENDED and
++         * Migrates bindings from removed FLIP_OR_ANSWER_RECOMMENDED and
 +         * FLIP_OR_ANSWER_BETTER_THAN_RECOMMENDED commands to FLIP_OR_ANSWER_EASE3
 +         * and FLIP_OR_ANSWER_EASE4 respectively.
 +         */
-+        internal class UpgradeRecommendedCommandsToEase3And4 : PreferenceUpgrade(12) {
++        internal class UpgradeAnswerRecommendedBindings : PreferenceUpgrade(12) {
 +            override fun upgrade(preferences: SharedPreferences) {
-+                migrateBindings(
++                migrateBinding(
 +                    preferences,
-+                    "binding_FLIP_OR_ANSWER_RECOMMENDED",
-+                    ViewerCommand.FLIP_OR_ANSWER_EASE3
++                    fromKey = "binding_FLIP_OR_ANSWER_RECOMMENDED",
++                    toCommand = ViewerCommand.FLIP_OR_ANSWER_EASE3
 +                )
-+                migrateBindings(
++                migrateBinding(
 +                    preferences,
-+                    "binding_FLIP_OR_ANSWER_BETTER_THAN_RECOMMENDED",
-+                    ViewerCommand.FLIP_OR_ANSWER_EASE4
++                    fromKey = "binding_FLIP_OR_ANSWER_BETTER_THAN_RECOMMENDED",
++                    toCommand = ViewerCommand.FLIP_OR_ANSWER_EASE4
 +                )
 +            }
 +
-+            private fun migrateBindings(
++            private fun migrateBinding(
 +                preferences: SharedPreferences,
-+                oldPreferenceKey: String,
-+                targetCommand: ViewerCommand
++                fromKey: String,
++                toCommand: ViewerCommand
 +            ) {
-+                if (!preferences.contains(oldPreferenceKey)) {
-+                    Timber.v("No preference to upgrade for: '%s'", oldPreferenceKey)
++                if (!preferences.contains(fromKey)) {
++                    return
++                }
++                val oldBindings = preferences.getString(fromKey, null) ?: return
++                if (oldBindings.isBlank()) {
++                    preferences.edit { remove(fromKey) }
 +                    return
 +                }
 +
-+                val oldBindingsString = preferences.getString(oldPreferenceKey, null)
-+                if (oldBindingsString.isNullOrEmpty()) {
-+                    Timber.v("Empty binding string for: '%s'", oldPreferenceKey)
-+                    preferences.edit { remove(oldPreferenceKey) }
-+                    return
++                // Append old bindings to the target command
++                val targetKey = toCommand.preferenceKey
++                val existingBindings = preferences.getString(targetKey, null) ?: ""
++                val newBindings = if (existingBindings.isBlank()) {
++                    oldBindings
++                } else {
++                    "$existingBindings|$oldBindings"
 +                }
 +
-+                Timber.i("Migrating bindings from '%s' to '%s'", oldPreferenceKey, targetCommand.preferenceKey)
-+
-+                val oldBindings = MappableBinding.fromPreferenceString(oldBindingsString)
-+                for (binding in oldBindings) {
-+                    targetCommand.addBindingAtEnd(preferences, binding)
++                preferences.edit {
++                    putString(targetKey, newBindings)
++                    remove(fromKey)
 +                }
-+
-+                preferences.edit { remove(oldPreferenceKey) }
 +            }
 +        }
      }

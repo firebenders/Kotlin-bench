@@ -1,0 +1,240 @@
+diff --git a/core/common/src/format/UtcOffsetFormat.kt b/core/common/src/format/UtcOffsetFormat.kt
+index 1310626..ca31d44 100644
+--- a/core/common/src/format/UtcOffsetFormat.kt
++++ b/core/common/src/format/UtcOffsetFormat.kt
+@@ -136,6 +136,7 @@ private object OffsetFields {
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 18,
++        name = "offsetHours",
+         sign = sign,
+     )
+     val minutesOfHour = UnsignedFieldSpec(
+@@ -143,6 +144,7 @@ private object OffsetFields {
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 59,
++        name = "offsetMinutesOfHour",
+         sign = sign,
+     )
+     val secondsOfMinute = UnsignedFieldSpec(
+@@ -150,6 +152,7 @@ private object OffsetFields {
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 59,
++        name = "offsetSecondsOfMinute",
+         sign = sign,
+     )
+ }
+diff --git a/core/common/src/internal/format/FieldFormatDirective.kt b/core/common/src/internal/format/FieldFormatDirective.kt
+index e298ad1..4bff75f 100644
+--- a/core/common/src/internal/format/FieldFormatDirective.kt
++++ b/core/common/src/internal/format/FieldFormatDirective.kt
+@@ -63,7 +63,7 @@ internal abstract class UnsignedIntFieldFormatDirective<in Target>(
+ 
+     override fun formatter(): FormatterStructure<Target> {
+         val formatter = UnsignedIntFormatterStructure(
+-            number = field.accessor::getterNotNull,
++            number = field::getterNotNull,
+             zeroPadding = minDigits,
+         )
+         return if (spacePadding != null) SpacePaddedFormatter(formatter, spacePadding) else formatter
+@@ -88,7 +88,7 @@ internal abstract class NamedUnsignedIntFieldFormatDirective<in Target>(
+         }
+     }
+ 
+-    private fun getStringValue(target: Target): String = field.accessor.getterNotNull(target).let {
++    private fun getStringValue(target: Target): String = field.getterNotNull(target).let {
+         values.getOrNull(it-field.minValue)
+             ?: "The value $it of ${field.name} does not have a corresponding string representation"
+     }
+@@ -124,8 +124,8 @@ internal abstract class NamedEnumIntFieldFormatDirective<in Target, Type>(
+ 
+     private val reverseMapping = mapping.entries.associate { it.value to it.key }
+ 
+-    private fun getStringValue(target: Target): String = field.accessor.getterNotNull(target).let {
+-        mapping[field.accessor.getterNotNull(target)]
++    private fun getStringValue(target: Target): String = field.getterNotNull(target).let {
++        mapping[field.getterNotNull(target)]
+             ?: "The value $it of ${field.name} does not have a corresponding string representation"
+     }
+ 
+@@ -159,7 +159,7 @@ internal abstract class StringFieldFormatDirective<in Target>(
+     }
+ 
+     override fun formatter(): FormatterStructure<Target> =
+-        StringFormatterStructure(field.accessor::getterNotNull)
++        StringFormatterStructure(field::getterNotNull)
+ 
+     override fun parser(): ParserStructure<Target> =
+         ParserStructure(
+@@ -185,7 +185,7 @@ internal abstract class SignedIntFieldFormatDirective<in Target>(
+ 
+     override fun formatter(): FormatterStructure<Target> {
+         val formatter = SignedIntFormatterStructure(
+-            number = field.accessor::getterNotNull,
++            number = field::getterNotNull,
+             zeroPadding = minDigits ?: 0,
+             outputPlusOnExceededWidth = outputPlusOnExceededWidth,
+         )
+@@ -210,7 +210,7 @@ internal abstract class DecimalFractionFieldFormatDirective<in Target>(
+     private val zerosToAdd: List<Int>,
+ ) : FieldFormatDirective<Target> {
+     override fun formatter(): FormatterStructure<Target> =
+-        DecimalFractionFormatterStructure(field.accessor::getterNotNull, minDigits, maxDigits, zerosToAdd)
++        DecimalFractionFormatterStructure(field::getterNotNull, minDigits, maxDigits, zerosToAdd)
+ 
+     override fun parser(): ParserStructure<Target> = ParserStructure(
+         listOf(
+@@ -230,7 +230,7 @@ internal abstract class ReducedIntFieldDirective<in Target>(
+ 
+     override fun formatter(): FormatterStructure<Target> =
+         ReducedIntFormatterStructure(
+-            number = field.accessor::getterNotNull,
++            number = field::getterNotNull,
+             digits = digits,
+             base = base,
+         )
+diff --git a/core/common/src/internal/format/FieldSpec.kt b/core/common/src/internal/format/FieldSpec.kt
+index cbb2d76..f42cfdc 100644
+--- a/core/common/src/internal/format/FieldSpec.kt
++++ b/core/common/src/internal/format/FieldSpec.kt
+@@ -99,6 +99,13 @@ internal interface FieldSpec<in Target, Type> {
+      * The sign corresponding to the field value, or `null` if the field has none.
+      */
+     val sign: FieldSign<Target>?
++
++    /**
++     * Gets the value of the field from the container, throwing an [IllegalStateException] if not set.
++     * Uses the field's user-friendly [name] in the error message.
++     */
++    fun getterNotNull(container: Target): Type =
++        accessor.getter(container) ?: throw IllegalStateException("Field $name is not set")
+ }
+ 
+ /**
+
+diff --git a/core/common/test/format/OffsetFieldNamesTest.kt b/core/common/test/format/OffsetFieldNamesTest.kt
+new file mode 100644
+--- /dev/null
++++ b/core/common/test/format/OffsetFieldNamesTest.kt
+@@ -0,0 +1,119 @@
++/*
++ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
++ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
++ */
++
++package kotlinx.datetime.test.format
++
++import kotlinx.datetime.*
++import kotlinx.datetime.format.*
++import kotlin.test.*
++
++/**
++ * Tests that error messages for offset-related fields use user-friendly names
++ * instead of internal field names.
++ */
++class OffsetFieldNamesTest {
++
++    @Test
++    fun testOffsetHoursErrorMessage() {
++        val format = DateTimeComponents.Format {
++            year()
++            char('-')
++            monthNumber()
++            char('-')
++            dayOfMonth()
++            char(' ')
++            hour()
++            char(':')
++            minute()
++            char(':')
++            second()
++            char(' ')
++            offsetHours()
++            char(':')
++            offsetMinutesOfHour()
++        }
++        
++        // Try to format without setting the offset - should get a user-friendly error message
++        val exception = assertFailsWith<IllegalStateException> {
++            format.format {
++                setDateTime(LocalDateTime(2020, 3, 16, 23, 59, 59))
++                // Note: offset is NOT set intentionally to trigger the error
++            }
++        }
++        
++        val message = exception.message ?: fail("Exception should have a message")
++        // The error message should mention "offsetHours", not "totalHoursAbs"
++        assertTrue(message.contains("offsetHours"), "Error message should contain user-friendly field name 'offsetHours', but was: $message")
++        assertFalse(message.contains("totalHoursAbs"), "Error message should NOT contain internal field name 'totalHoursAbs', but was: $message")
++    }
++
++    @Test
++    fun testOffsetMinutesOfHourErrorMessage() {
++        val format = DateTimeComponents.Format {
++            offsetMinutesOfHour()
++        }
++        
++        val exception = assertFailsWith<IllegalStateException> {
++            format.format {
++                // Note: offset is NOT set intentionally to trigger the error
++            }
++        }
++        
++        val message = exception.message ?: fail("Exception should have a message")
++        // The error message should mention "offsetMinutesOfHour", not "minutesOfHour"
++        assertTrue(message.contains("offsetMinutesOfHour"), "Error message should contain user-friendly field name 'offsetMinutesOfHour', but was: $message")
++    }
++
++    @Test
++    fun testOffsetSecondsOfMinuteErrorMessage() {
++        val format = DateTimeComponents.Format {
++            offsetSecondsOfMinute()
++        }
++        
++        val exception = assertFailsWith<IllegalStateException> {
++            format.format {
++                // Note: offset is NOT set intentionally to trigger the error
++            }
++        }
++        
++        val message = exception.message ?: fail("Exception should have a message")
++        // The error message should mention "offsetSecondsOfMinute", not "secondsOfMinute"
++        assertTrue(message.contains("offsetSecondsOfMinute"), "Error message should contain user-friendly field name 'offsetSecondsOfMinute', but was: $message")
++    }
++
++    @Test
++    fun testFormatWorksWhenOffsetIsSet() {
++        val format = DateTimeComponents.Format {
++            year()
++            char('-')
++            monthNumber()
++            char('-')
++            dayOfMonth()
++            char(' ')
++            hour()
++            char(':')
++            minute()
++            char(':')
++            second()
++            char(' ')
++            offsetHours()
++            char(':')
++            offsetMinutesOfHour()
++            optional {
++                char(':')
++                offsetSecondsOfMinute()
++            }
++        }
++        
++        // Format with offset properly set - should succeed
++        val result = format.format {
++            setDateTime(LocalDateTime(2020, 3, 16, 23, 59, 59))
++            setOffset(UtcOffset(hours = 3))
++        }
++        
++        assertEquals("2020-03-16 23:59:59 +03:00", result)
++    }
++}
++

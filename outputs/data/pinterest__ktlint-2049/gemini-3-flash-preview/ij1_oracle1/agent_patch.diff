@@ -1,0 +1,120 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 8722a8cd..41bca5d2 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ 
+ ### Fixed
+ 
++* Do not merge annotated expression with function signature `function-signature` ([#2028](https://github.com/pinterest/ktlint/issues/2028))
+ * Do not flag a (potential) mutable extension property in case the getter is annotated or prefixed with a modifier `property-naming` ([#2024](https://github.com/pinterest/ktlint/issues/2024))
+ 
+ ### Changed
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+index 28a6ebc7..0fff7eb3 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+@@ -1,5 +1,6 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATED_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
+@@ -28,6 +29,8 @@ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPE
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY_OFF
+ import com.pinterest.ktlint.rule.engine.core.api.indent
++import com.pinterest.ktlint.rule.engine.core.api.isPartOf
++import com.pinterest.ktlint.rule.engine.core.api.isPartOfComment
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpace
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+ import com.pinterest.ktlint.rule.engine.core.api.nextCodeLeaf
+@@ -238,6 +241,14 @@ public class FunctionSignatureRule :
+             .orEmpty()
+             .any { it.elementType == ANNOTATION_ENTRY }
+ 
++    private fun ASTNode.isBodyExpressionAnnotated(functionBodyExpressionNodes: List<ASTNode>): Boolean {
++        return functionBodyExpressionNodes
++            .dropWhile { it.isWhiteSpace() || it.isPartOfComment() }
++            .firstOrNull()
++            ?.let { it.isPartOf(ANNOTATION_ENTRY) || it.isPartOf(ANNOTATION) }
++            ?: false
++    }
++
+     private fun calculateFunctionSignatureLengthAsSingleLineSignature(
+         node: ASTNode,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+@@ -541,7 +552,9 @@ public class FunctionSignatureRule :
+             ?.also { firstLineOfBodyExpression ->
+                 if (whiteSpaceBeforeFunctionBodyExpression.isWhiteSpaceWithNewline()) {
+                     val mergeWithFunctionSignature =
+-                        if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression) {
++                        if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression &&
++                            !node.isBodyExpressionAnnotated(functionBodyExpressionNodes)
++                        ) {
+                             functionBodyExpressionWrapping == default ||
+                                 (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||
+                                 node.isMultilineFunctionSignatureWithoutExplicitReturnType(
+@@ -569,7 +582,7 @@ public class FunctionSignatureRule :
+                         if (whiteSpaceBeforeFunctionBodyExpression == null ||
+                             whiteSpaceBeforeFunctionBodyExpression.text != " "
+                         ) {
+-                            emit(
++emit(
+                                 functionBodyExpressionNodes.first().startOffset,
+                                 "Single whitespace expected before expression body",
+                                 true,
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleReproductionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleReproductionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleReproductionTest.kt
+@@ -0,0 +1,39 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class FunctionSignatureRuleReproductionTest {
++    private val functionSignatureRuleAssertThat = assertThatRule { FunctionSignatureRule() }
++
++    @Test
++    fun `Do not merge annotated expression with function signature`() {
++        val code =
++            """
++            private fun getErrorMessage(value: String): String =
++                @Suppress("DEPRECATION")
++                customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT_ERROR_MESSAGE_WITH_NO_REASON, value)
++            """.trimIndent()
++        // The rule should NOT want to merge the expression with the signature if it starts with an annotation
++        functionSignatureRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.android)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Do not merge annotated expression with function signature even when preceded by a comment`() {
++        val code =
++            """
++            private fun getErrorMessage(value: String): String =
++                // some comment
++                @Suppress("DEPRECATION")
++                customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT_ERROR_MESSAGE_WITH_NO_REASON, value)
++            """.trimIndent()
++        functionSignatureRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.android)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

@@ -1,0 +1,186 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d6644ea4..3ab7bbda 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -247,6 +247,7 @@ Previously the default value for `.editorconfig` property `max_line_length` was
+ * When generating the `.editorconfig` use value `off` for the `max_line_length` property instead of value `-1` to denote that lines are not restricted to a maximum length ([#1824](https://github.com/pinterest/ktlint/issues/1824))
+ * Do not report an "unnecessary semicolon" after adding a trailing comma to an enum class containing a code element after the last enum entry `trailing-comma-on-declaration-site` ([#1786](https://github.com/pinterest/ktlint/issues/1786))
+ * A newline before a function return type should not be removed in case that leads to exceeding the maximum line length `function-return-type-spacing` ([#1764](https://github.com/pinterest/ktlint/issues/1764))
++* Fix `spacing-between-declarations-with-annotations` creating consecutive blank lines when there are multiple consecutive KDoc comments before an annotated declaration
+ * Wrap annotations on type arguments in same way as with other constructs `annotation`, `wrapping` ([#1725](https://github.com/pinterest/ktlint/issues/1725))
+ * Fix indentation of try-catch-finally when catch or finally starts on a newline `indent` ([#1788](https://github.com/pinterest/ktlint/issues/1788))
+ * Fix indentation of a multiline typealias `indent` ([#1788](https://github.com/pinterest/ktlint/issues/1788))
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRule.kt
+index bb30a5a7..0c1a6007 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRule.kt
+@@ -31,7 +31,8 @@ public class SpacingBetweenDeclarationsWithAnnotationsRule : StandardRule("spaci
+             val whiteSpaceAfterPreviousDeclaration = prevDeclaration?.nextSibling as? PsiWhiteSpace
+             val startOfDeclarationIncludingLeadingComment = node.psi.parent.getPrevLeafIgnoringCommentAndWhitespaceExceptBlankLines()
+             if (whiteSpaceAfterPreviousDeclaration?.text != null &&
+-                startOfDeclarationIncludingLeadingComment?.text?.count { it == '\n' } == 1
++                startOfDeclarationIncludingLeadingComment?.text?.count { it == '\n' } == 1 &&
++                !wouldCreateConsecutiveBlankLines(whiteSpaceAfterPreviousDeclaration)
+             ) {
+                 emit(
+                     node.startOffset,
+@@ -65,6 +66,48 @@ public class SpacingBetweenDeclarationsWithAnnotationsRule : StandardRule("spaci
+     }
+ 
+     private fun ASTNode.hasAnnotationsAsChildren(): Boolean = children().find { it.psi is KtAnnotationEntry } != null
++
++    /**
++     * Check if adding a blank line would create consecutive blank lines.
++     * This happens when there are multiple consecutive KDoc comments or similar structures.
++     */
++    private fun wouldCreateConsecutiveBlankLines(whiteSpaceElement: PsiWhiteSpace): Boolean {
++        // Start from the whitespace element and look at what follows
++        var currentElement = whiteSpaceElement.nextSibling
++        var commentCount = 0
++
++        // Count consecutive comments (especially KDoc comments)
++        while (currentElement != null) {
++            when (currentElement) {
++                is PsiComment -> {
++                    commentCount++
++                }
++                is PsiWhiteSpace -> {
++                    // If we encounter whitespace with blank lines between comments, that's a sign
++                    // that adding another blank line could create consecutive blank lines
++                    val newlines = currentElement.text.count { it == '\n' }
++                    if (commentCount > 0 && newlines > 1) {
++                        return true
++                    }
++                    // Continue if it's just a single newline with indentation
++                    if (newlines == 1) {
++                        // Continue to next element
++                    } else if (newlines > 1) {
++                        // Multiple newlines might indicate existing blank lines
++                        return commentCount > 1
++                    }
++                }
++                else -> {
++                    // We've reached a non-comment, non-whitespace element (likely annotation or declaration)
++                    break
++                }
++            }
++            currentElement = currentElement.nextSibling
++        }
++
++        // If we found multiple comments, adding a blank line might create consecutive blank lines
++        return commentCount >= 2
++    }
+ }
+ 
+ public val SPACING_BETWEEN_DECLARATIONS_WITH_ANNOTATIONS_RULE_ID: RuleId = SpacingBetweenDeclarationsWithAnnotationsRule().ruleId
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRuleTest.kt
+index bce05140..56c86507 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingBetweenDeclarationsWithAnnotationsRuleTest.kt
+@@ -204,4 +204,98 @@ class SpacingBetweenDeclarationsWithAnnotationsRuleTest {
+             """.trimIndent()
+         spacingBetweenDeclarationsWithAnnotationsRuleAssertThat(code).hasNoLintViolations()
+     }
++
++    @Test
++    fun `Issue - no blank line should be added before annotated declaration when there are consecutive KDoc comments`() {
++        val code =
++            """
++            public class JsonReader {
++                public var lenient: Boolean = false
++
++                /**
++                 * Hey
++                 */
++                /** Sup */
++                @get:JvmName("failOnUnknown")
++                public var failOnUnknown: Boolean = false
++            }
++            """.trimIndent()
++        // Should not add a blank line as it would create consecutive blank lines
++        spacingBetweenDeclarationsWithAnnotationsRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue reproduction - consecutive KDoc comments before annotated property should not trigger spacing rule`() {
++        val code =
++            """
++            public class JsonReader {
++                public var lenient: Boolean = false
++                /**
++                 * Hey
++                 */
++                /** Sup */
++                @get:JvmName("failOnUnknown")
++                public var failOnUnknown: Boolean = false
++            }
++            """.trimIndent()
++        // This should not add a blank line because it would create consecutive blank lines
++        // when combined with the no-consecutive-blank-lines rule
++        spacingBetweenDeclarationsWithAnnotationsRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue reproduction - exact scenario from bug report should not trigger spacing rule`() {
++        val code =
++            """
++            public class JsonReader {
++                public var lenient: Boolean = false
++                /**
++                 * True to throw a [JsonDataException] on any attempt to call [skipValue].
++                 *
++                 * ## Getting
++                 * Returns true if this parser forbids skipping names and values.
++                 *
++                 * ## Setting
++                 * Configure whether this parser throws a [JsonDataException] when [skipValue] is
++                 * called. By default this parser permits values to be skipped.
++                 *
++                 * Forbid skipping to prevent unrecognized values from being silently ignored. This option is
++                 * useful in development and debugging because it means a typo like "locatiom" will be detected
++                 * early. It's potentially harmful in production because it complicates revising a JSON schema.
++                 */
++                /** Returns true if this parser forbids skipping names and values. */
++                @get:JvmName("failOnUnknown")
++                public var failOnUnknown: Boolean = false
++            }
++            """.trimIndent()
++        // This should not add a blank line because it would create consecutive blank lines
++        spacingBetweenDeclarationsWithAnnotationsRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Normal case - should still add blank line when there is only one KDoc comment`() {
++        val code =
++            """
++            public class JsonReader {
++                public var lenient: Boolean = false
++                /** Single KDoc comment */
++                @get:JvmName("failOnUnknown")
++                public var failOnUnknown: Boolean = false
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            public class JsonReader {
++                public var lenient: Boolean = false
++
++                /** Single KDoc comment */
++                @get:JvmName("failOnUnknown")
++                public var failOnUnknown: Boolean = false
++            }
++            """.trimIndent()
++        // This should still add a blank line because there's only one comment
++        spacingBetweenDeclarationsWithAnnotationsRuleAssertThat(code)
++            .hasLintViolation(3, 5, "Declarations and declarations with annotations should have an empty space between.")
++            .isFormattedAs(formattedCode)
++    }
+ }
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

@@ -1,0 +1,150 @@
+diff --git a/kotlinx-coroutines-core/common/src/Delay.kt b/kotlinx-coroutines-core/common/src/Delay.kt
+index ba06d9778..cf5ccfd57 100644
+--- a/kotlinx-coroutines-core/common/src/Delay.kt
++++ b/kotlinx-coroutines-core/common/src/Delay.kt
+@@ -156,6 +156,15 @@ internal val CoroutineContext.delay: Delay get() = get(ContinuationInterceptor)
+ /**
+  * Convert this duration to its millisecond value.
+  * Positive durations are coerced at least `1`.
++ * Sub-millisecond components are rounded up to ensure delays are not shorter than expected.
+  */
+-internal fun Duration.toDelayMillis(): Long =
+-    if (this > Duration.ZERO) inWholeMilliseconds.coerceAtLeast(1) else 0
++internal fun Duration.toDelayMillis(): Long = if (this > Duration.ZERO) {
++    val millis = inWholeMilliseconds
++    if (millis * 1_000_000 < inWholeNanoseconds) {
++        // Has sub-millisecond components, round up
++        millis + 1
++    } else {
++        // No sub-millisecond components, use millis but ensure at least 1
++        millis.coerceAtLeast(1)
++    }
++} else 0
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/common/test/DelayDurationConversionTest.kt b/kotlinx-coroutines-core/common/test/DelayDurationConversionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/DelayDurationConversionTest.kt
+@@ -0,0 +1,107 @@
++/*
++ * Copyright 2016-2022 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines
++
++import kotlin.test.*
++import kotlin.time.*
++import kotlin.time.Duration.Companion.seconds
++import kotlin.time.Duration.Companion.milliseconds  
++import kotlin.time.Duration.Companion.nanoseconds
++
++/**
++ * Tests for the Duration.toDelayMillis() conversion function to ensure
++ * sub-millisecond components are properly rounded up.
++ */
++class DelayDurationConversionTest : TestBase() {
++
++    @Test
++    fun testSubMillisecondRounding() {
++        // Duration with sub-millisecond components should round up
++        val duration = 998.milliseconds + 902752.nanoseconds  // 998.902752ms
++        val result = duration.toDelayMillis()
++        assertEquals(999L, result, "998.902752ms should round up to 999ms")
++    }
++    
++    @Test  
++    fun testExactMilliseconds() {
++        // Exact milliseconds should not round up
++        val duration = 1000.milliseconds
++        val result = duration.toDelayMillis()
++        assertEquals(1000L, result, "1000ms should stay 1000ms")
++    }
++    
++    @Test
++    fun testSubMillisecondOnly() {
++        // Duration with only sub-millisecond components should round up to 1ms
++        val duration = 500.nanoseconds
++        val result = duration.toDelayMillis()  
++        assertEquals(1L, result, "500ns should round up to 1ms")
++    }
++    
++    @Test
++    fun testOneNanosecond() {
++        // Exactly 1 nanosecond should round up to 1ms  
++        val duration = 1.nanoseconds
++        val result = duration.toDelayMillis()
++        assertEquals(1L, result, "1ns should round up to 1ms")
++    }
++    
++    @Test
++    fun testZeroDuration() {
++        // Zero duration should return 0
++        val duration = Duration.ZERO
++        val result = duration.toDelayMillis()
++        assertEquals(0L, result, "Zero duration should return 0ms")
++    }
++    
++    @Test  
++    fun testNegativeDuration() {
++        // Negative duration should return 0
++        val duration = (-100).milliseconds
++        val result = duration.toDelayMillis()
++        assertEquals(0L, result, "Negative duration should return 0ms")
++    }
++    
++    @Test
++    fun testLargeSubMillisecondComponent() {
++        // 0.999999ms should round up to 1ms
++        val duration = 999999.nanoseconds  // 0.999999ms
++        val result = duration.toDelayMillis()
++        assertEquals(1L, result, "0.999999ms should round up to 1ms")
++    }
++    
++    @Test
++    fun testMultipleMillisecondsWithSubComponent() {
++        // 5.5ms should round up to 6ms
++        val duration = 5.milliseconds + 500000.nanoseconds  // 5.5ms
++        val result = duration.toDelayMillis()
++        assertEquals(6L, result, "5.5ms should round up to 6ms")
++    }
++    
++    @Test
++    fun testEdgeCaseOneNanosecondBelowWholeMillisecond() {
++        // 999.999999ms should round up to 1000ms
++        val duration = 999.milliseconds + 999999.nanoseconds  // 999.999999ms
++        val result = duration.toDelayMillis()  
++        assertEquals(1000L, result, "999.999999ms should round up to 1000ms")
++    }
++    
++    @Test
++    fun testBackwardsCompatibilityWithExistingBehavior() {
++        // Ensure existing behavior for exact milliseconds is preserved
++        val testCases = listOf(
++            1.milliseconds to 1L,
++            10.milliseconds to 10L, 
++            100.milliseconds to 100L,
++            1000.milliseconds to 1000L,
++            5000.milliseconds to 5000L
++        )
++        
++        for ((duration, expected) in testCases) {
++            val result = duration.toDelayMillis()
++            assertEquals(expected, result, "$duration should convert to ${expected}ms")
++        }
++    }
++}

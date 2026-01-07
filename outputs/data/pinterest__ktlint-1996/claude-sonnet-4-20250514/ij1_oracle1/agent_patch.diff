@@ -1,0 +1,135 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b7d5f5fd..fbed3cb1 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -15,6 +15,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ * Prevent nullpointer exception (NPE) if class without body is followed by multiple blank lines until end of file `no-consecutive-blank-lines` ([#1987](https://github.com/pinterest/ktlint/issues/1987))
+ * Allow to 'unset' the `.editorconfig` property `ktlint_function_signature_rule_force_multiline_when_parameter_count_greater_or_equal_than` when using `ktlint_official` code style `function-signature` ([#1977](https://github.com/pinterest/ktlint/issues/1977))
+ * Prevent nullpointer exception (NPE) if or operator at start of line is followed by dot qualified expression `indent` ([#1993](https://github.com/pinterest/ktlint/issues/1993))
++* Indentation rule consistently identifies issues with multiline string closing quotes between functions and properties `indent` ([#2145](https://github.com/pinterest/ktlint/issues/2145))
+ 
+ ### Changed
+ * Separated Baseline functionality out of `ktlint-cli` into separate `ktlint-baseline` module for API consumers
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index c802acac..245e8f2c 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -1263,6 +1263,14 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+                         node
+                             .indent(false)
+                             .plus(indentConfig.indent)
++                    } else if (node.isRawStringLiteralPropertyAssignment()) {
++                        // Allow:
++                        //   val foo = """
++                        //       some text
++                        //       """.trimIndent
++                        node
++                            .indent(false)
++                            .plus(indentConfig.indent)
+                     } else if (prevLeaf?.text == "\n") {
+                         // In case the opening quotes are placed at the start of the line, then the closing quotes
+                         // should have no indent as well.
+@@ -1336,6 +1344,14 @@ private class StringTemplateIndenter(private val indentConfig: IndentConfig) {
+ 
+     private fun ASTNode.isRawStringLiteralReturnInFunctionBodyBlock() = RETURN_KEYWORD == prevCodeLeaf()?.elementType
+ 
++    private fun ASTNode.isRawStringLiteralPropertyAssignment() =
++        (prevLeaf()?.elementType != WHITE_SPACE || prevLeaf()?.text == " ") &&
++            PROPERTY ==
++            prevCodeLeaf()
++                .takeIf { it?.elementType == EQ }
++                ?.treeParent
++                ?.elementType
++
+     /**
+      * Get the length of the indent which is shared by all lines inside the string template except for the indent of
+      * the closing quotes.
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
+index 8ba35fc2..a0d1b32c 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
+@@ -5148,6 +5148,76 @@ internal class IndentationRuleTest {
+             .isFormattedAs(formattedCode)
+     }
+ 
++    @Nested
++    inner class `Issue 2145 - Given multiline string closing quotes inconsistency between functions and properties` {
++        @Test
++        fun `Given a function expression with multiline string should report violation on closing quotes`() {
++            val code =
++                """
++                fun foo() = $MULTILINE_STRING_QUOTE
++                    <!--suppress XmlUnusedNamespaceDeclaration -->
++                    <manifest xmlns:android="http://schemas.android.com/apk/res/android"/>
++                $MULTILINE_STRING_QUOTE.trimIndent()
++                """.trimIndent()
++            val formattedCode =
++                """
++                fun foo() = $MULTILINE_STRING_QUOTE
++                    <!--suppress XmlUnusedNamespaceDeclaration -->
++                    <manifest xmlns:android="http://schemas.android.com/apk/res/android"/>
++                    $MULTILINE_STRING_QUOTE.trimIndent()
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .hasLintViolation(4, 1, "Unexpected indent of multiline string closing quotes")
++                .isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given a function with return statement and multiline string should report violation on closing quotes`() {
++            val code =
++                """
++                fun foo2(): String {
++                    return $MULTILINE_STRING_QUOTE
++                        <!--suppress XmlUnusedNamespaceDeclaration -->
++                        <manifest xmlns:android="http://schemas.android.com/apk/res/android"/>
++                    $MULTILINE_STRING_QUOTE.trimIndent()
++                }
++                """.trimIndent()
++            val formattedCode =
++                """
++                fun foo2(): String {
++                    return $MULTILINE_STRING_QUOTE
++                        <!--suppress XmlUnusedNamespaceDeclaration -->
++                        <manifest xmlns:android="http://schemas.android.com/apk/res/android"/>
++                        $MULTILINE_STRING_QUOTE.trimIndent()
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .hasLintViolation(5, 1, "Unexpected indent of multiline string closing quotes")
++                .isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given a property with multiline string should consistently report violation on closing quotes`() {
++            val code =
++                """
++                val foo = $MULTILINE_STRING_QUOTE
++                    <!--suppress XmlUnusedNamespaceDeclaration -->
++                    <manifest xmlns:android="http://schemas.android.com/apk/res/android"/>
++                $MULTILINE_STRING_QUOTE.trimIndent()
++                """.trimIndent()
++            val formattedCode =
++                """
++                val foo = $MULTILINE_STRING_QUOTE
++                    <!--suppress XmlUnusedNamespaceDeclaration -->
++                    <manifest xmlns:android="http://schemas.android.com/apk/res/android"/>
++                    $MULTILINE_STRING_QUOTE.trimIndent()
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .hasLintViolation(4, 1, "Unexpected indent of multiline string closing quotes")
++                .isFormattedAs(formattedCode)
++        }
++    }
++
+     private companion object {
+         val INDENT_STYLE_TAB =
+             INDENT_STYLE_PROPERTY to PropertyType.IndentStyleValue.tab
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

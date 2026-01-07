@@ -1,0 +1,118 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+index dbed1796..f70df34e 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+@@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.LAMBDA_ARGUMENT
+@@ -20,11 +21,13 @@ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPE
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf
+ import com.pinterest.ktlint.rule.engine.core.api.indent
++import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+ import com.pinterest.ktlint.rule.engine.core.api.leavesOnLine
+ import com.pinterest.ktlint.rule.engine.core.api.nextCodeSibling
+ import com.pinterest.ktlint.rule.engine.core.api.nextSibling
+ import com.pinterest.ktlint.rule.engine.core.api.noNewLineInClosedRange
+ import com.pinterest.ktlint.rule.engine.core.api.parent
++import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevSibling
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceBeforeMe
+ import com.pinterest.ktlint.ruleset.standard.StandardRule
+@@ -118,10 +121,23 @@ public class BinaryExpressionWrappingRule :
+                 binaryExpression.parent { it.elementType == LONG_STRING_TEMPLATE_ENTRY } == null
+             }?.takeIf { it.isOnLineExceedingMaxLineLength() }
+             ?.let { operationReference ->
+-                if (node.isCallExpressionFollowedByLambdaArgument() || cannotBeWrappedAtOperationReference(operationReference)) {
++                val isElvisOperator = operationReference.firstChildNode.elementType == ELVIS
++                if (node.isCallExpressionFollowedByLambdaArgument() ||
++                    (!isElvisOperator && cannotBeWrappedAtOperationReference(operationReference)) ||
++                    (isElvisOperator && operationReference.prevLeaf()?.isWhiteSpaceWithNewline() == true)
++                ) {
+                     // Wrapping after operation reference might not be the best place in case of a call expression or just won't work as
+                     // the left hand side still does not fit on a single line
+                     emit(operationReference.startOffset, "Line is exceeding max line length", false)
++                } else if (isElvisOperator) {
++                    emit(
++                        operationReference.startOffset,
++                        "Line is exceeding max line length. Break line before operator in binary expression",
++                        true,
++                    )
++                    if (autoCorrect) {
++                        operationReference.upsertWhitespaceBeforeMe(node.indent().plus(indentConfig.indent))
++                    }
+                 } else {
+                     operationReference
+                         .nextSibling()
+@@ -136,6 +152,7 @@ public class BinaryExpressionWrappingRule :
+                             }
+                         }
+                 }
++                Unit
+             }
+     }
+ 
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
+index c8e3a9f7..900f2811 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
+@@ -213,7 +213,7 @@ class BinaryExpressionWrappingRuleTest {
+             .setMaxLineLength()
+             .hasLintViolationsWithoutAutoCorrect(
+                 LintViolation(2, 12, "Line is exceeding max line length. Break line between assignment and expression"),
+-                LintViolation(2, 20, "Line is exceeding max line length. Break line after operator in binary expression"),
++                LintViolation(2, 18, "Line is exceeding max line length. Break line before operator in binary expression"),
+                 LintViolation(2, 36, "Line is exceeding max line length"),
+             )
+     }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleElvisTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleElvisTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleElvisTest.kt
+@@ -0,0 +1,32 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.EOL_CHAR
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.MAX_LINE_LENGTH_MARKER
++import org.junit.jupiter.api.Test
++
++class BinaryExpressionWrappingRuleElvisTest {
++    private val binaryExpressionWrappingRuleAssertThat = KtLintAssertThat.assertThatRule { BinaryExpressionWrappingRule() }
++
++    @Test
++    fun `Issue 2133 - Endless loop in wrapping binary expression after elvis operator`() {
++        val code =
++            """
++            // $MAX_LINE_LENGTH_MARKER                                  $EOL_CHAR
++            val foo = bar ?: throw UnsupportedOperationException("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
++            """.trimIndent()
++        val formattedCode =
++            """
++            // $MAX_LINE_LENGTH_MARKER                                  $EOL_CHAR
++            val foo =
++                bar
++                    ?: throw UnsupportedOperationException("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
++            """.trimIndent()
++        // This test case only checks BinaryExpressionWrappingRule in isolation.
++        // It verifies that it now wraps BEFORE the elvis operator, which prevents the loop with ChainWrappingRule.
++        binaryExpressionWrappingRuleAssertThat(code)
++            .setMaxLineLength()
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

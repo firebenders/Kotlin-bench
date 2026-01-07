@@ -1,0 +1,100 @@
+diff --git a/kotlinx-coroutines-core/common/src/EventLoop.common.kt b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+index 6bfcbf0cb..8622cf856 100644
+--- a/kotlinx-coroutines-core/common/src/EventLoop.common.kt
++++ b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+@@ -259,17 +259,7 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+         val delayed = _delayed.value
+         if (delayed != null && !delayed.isEmpty) {
+             val now = nanoTime()
+-            while (true) {
+-                // make sure that moving from delayed to queue removes from delayed only after it is added to queue
+-                // to make sure that 'isEmpty' and `nextTime` that check both of them
+-                // do not transiently report that both delayed and queue are empty during move
+-                delayed.removeFirstIf {
+-                    if (it.timeToExecute(now)) {
+-                        enqueueImpl(it)
+-                    } else
+-                        false
+-                } ?: break // quit loop when nothing more to remove or enqueueImpl returns false on "isComplete"
+-            }
++            enqueueDelayedTasks(delayed, now)
+         }
+         // then process one event from queue
+         val task = dequeue()
+@@ -280,6 +270,41 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+         return nextTime
+     }
+ 
++    override fun dispatchYield(context: CoroutineContext, block: Runnable) {
++        // 
++        // `yield()` is supposed to give already-resumable coroutines a chance to run.
++        // For [EventLoop], delayed resumption tasks live in a separate heap and are moved into
++        // the main FIFO queue only during [processNextEvent].
++        //
++        // Without this extra step, a `yield()` continuation can end up in the FIFO queue *ahead* of
++        // already-due delayed tasks, causing `yield()` to resume immediately.
++        //
++        val delayed = _delayed.value
++        if (delayed != null && !delayed.isEmpty) {
++            val now = nanoTime()
++            // If the earliest delayed task is due, move due delayed tasks to the main queue first.
++            if (delayed.peek()?.timeToExecute(now) == true) {
++                enqueueDelayedTasks(delayed, now)
++            }
++        }
++        enqueue(block)
++    }
++
++    private fun enqueueDelayedTasks(delayed: DelayedTaskQueue, now: Long) {
++        while (true) {
++            // make sure that moving from delayed to queue removes from delayed only after it is added to queue
++            // to make sure that 'isEmpty' and `nextTime` that check both of them
++            // do not transiently report that both delayed and queue are empty during move
++            delayed.removeFirstIf {
++                if (it.timeToExecute(now)) {
++                    enqueueImpl(it)
++                } else {
++                    false
++                }
++            } ?: break // quit loop when nothing more to remove or enqueueImpl returns false on "isComplete"
++        }
++    }
++
+     final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
+ 
+     open fun enqueue(task: Runnable) {
+
+diff --git a/kotlinx-coroutines-core/jvm/test/EventLoopYieldAfterDelayTest.kt b/kotlinx-coroutines-core/jvm/test/EventLoopYieldAfterDelayTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/EventLoopYieldAfterDelayTest.kt
+@@ -0,0 +1,29 @@
++package kotlinx.coroutines
++
++import kotlinx.coroutines.testing.*
++import org.junit.Test
++import kotlin.test.*
++
++class EventLoopYieldAfterDelayTest : TestBase() {
++
++    @Test
++    fun testYieldProcessesAlreadyDueDelayedTasksFirst() = runBlocking {
++        val events = ArrayList<String>()
++
++        val job = launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1)
++            events += "first"
++        }
++
++        // Block the event-loop thread long enough for the delay to expire,
++        // so the delayed continuation is ready but still sits in the delayed heap.
++        Thread.sleep(50)
++
++        yield()
++        events += "second"
++
++        job.join()
++        assertEquals(listOf("first", "second"), events)
++    }
++}
++

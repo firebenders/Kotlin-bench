@@ -1,0 +1,309 @@
+diff --git a/core/common/src/DateTimePeriod.kt b/core/common/src/DateTimePeriod.kt
+index f9b2d3f..d8b2972 100644
+--- a/core/common/src/DateTimePeriod.kt
++++ b/core/common/src/DateTimePeriod.kt
+@@ -264,6 +264,8 @@ public sealed class DateTimePeriod {
+                 if (i >= text.length) {
+                     if (state == START)
+                         parseException("Unexpected end of input; 'P' designator is required", i)
++                    if (state == AFTER_P)
++                        parseException("Unexpected end of input; at least one component is required after 'P'", i)
+                     if (state == AFTER_T)
+                         parseException("Unexpected end of input; at least one time component is required after 'T'", i)
+                     val daysTotal = when (val n = days.toLong() + weeks * 7) {
+diff --git a/core/commonJs/src/LocalDate.kt b/core/commonJs/src/LocalDate.kt
+index a650665..7a22479 100644
+--- a/core/commonJs/src/LocalDate.kt
++++ b/core/commonJs/src/LocalDate.kt
+@@ -18,16 +18,7 @@ public actual class LocalDate internal constructor(internal val value: jtLocalDa
+         public actual fun parse(
+             input: CharSequence,
+             format: DateTimeFormat<LocalDate>
+-        ): LocalDate = if (format === Formats.ISO) {
+-            try {
+-                jsTry { jtLocalDate.parse(input.toString()) }.let(::LocalDate)
+-            } catch (e: Throwable) {
+-                if (e.isJodaDateTimeParseException()) throw DateTimeFormatException(e)
+-                throw e
+-            }
+-        } else {
+-            format.parse(input)
+-        }
++        ): LocalDate = format.parse(input)
+ 
+         @Deprecated("This overload is only kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+         public fun parse(isoString: String): LocalDate = parse(input = isoString)
+diff --git a/core/commonJs/src/LocalDateTime.kt b/core/commonJs/src/LocalDateTime.kt
+index c85e772..59801c2 100644
+--- a/core/commonJs/src/LocalDateTime.kt
++++ b/core/commonJs/src/LocalDateTime.kt
+@@ -55,16 +55,7 @@ public actual class LocalDateTime internal constructor(internal val value: jtLoc
+ 
+     public actual companion object {
+         public actual fun parse(input: CharSequence, format: DateTimeFormat<LocalDateTime>): LocalDateTime =
+-            if (format === Formats.ISO) {
+-                try {
+-                    jsTry { jtLocalDateTime.parse(input.toString()) }.let(::LocalDateTime)
+-                } catch (e: Throwable) {
+-                    if (e.isJodaDateTimeParseException()) throw DateTimeFormatException(e)
+-                    throw e
+-                }
+-            } else {
+-                format.parse(input)
+-            }
++            format.parse(input)
+ 
+         @Deprecated("This overload is only kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+         public fun parse(isoString: String): LocalDateTime = parse(input = isoString)
+diff --git a/core/jvm/src/LocalDate.kt b/core/jvm/src/LocalDate.kt
+index fe3b9ae..e3d4fc7 100644
+--- a/core/jvm/src/LocalDate.kt
++++ b/core/jvm/src/LocalDate.kt
+@@ -12,7 +12,6 @@ import kotlinx.datetime.internal.*
+ import kotlinx.datetime.serializers.LocalDateIso8601Serializer
+ import kotlinx.serialization.Serializable
+ import java.time.DateTimeException
+-import java.time.format.DateTimeParseException
+ import java.time.temporal.ChronoUnit
+ import java.time.LocalDate as jtLocalDate
+ 
+@@ -20,15 +19,7 @@ import java.time.LocalDate as jtLocalDate
+ public actual class LocalDate internal constructor(internal val value: jtLocalDate) : Comparable<LocalDate> {
+     public actual companion object {
+         public actual fun parse(input: CharSequence, format: DateTimeFormat<LocalDate>): LocalDate =
+-            if (format === Formats.ISO) {
+-                try {
+-                    jtLocalDate.parse(input).let(::LocalDate)
+-                } catch (e: DateTimeParseException) {
+-                    throw DateTimeFormatException(e)
+-                }
+-            } else {
+-                format.parse(input)
+-            }
++            format.parse(input)
+ 
+         @Deprecated("This overload is only kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+         public fun parse(isoString: String): LocalDate = parse(input = isoString)
+diff --git a/core/jvm/src/LocalDateTime.kt b/core/jvm/src/LocalDateTime.kt
+index 7dc28cd..c9fca67 100644
+--- a/core/jvm/src/LocalDateTime.kt
++++ b/core/jvm/src/LocalDateTime.kt
+@@ -9,7 +9,6 @@ import kotlinx.datetime.format.*
+ import kotlinx.datetime.serializers.LocalDateTimeIso8601Serializer
+ import kotlinx.serialization.Serializable
+ import java.time.DateTimeException
+-import java.time.format.DateTimeParseException
+ import java.time.LocalDateTime as jtLocalDateTime
+ 
+ public actual typealias Month = java.time.Month
+@@ -58,15 +57,7 @@ public actual class LocalDateTime internal constructor(internal val value: jtLoc
+ 
+     public actual companion object {
+         public actual fun parse(input: CharSequence, format: DateTimeFormat<LocalDateTime>): LocalDateTime =
+-            if (format === Formats.ISO) {
+-                try {
+-                    jtLocalDateTime.parse(input).let(::LocalDateTime)
+-                } catch (e: DateTimeParseException) {
+-                    throw DateTimeFormatException(e)
+-                }
+-            } else {
+-                format.parse(input)
+-            }
++            format.parse(input)
+ 
+         @Deprecated("This overload is only kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+         public fun parse(isoString: String): LocalDateTime = parse(input = isoString)
+
+diff --git a/core/common/test/BugfixTest.kt b/core/common/test/BugfixTest.kt
+new file mode 100644
+--- /dev/null
++++ b/core/common/test/BugfixTest.kt
+@@ -0,0 +1,188 @@
++/*
++ * Copyright 2019-2024 JetBrains s.r.o.
++ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
++ */
++
++package kotlinx.datetime.test
++
++import kotlinx.datetime.*
++import kotlin.test.*
++
++/**
++ * Tests for bug fixes related to ISO 8601 parsing consistency issues.
++ * 
++ * See https://gist.github.com/ilma4/a5ad5b5c284969e24f4e2149a2f8b273 for the original bug report.
++ */
++class BugfixTest {
++
++    /**
++     * Test that LocalDate.parse() and LocalDate.Formats.ISO.parse() produce the same results,
++     * including for dates with many leading zeroes like "+00000000000002022-07-16".
++     * 
++     * Previously, LocalDate.parse() on JVM/JS delegated to Java's parsing, which doesn't support
++     * too many leading zeroes, while Formats.ISO.parse() used Kotlin's own parsing which does.
++     * 
++     * Note: According to ISO 8601, the '+' sign is only used for years exceeding 4 digits.
++     * So "+2022" is invalid, but "+02022" (5 digits) and "+00000002022" (11 digits) are valid.
++     */
++    @Test
++    fun localDateParseConsistency() {
++        // Test cases without leading sign (standard 4-digit years)
++        val standardCases = listOf(
++            "2022-07-16" to LocalDate(2022, 7, 16),
++            "0001-01-01" to LocalDate(1, 1, 1),
++            "9999-12-31" to LocalDate(9999, 12, 31),
++        )
++
++        for ((input, expected) in standardCases) {
++            val parsedDefault = LocalDate.parse(input)
++            val parsedFormat = LocalDate.Formats.ISO.parse(input)
++            
++            assertEquals(expected, parsedDefault, "LocalDate.parse('$input') should equal expected")
++            assertEquals(expected, parsedFormat, "LocalDate.Formats.ISO.parse('$input') should equal expected")
++            assertEquals(parsedDefault, parsedFormat, "LocalDate.parse('$input') should equal Formats.ISO.parse('$input')")
++        }
++
++        // Test cases with '+' sign and more than 4 digits (including leading zeros)
++        // The '+' sign is required when year has >4 digits according to ISO 8601
++        val extendedYearCases = listOf(
++            "+02022-07-16" to LocalDate(2022, 7, 16),        // 5 digits
++            "+002022-07-16" to LocalDate(2022, 7, 16),       // 6 digits
++            "+0002022-07-16" to LocalDate(2022, 7, 16),      // 7 digits
++            "+00002022-07-16" to LocalDate(2022, 7, 16),     // 8 digits
++            "+000002022-07-16" to LocalDate(2022, 7, 16),    // 9 digits
++            "+0000002022-07-16" to LocalDate(2022, 7, 16),   // 10 digits
++            "+00000002022-07-16" to LocalDate(2022, 7, 16),  // 11 digits
++            "+000000002022-07-16" to LocalDate(2022, 7, 16), // 12 digits
++            "+00000000000002022-07-16" to LocalDate(2022, 7, 16), // many digits
++            "+10000-01-01" to LocalDate(10000, 1, 1),        // year 10000
++            "+123456-01-01" to LocalDate(123456, 1, 1),      // large year
++        )
++
++        for ((input, expected) in extendedYearCases) {
++            val parsedDefault = LocalDate.parse(input)
++            val parsedFormat = LocalDate.Formats.ISO.parse(input)
++            
++            assertEquals(expected, parsedDefault, "LocalDate.parse('$input') should equal expected")
++            assertEquals(expected, parsedFormat, "LocalDate.Formats.ISO.parse('$input') should equal expected")
++            assertEquals(parsedDefault, parsedFormat, "LocalDate.parse('$input') should equal Formats.ISO.parse('$input')")
++        }
++
++        // Negative years
++        val negativeCases = listOf(
++            "-0001-01-01" to LocalDate(-1, 1, 1),
++            "-9999-12-31" to LocalDate(-9999, 12, 31),
++            "-10000-01-01" to LocalDate(-10000, 1, 1),
++        )
++
++        for ((input, expected) in negativeCases) {
++            val parsedDefault = LocalDate.parse(input)
++            val parsedFormat = LocalDate.Formats.ISO.parse(input)
++            
++            assertEquals(expected, parsedDefault, "LocalDate.parse('$input') should equal expected")
++            assertEquals(expected, parsedFormat, "LocalDate.Formats.ISO.parse('$input') should equal expected")
++            assertEquals(parsedDefault, parsedFormat, "LocalDate.parse('$input') should equal Formats.ISO.parse('$input')")
++        }
++    }
++
++    /**
++     * Test that LocalDateTime.parse() and LocalDateTime.Formats.ISO.parse() produce the same results,
++     * including for dates with many leading zeroes.
++     * 
++     * Note: According to ISO 8601, the '+' sign is only used for years exceeding 4 digits.
++     */
++    @Test
++    fun localDateTimeParseConsistency() {
++        // Standard cases
++        val standardCases = listOf(
++            "2022-07-16T12:30:45" to LocalDateTime(2022, 7, 16, 12, 30, 45),
++            "0001-01-01T00:00:00" to LocalDateTime(1, 1, 1, 0, 0, 0),
++        )
++
++        for ((input, expected) in standardCases) {
++            val parsedDefault = LocalDateTime.parse(input)
++            val parsedFormat = LocalDateTime.Formats.ISO.parse(input)
++            
++            assertEquals(expected, parsedDefault, "LocalDateTime.parse('$input') should equal expected")
++            assertEquals(expected, parsedFormat, "LocalDateTime.Formats.ISO.parse('$input') should equal expected")
++            assertEquals(parsedDefault, parsedFormat, "LocalDateTime.parse('$input') should equal Formats.ISO.parse('$input')")
++        }
++
++        // Extended year cases (>4 digits with leading zeros)
++        val extendedYearCases = listOf(
++            "+02022-07-16T12:30:45" to LocalDateTime(2022, 7, 16, 12, 30, 45),
++            "+002022-07-16T12:30:45" to LocalDateTime(2022, 7, 16, 12, 30, 45),
++            "+0002022-07-16T12:30:45" to LocalDateTime(2022, 7, 16, 12, 30, 45),
++            "+00002022-07-16T12:30:45" to LocalDateTime(2022, 7, 16, 12, 30, 45),
++            "+00000000000002022-07-16T12:30:45" to LocalDateTime(2022, 7, 16, 12, 30, 45),
++            "+10000-01-01T00:00:00" to LocalDateTime(10000, 1, 1, 0, 0, 0),
++        )
++
++        for ((input, expected) in extendedYearCases) {
++            val parsedDefault = LocalDateTime.parse(input)
++            val parsedFormat = LocalDateTime.Formats.ISO.parse(input)
++            
++            assertEquals(expected, parsedDefault, "LocalDateTime.parse('$input') should equal expected")
++            assertEquals(expected, parsedFormat, "LocalDateTime.Formats.ISO.parse('$input') should equal expected")
++            assertEquals(parsedDefault, parsedFormat, "LocalDateTime.parse('$input') should equal Formats.ISO.parse('$input')")
++        }
++    }
++
++    /**
++     * Test that DateTimePeriod.parse("P") fails with an appropriate error.
++     * According to ISO 8601, a period must have at least one component after "P".
++     */
++    @Test
++    fun dateTimePeriodParseEmptyP() {
++        // Just "P" without any components should fail
++        assertFailsWith<DateTimeFormatException> { DateTimePeriod.parse("P") }
++        
++        // Just "+P" without any components should fail
++        assertFailsWith<DateTimeFormatException> { DateTimePeriod.parse("+P") }
++        
++        // Just "-P" without any components should fail
++        assertFailsWith<DateTimeFormatException> { DateTimePeriod.parse("-P") }
++    }
++
++    /**
++     * Test that DatePeriod.parse("P") also fails appropriately.
++     */
++    @Test
++    fun datePeriodParseEmptyP() {
++        // Just "P" without any components should fail
++        assertFailsWith<DateTimeFormatException> { DatePeriod.parse("P") }
++        
++        // Just "+P" without any components should fail
++        assertFailsWith<DateTimeFormatException> { DatePeriod.parse("+P") }
++        
++        // Just "-P" without any components should fail
++        assertFailsWith<DateTimeFormatException> { DatePeriod.parse("-P") }
++    }
++
++    /**
++     * Test that "PT" (P followed by T but no time components) still fails appropriately.
++     */
++    @Test
++    fun dateTimePeriodParsePTWithoutTimeComponents() {
++        // "PT" without time components should fail
++        assertFailsWith<DateTimeFormatException> { DateTimePeriod.parse("PT") }
++    }
++
++    /**
++     * Test that valid period strings still parse correctly.
++     */
++    @Test
++    fun dateTimePeriodParseValidStrings() {
++        // These should all still work
++        assertEquals(DateTimePeriod(days = 0), DateTimePeriod.parse("P0D"))
++        assertEquals(DateTimePeriod(years = 1), DateTimePeriod.parse("P1Y"))
++        assertEquals(DateTimePeriod(months = 1), DateTimePeriod.parse("P1M"))
++        assertEquals(DateTimePeriod(days = 1), DateTimePeriod.parse("P1D"))
++        assertEquals(DateTimePeriod(hours = 1), DateTimePeriod.parse("PT1H"))
++        assertEquals(DateTimePeriod(minutes = 1), DateTimePeriod.parse("PT1M"))
++        assertEquals(DateTimePeriod(seconds = 1), DateTimePeriod.parse("PT1S"))
++        assertEquals(DateTimePeriod(years = 1, months = 2, days = 3, hours = 4, minutes = 5, seconds = 6), 
++            DateTimePeriod.parse("P1Y2M3DT4H5M6S"))
++    }
++}
++

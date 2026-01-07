@@ -1,0 +1,729 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 18caaa55..01410f23 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ 
+ WARNING: This version on KtLint contains a number of breaking changes in KtLint CLI and KtLint API. If you are using KtLint with custom ruleset jars or custom reporter jars, then those need to be upgrade before you can use them with this version of ktlint. Please contact the maintainers of those jars and ask them to upgrade a.s.a.p.
+ 
++### Changed
++
++- Wrap annotations before class constructor when code style `ktlint_official` is used ([#Issue](https://github.com/pinterest/ktlint/issues/XXXX))
++- Improve annotation wrapping on type projections when code style `ktlint_official` is used ([#Issue](https://github.com/pinterest/ktlint/issues/XXXX))
++
+ All rule id's in the output of Ktlint are now prefixed with a rule set. Although KtLint currently supports standard rules to be unqualified, users are encouraged to migrate to include the rule set id in all references to rules. This includes following:
+ - The `--disabled-rules` parameter in KtLint CLI and `.editorconfig`.
+ - The `source` element in the KtLint CLI `baseline.xml` file. Regenerating this file, fixes all rule references automatically.
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+index bdddca08..6274019e 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+@@ -6,6 +6,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE_ANNOTATION_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIMARY_CONSTRUCTOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PROJECTION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT
+@@ -18,6 +19,7 @@ import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRu
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.children
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
+@@ -190,6 +192,40 @@ public class AnnotationRule :
+                 }
+             }
+ 
++            // Special handling for constructor annotations in ktlint_official style
++            if (codeStyle == CodeStyleValue.ktlint_official &&
++                node.isAnnotationBeforeConstructor()
++            ) {
++                // Force wrapping if this annotation is on the same line as the constructor
++                if (node.isOnSameLineAsAnnotatedConstruct() && node.isLastAnnotationEntry()) {
++                    emit(
++                        node.startOffset,
++                        "Annotations should be placed on separate lines before the constructor",
++                        true,
++                    )
++                    if (autoCorrect) {
++                        node
++                            .lastChildLeafOrSelf()
++                            .nextCodeLeaf()
++                            ?.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                    }
++                }
++
++                // Force wrapping between multiple annotations before constructor
++                if (node.isPrecededByOtherAnnotationEntryOnTheSameLine()) {
++                    emit(
++                        node.startOffset,
++                        "Annotations should be placed on separate lines before the constructor",
++                        true,
++                    )
++                    if (autoCorrect) {
++                        node
++                            .firstChildLeafOrSelf()
++                            .upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                    }
++                }
++            }
++
+             node.typeProjectionOrNull()
+                 ?.prevCodeLeaf()
+                 ?.let { startOfList ->
+@@ -209,6 +245,30 @@ public class AnnotationRule :
+                                 )
+                         }
+                     }
++
++                    // Enhanced wrapping for ktlint_official style
++                    if (codeStyle == CodeStyleValue.ktlint_official && node.shouldWrapTypeProjectionAnnotations()) {
++                        // For ktlint_official, also wrap annotations with parameters in type projections
++                        if (node.isAnnotationEntryWithValueArgumentList() &&
++                            node.isFollowedByOtherAnnotationEntry() &&
++                            node.isOnSameLineAsNextAnnotationEntry()
++                        ) {
++                            emit(
++                                node.startOffset,
++                                "Annotation with parameter(s) should be placed on a separate line prior to the annotated construct",
++                                true,
++                            )
++                            if (autoCorrect) {
++                                node
++                                    .lastChildLeafOrSelf()
++                                    .nextLeaf()
++                                    ?.upsertWhitespaceBeforeMe(
++                                        getNewlineWithIndent(node.treeParent).plus(indentConfig.indent)
++                                    )
++                            }
++                        }
++                    }
++
+                     if (node.isPrecededByOtherAnnotationEntryOnTheSameLine() &&
+                         node.isLastAnnotationEntry()
+                     ) {
+@@ -254,6 +314,47 @@ public class AnnotationRule :
+             ?.takeIf { it.treeParent.elementType == TYPE_PROJECTION }
+             ?.treeParent
+ 
++    private fun ASTNode.isAnnotationBeforeConstructor(): Boolean {
++        if (elementType != ANNOTATION_ENTRY) return false
++
++        // Check if this annotation is in a modifier list that is followed by a constructor
++        val modifierList =
++            if (treeParent.elementType == MODIFIER_LIST) {
++                treeParent
++            } else {
++                return false
++            }
++
++        // Find the next code leaf after the modifier list
++        val nextCodeElement = modifierList.lastChildLeafOrSelf().nextCodeLeaf()
++        return nextCodeElement?.elementType == PRIMARY_CONSTRUCTOR ||
++               nextCodeElement?.treeParent?.elementType == PRIMARY_CONSTRUCTOR
++    }
++
++    /**
++     * Determines if type argument list contains complex annotations that require wrapping in ktlint_official style.
++     * Returns false if the list contains only simple single annotations without parameters.
++     */
++    private fun ASTNode.shouldWrapTypeProjectionAnnotations(): Boolean {
++        val typeProjection = typeProjectionOrNull() ?: return false
++
++        // Find the type argument list
++        val typeArgumentList = typeProjection.treeParent
++
++        // Check if any annotation in the type argument list has parameters or multiple annotations
++        return typeArgumentList.children()
++            .filter { it.elementType == TYPE_PROJECTION }
++            .any { projection ->
++                val modifierList = projection.children().firstOrNull { it.elementType == MODIFIER_LIST }
++                modifierList?.children()
++                    ?.filter { it.elementType == ANNOTATION_ENTRY }
++                    ?.let { annotations ->
++                        annotations.count() > 1 ||
++                        annotations.any { it.isAnnotationEntryWithValueArgumentList() }
++                    } ?: false
++            }
++    }
++
+     private fun ASTNode.isPrecededByAnnotationOnAnotherLine(): Boolean {
+         val firstAnnotation = treeParent.findChildByType(ANNOTATION_ENTRY)
+         return siblings(forward = false)
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTest.kt
+index 57c1aa1e..2b570201 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTest.kt
+@@ -1,5 +1,7 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue
+ import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
+ import com.pinterest.ktlint.test.LintViolation
+ import org.junit.jupiter.api.Nested
+@@ -14,8 +16,22 @@ class AnnotationRuleTest {
+             """
+             @FunctionalInterface class FooBar {
+                 @JvmField var foo: String
+-                @Test fun bar() {}
+-            }
++                @Test fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             """.trimIndent()
+         annotationRuleAssertThat(code).hasNoLintViolations()
+     }
+@@ -29,8 +45,22 @@ class AnnotationRuleTest {
+                 @JvmField
+                 var foo: String
+                 @Test
+-                fun bar() {}
+-            }
++                fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             """.trimIndent()
+         annotationRuleAssertThat(code).hasNoLintViolations()
+     }
+@@ -44,8 +74,22 @@ class AnnotationRuleTest {
+                 @Suppress("AnnotationRule") // some comment
+                 var foo: String
+                 @Suppress("AnnotationRule") // some comment
+-                fun bar() {}
+-            }
++                fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             """.trimIndent()
+         annotationRuleAssertThat(code).hasNoLintViolations()
+     }
+@@ -56,16 +100,58 @@ class AnnotationRuleTest {
+             """
+             @Suppress("AnnotationRule") class FooBar1 {
+                 @Suppress("AnnotationRule") var foo: String
+-                @Suppress("AnnotationRule") fun bar() {}
+-            }
++                @Suppress("AnnotationRule") fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             @Suppress("AnnotationRule") /* some comment */ class FooBar2 {
+                 @Suppress("AnnotationRule") /* some comment */ var foo: String
+-                @Suppress("AnnotationRule") /* some comment */ fun bar() {}
+-            }
++                @Suppress("AnnotationRule") /* some comment */ fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             @Suppress("AnnotationRule") /** some comment */ class FooBar3 {
+                 @Suppress("AnnotationRule") /** some comment */ var foo: String
+-                @Suppress("AnnotationRule") /** some comment */ fun bar() {}
+-            }
++                @Suppress("AnnotationRule") /** some comment */ fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             """.trimIndent()
+         val formattedCode =
+             """
+@@ -74,22 +160,64 @@ class AnnotationRuleTest {
+                 @Suppress("AnnotationRule")
+                 var foo: String
+                 @Suppress("AnnotationRule")
+-                fun bar() {}
+-            }
++                fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             @Suppress("AnnotationRule")
+             /* some comment */ class FooBar2 {
+                 @Suppress("AnnotationRule")
+                 /* some comment */ var foo: String
+                 @Suppress("AnnotationRule")
+-                /* some comment */ fun bar() {}
+-            }
++                /* some comment */ fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             @Suppress("AnnotationRule")
+             /** some comment */ class FooBar3 {
+                 @Suppress("AnnotationRule")
+                 /** some comment */ var foo: String
+                 @Suppress("AnnotationRule")
+-                /** some comment */ fun bar() {}
+-            }
++                /** some comment */ fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             """.trimIndent()
+         annotationRuleAssertThat(code)
+             .hasLintViolations(
+@@ -111,8 +239,22 @@ class AnnotationRuleTest {
+             """
+             @Foo @Bar class FooBar {
+                 @Foo @Bar var foo: String
+-                @Foo @Bar fun bar() {}
+-            }
++                @Foo @Bar fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             """.trimIndent()
+         val formattedCode =
+             """
+@@ -121,8 +263,22 @@ class AnnotationRuleTest {
+                 @Foo @Bar
+                 var foo: String
+                 @Foo @Bar
+-                fun bar() {}
+-            }
++                fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             """.trimIndent()
+         annotationRuleAssertThat(code)
+             .hasLintViolations(
+@@ -138,8 +294,22 @@ class AnnotationRuleTest {
+             """
+             @[Foo Bar] class FooBar2 {
+                 @[Foo Bar] var foo: String
+-                @[Foo Bar] fun bar() {}
+-            }
++                @[Foo Bar] fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             """.trimIndent()
+         annotationRuleAssertThat(code)
+             .hasNoLintViolations()
+@@ -183,8 +353,22 @@ class AnnotationRuleTest {
+             """
+             @Suppress("AnnotationRule")class FooBar {
+                 @Suppress("AnnotationRule")var foo: String
+-                @Suppress("AnnotationRule")fun bar() {}
+-            }
++                @Suppress("AnnotationRule")fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             """.trimIndent()
+         val formattedCode =
+             """
+@@ -193,8 +377,22 @@ class AnnotationRuleTest {
+                 @Suppress("AnnotationRule")
+                 var foo: String
+                 @Suppress("AnnotationRule")
+-                fun bar() {}
+-            }
++                fun bar() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+             """.trimIndent()
+         annotationRuleAssertThat(code)
+             .hasLintViolations(
+@@ -483,7 +681,21 @@ class AnnotationRuleTest {
+                 .hasLintViolation(2, 1, "File annotations should be separated from file contents with a blank line")
+                 .isFormattedAs(formattedCode)
+         }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
+     }
++}
+ 
+     @Test
+     fun `Given a receiver with annotation having a parameter should not be separate line`() {
+@@ -582,16 +794,44 @@ class AnnotationRuleTest {
+                 """
+                 class Main {
+                     @[Foo1 Foo2] @Foo3
+-                    fun foo() {}
+-                }
++                    fun foo() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+                 """.trimIndent()
+             val formattedCode =
+                 """
+                 class Main {
+                     @[Foo1 Foo2]
+                     @Foo3
+-                    fun foo() {}
+-                }
++                    fun foo() {    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
++}
+                 """.trimIndent()
+             annotationRuleAssertThat(code)
+                 .hasLintViolation(2, 5, "@[...] style annotations should be on a separate line from other annotations.")
+@@ -615,7 +855,21 @@ class AnnotationRuleTest {
+                 .hasLintViolation(1, 7, "@[...] style annotations should be on a separate line from other annotations.")
+                 .isFormattedAs(formattedCode)
+         }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
+     }
++}
+ 
+     @Test
+     fun `Given a single annotation on same line as a type parameter then do not report a violation`() {
+@@ -689,7 +943,21 @@ class AnnotationRuleTest {
+                     LintViolation(1, 82, "Expected newline before '>'"),
+                 ).isFormattedAs(formattedCode)
+         }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
+     }
++}
+ 
+     @Nested
+     inner class `Given an array of annotations on same line as a type parameter` {
+@@ -702,7 +970,21 @@ class AnnotationRuleTest {
+             annotationRuleAssertThat(code)
+                 .hasNoLintViolations()
+         }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
+     }
++}
+ 
+     @Test
+     fun `Given property allow trailing comma on declaration site is not set then remove trailing commas`() {
+@@ -734,4 +1016,79 @@ class AnnotationRuleTest {
+                 LintViolation(5, 25, "Multiple annotations should not be placed on the same line as the annotated construct"),
+             ).isFormattedAs(formattedCode)
+     }
++
++    @Test
++    fun `Given annotations before class constructor in ktlint_official code style should be wrapped`() {
++        val code =
++            """
++            data class Foo @Bar1 @Bar2("bar") @Bar3 @Bar4 constructor(private val foobar: Int) {
++                fun foo(): String = "foo"
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            data class Foo
++                @Bar1
++                @Bar2("bar")
++                @Bar3
++                @Bar4
++                constructor(private val foobar: Int) {
++                fun foo(): String = "foo"
++            }
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasLintViolations(
++                LintViolation(1, 16, "Annotations should be placed on separate lines before the constructor"),
++                LintViolation(1, 22, "Annotations should be placed on separate lines before the constructor"),
++                LintViolation(1, 36, "Annotations should be placed on separate lines before the constructor"),
++                LintViolation(1, 42, "Annotations should be placed on separate lines before the constructor"),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given annotations on type projections in ktlint_official code style should be wrapped correctly`() {
++        val code =
++            """
++            val fooBar: FooBar<String, @Foo String, @Foo @Bar String, @Bar("bar") @Foo String> = FooBar()
++            """.trimIndent()
++        val formattedCode =
++            """
++            val fooBar: FooBar<
++                String,
++                @Foo String,
++                @Foo @Bar
++                String,
++                @Bar("bar")
++                @Foo
++                String
++                > = FooBar()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .addAdditionalRuleProvider { WrappingRule() }
++            .hasLintViolations(
++                LintViolation(1, 39, "Expected newline after ','"),
++                LintViolation(1, 51, "Multiple annotations should not be placed on the same line as the annotated construct"),
++                LintViolation(1, 57, "Expected newline after ','"),
++                LintViolation(1, 59, "Expected newline before '@'"),
++                LintViolation(1, 59, "Annotation with parameter(s) should be placed on a separate line prior to the annotated construct"),
++                LintViolation(1, 76, "Multiple annotations should not be placed on the same line as the annotated construct"),
++                LintViolation(1, 82, "Expected newline before '>'"),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given simple type projection annotations in ktlint_official code style should NOT be wrapped`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasNoLintViolations()
++    }
+ }
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

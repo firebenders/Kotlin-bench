@@ -1,0 +1,255 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+index bdddca08..a80a0130 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+@@ -4,8 +4,10 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATED_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE_ANNOTATION_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIMARY_CONSTRUCTOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PROJECTION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT
+@@ -18,10 +20,12 @@ import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRu
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.children
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf
++import com.pinterest.ktlint.rule.engine.core.api.indent
+ import com.pinterest.ktlint.rule.engine.core.api.isCodeLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpace
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+@@ -78,6 +82,7 @@ public class AnnotationRule :
+         id = "annotation",
+         usesEditorConfigProperties =
+             setOf(
++                CODE_STYLE_PROPERTY,
+                 INDENT_SIZE_PROPERTY,
+                 INDENT_STYLE_PROPERTY,
+             ),
+@@ -127,6 +132,48 @@ public class AnnotationRule :
+     ) {
+         require(node.elementType == ANNOTATION_ENTRY)
+ 
++        if (codeStyle == ktlint_official && node.isPartOfPrimaryConstructorModifierList()) {
++            val modifierList = node.treeParent
++            val annotationEntries =
++                modifierList
++                    .children()
++                    .filter { it.elementType == ANNOTATION_ENTRY }
++                    .toList()
++            val shouldWrapAllPrimaryConstructorAnnotations =
++                annotationEntries.size > 1 || annotationEntries.any { it.isAnnotationEntryWithValueArgumentList() }
++
++            if (shouldWrapAllPrimaryConstructorAnnotations) {
++                val classHeaderContinuationIndent = modifierList.classHeaderContinuationIndent()
++
++                if (
++                    node.isFirstAnnotationEntry() &&
++                    node.firstChildLeafOrSelf().prevLeaf()?.isWhiteSpaceWithNewline() != true &&
++                    modifierList.firstChildNode?.isWhiteSpaceWithNewline() != true
++                ) {
++                    // Do not replace the whitespace *before* the primary constructor as that whitespace is part of the
++                    // class declaration. Instead, insert a whitespace containing a newline *inside* the primary
++                    // constructor modifier list.
++                    emit(node.startOffset, "Expected newline before annotation", true)
++                    if (autoCorrect) {
++                        modifierList
++                            .prevLeaf()
++                            ?.takeIf { it.elementType == WHITE_SPACE && !it.textContains('\n') }
++                            ?.let { it.treeParent.removeChild(it) }
++                        modifierList.addChild(PsiWhiteSpaceImpl(classHeaderContinuationIndent), modifierList.firstChildNode)
++                    }
++                }
++
++                if (annotationEntries.size > 1 && node.isPrecededByOtherAnnotationEntryOnTheSameLine()) {
++                    emit(node.startOffset, "Expected newline before annotation", true)
++                    if (autoCorrect) {
++                        node
++                            .firstChildLeafOrSelf()
++                            .upsertWhitespaceBeforeMe(classHeaderContinuationIndent)
++                    }
++                }
++            }
++        }
++
+         if (node.isAnnotationEntryWithValueArgumentList() &&
+             node.treeParent.treeParent.elementType != VALUE_PARAMETER &&
+             node.treeParent.treeParent.elementType != VALUE_ARGUMENT &&
+@@ -254,8 +301,23 @@ public class AnnotationRule :
+             ?.takeIf { it.treeParent.elementType == TYPE_PROJECTION }
+             ?.treeParent
+ 
++    private fun ASTNode.isPartOfPrimaryConstructorModifierList() =
++        elementType == ANNOTATION_ENTRY &&
++            treeParent.elementType == MODIFIER_LIST &&
++            treeParent.treeParent.elementType == PRIMARY_CONSTRUCTOR
++
++    private fun ASTNode.classHeaderContinuationIndent(): String {
++        require(elementType == MODIFIER_LIST)
++        var parent = treeParent
++        while (parent != null && parent.elementType != CLASS) {
++            parent = parent.treeParent
++        }
++        val classIndent = (parent ?: this).indent()
++        return classIndent.plus(indentConfig.indent)
++    }
++
+     private fun ASTNode.isPrecededByAnnotationOnAnotherLine(): Boolean {
+-        val firstAnnotation = treeParent.findChildByType(ANNOTATION_ENTRY)
++val firstAnnotation = treeParent.findChildByType(ANNOTATION_ENTRY)
+         return siblings(forward = false)
+             .takeWhile { it != firstAnnotation }
+             .any { it.isWhiteSpaceWithNewline() }
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 50f8b7f2..d604490b 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -48,6 +48,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OBJECT_DECLARATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OPEN_QUOTE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OPERATION_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PARENTHESIZED
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIMARY_CONSTRUCTOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY_ACCESSOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.RBRACE
+@@ -213,6 +214,11 @@ public class IndentationRule :
+             node.elementType == SECONDARY_CONSTRUCTOR ->
+                 visitSecondaryConstructor(node)
+ 
++            node.elementType == PRIMARY_CONSTRUCTOR ->
++                // Ensure that annotations, modifiers and the constructor keyword are indented properly in case the
++                // primary constructor is wrapped to a new line (e.g. in ktlint_official code style).
++                startIndentContext(node)
++
+             node.elementType == PARENTHESIZED &&
+                 node.treeParent.treeParent.elementType != IF ->
+                 startIndentContext(node)
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationWrappingInPrimaryConstructorKtlintOfficialTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationWrappingInPrimaryConstructorKtlintOfficialTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationWrappingInPrimaryConstructorKtlintOfficialTest.kt
+@@ -0,0 +1,44 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.ec4j.core.model.PropertyType.IndentStyleValue.space
++import org.junit.jupiter.api.Test
++
++class AnnotationWrappingInPrimaryConstructorKtlintOfficialTest {
++    private val annotationRuleAssertThat = assertThatRule { AnnotationRule() }
++
++    @Test
++    fun `Given multiple annotations before primary constructor then wrap all annotations and constructor keyword`() {
++        val code =
++            """
++            data class Foo @Bar1 @Bar2("bar") @Bar3 @Bar4 constructor(private val foobar: Int) {
++                fun foo(): String = "foo"
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            data class Foo
++                @Bar1
++                @Bar2("bar")
++                @Bar3
++                @Bar4
++                constructor(private val foobar: Int) {
++                fun foo(): String = "foo"
++            }
++            """.trimIndent()
++
++        annotationRuleAssertThat(code)
++            .withEditorConfigOverride(
++                CODE_STYLE_PROPERTY to ktlint_official,
++                INDENT_STYLE_PROPERTY to space,
++                INDENT_SIZE_PROPERTY to 4,
++            )
++            .addAdditionalRuleProvider { IndentationRule() }
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationWrappingInTypeArgumentListTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationWrappingInTypeArgumentListTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationWrappingInTypeArgumentListTest.kt
+@@ -0,0 +1,57 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.ec4j.core.model.PropertyType.IndentStyleValue.space
++import org.junit.jupiter.api.Test
++
++class AnnotationWrappingInTypeArgumentListTest {
++    private val wrappingRuleAssertThat = assertThatRule { WrappingRule() }
++
++    @Test
++    fun `Given a type argument list containing annotated type projections then wrap the type argument list and annotations`() {
++        val code =
++            """
++            val fooBar: FooBar<String, @Foo String, @Foo @Bar String, @Bar("bar") @Foo String> = FooBar()
++            """.trimIndent()
++        val formattedCode =
++            """
++            val fooBar: FooBar<
++                String,
++                @Foo String,
++                @Foo @Bar
++                String,
++                @Bar("bar")
++                @Foo
++                String
++                > = FooBar()
++            """.trimIndent()
++
++        wrappingRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .addAdditionalRuleProvider { AnnotationRule() }
++            .addAdditionalRuleProvider { IndentationRule() }
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a type argument list in which each type projection contains at most a single annotation without parameter then do not wrap`() {
++        val code =
++            """
++            val foo1: List<@Foo String> = emptyList()
++            val foo2 = emptyList<@Foo String>()
++            val foo3: Map<@Foo String, @Foo String> = emptyMap()
++            val foo4 = emptyMap<@Foo String, @Foo String>()
++            """.trimIndent()
++
++        wrappingRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .addAdditionalRuleProvider { AnnotationRule() }
++            .addAdditionalRuleProvider { IndentationRule() }
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

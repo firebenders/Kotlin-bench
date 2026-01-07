@@ -1,0 +1,139 @@
+diff --git a/kotlinx-coroutines-core/common/src/EventLoop.common.kt b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+index 6bfcbf0cb..fdf4e8df7 100644
+--- a/kotlinx-coroutines-core/common/src/EventLoop.common.kt
++++ b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+@@ -256,21 +256,7 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+         // unconfined events take priority
+         if (processUnconfinedEvent()) return 0
+         // queue all delayed tasks that are due to be executed
+-        val delayed = _delayed.value
+-        if (delayed != null && !delayed.isEmpty) {
+-            val now = nanoTime()
+-            while (true) {
+-                // make sure that moving from delayed to queue removes from delayed only after it is added to queue
+-                // to make sure that 'isEmpty' and `nextTime` that check both of them
+-                // do not transiently report that both delayed and queue are empty during move
+-                delayed.removeFirstIf {
+-                    if (it.timeToExecute(now)) {
+-                        enqueueImpl(it)
+-                    } else
+-                        false
+-                } ?: break // quit loop when nothing more to remove or enqueueImpl returns false on "isComplete"
+-            }
+-        }
++        processReadyDelayedTasks()
+         // then process one event from queue
+         val task = dequeue()
+         if (task != null) {
+@@ -283,6 +269,8 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+     final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
+ 
+     open fun enqueue(task: Runnable) {
++        // Process ready delayed tasks before enqueuing to ensure proper order
++        processReadyDelayedTasks()
+         if (enqueueImpl(task)) {
+             // todo: we should unpark only when this delayed task became first in the queue
+             unpark()
+@@ -291,6 +279,28 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+         }
+     }
+ 
++    /**
++     * Process delayed tasks that are ready to be executed and move them to the main queue.
++     * This ensures proper ordering when new tasks are enqueued.
++     */
++    private fun processReadyDelayedTasks() {
++        val delayed = _delayed.value
++        if (delayed != null && !delayed.isEmpty) {
++            val now = nanoTime()
++            while (true) {
++                // make sure that moving from delayed to queue removes from delayed only after it is added to queue
++                // to make sure that 'isEmpty' and `nextTime` that check both of them
++                // do not transiently report that both delayed and queue are empty during move
++                delayed.removeFirstIf {
++                    if (it.timeToExecute(now)) {
++                        enqueueImpl(it)
++                    } else
++                        false
++                } ?: break // quit loop when nothing more to remove or enqueueImpl returns false on "isComplete"
++            }
++        }
++    }
++
+     @Suppress("UNCHECKED_CAST")
+     private fun enqueueImpl(task: Runnable): Boolean {
+         _queue.loop { queue ->
+diff --git a/kotlinx-coroutines-core/common/test/DelayTest.kt b/kotlinx-coroutines-core/common/test/DelayTest.kt
+index 007a272f4..c784740c7 100644
+--- a/kotlinx-coroutines-core/common/test/DelayTest.kt
++++ b/kotlinx-coroutines-core/common/test/DelayTest.kt
+@@ -37,6 +37,31 @@ class DelayTest : TestBase() {
+         finish(4)
+     }
+ 
++    @Test 
++    fun testYieldWithDelayedTask() = runBlocking {
++        var result = ""
++        
++        // Launch with UNDISPATCHED so it starts immediately
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1) // Very short delay that will already be expired
++            result += "first"
++        }
++        
++        // Sleep to ensure the delay time has passed
++        Thread.sleep(100) 
++        
++        // At this point, the launched coroutine should be ready to resume
++        // yield() should yield to it, not resume immediately
++        yield()
++        result += "second"
++        
++        // Give time for any remaining work
++        delay(10)
++        
++        // The delayed task should execute before the yield continuation
++        assertEquals("firstsecond", result)
++    }
++
+     private suspend fun runAndCancel(time: Long) = coroutineScope {
+         expect(1)
+         val deferred = async {
+
+diff --git a/test_yield_fix.kt b/test_yield_fix.kt
+new file mode 100644
+--- /dev/null
++++ b/test_yield_fix.kt
+@@ -0,0 +1,32 @@
++import kotlinx.coroutines.*
++
++fun main() = runBlocking {
++    println("Testing yield with delayed task issue...")
++    
++    var result = ""
++    
++    // Launch with UNDISPATCHED so it starts immediately
++    launch(start = CoroutineStart.UNDISPATCHED) {
++        delay(1) // Very short delay - should already be expired after 100ms sleep
++        result += "first"
++        println("Delayed task executed")
++    }
++    
++    // Sleep to ensure the delay time has passed
++    Thread.sleep(100)
++    println("After sleep - delay should be expired")
++    
++    // At this point, the launched coroutine should be ready to resume
++    // yield() should yield to it, not resume immediately  
++    println("About to yield...")
++    yield()
++    result += "second"
++    println("After yield")
++    
++    // Give time for any remaining work
++    delay(10)
++    
++    println("Final result: '$result'")
++    println("Expected: 'firstsecond'")
++    println("Test ${if (result == "firstsecond") "PASSED" else "FAILED"}")
++}

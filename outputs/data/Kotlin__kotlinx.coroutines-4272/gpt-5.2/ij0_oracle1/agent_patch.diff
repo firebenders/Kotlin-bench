@@ -1,0 +1,73 @@
+diff --git a/kotlinx-coroutines-core/common/src/CoroutineStart.kt b/kotlinx-coroutines-core/common/src/CoroutineStart.kt
+index c4c4cea72..822bb351d 100644
+--- a/kotlinx-coroutines-core/common/src/CoroutineStart.kt
++++ b/kotlinx-coroutines-core/common/src/CoroutineStart.kt
+@@ -356,9 +356,9 @@ public enum class CoroutineStart {
+     public operator fun <R, T> invoke(block: suspend R.() -> T, receiver: R, completion: Continuation<T>): Unit =
+         when (this) {
+             DEFAULT -> block.startCoroutineCancellable(receiver, completion)
+-            ATOMIC -> block.startCoroutine(receiver, completion)
++            ATOMIC -> block.startCoroutineAtomic(receiver, completion)
+             UNDISPATCHED -> block.startCoroutineUndispatched(receiver, completion)
+-            LAZY -> Unit // will start lazily
++LAZY -> Unit // will start lazily
+         }
+ 
+     /**
+diff --git a/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt b/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
+index 1e87d767a..b8e97f1e6 100644
+--- a/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
++++ b/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
+@@ -16,6 +16,16 @@ public fun <T> (suspend () -> T).startCoroutineCancellable(completion: Continuat
+     createCoroutineUnintercepted(completion).intercepted().resumeCancellableWith(Result.success(Unit))
+ }
+ 
++/**
++ * Starts coroutine in a non-cancellable (atomic) way.
++ *
++ * This method exists to correctly handle failures of the [CoroutineDispatcher] during coroutine start.
++ */
++internal fun <R, T> (suspend (R) -> T).startCoroutineAtomic(receiver: R, completion: Continuation<T>): Unit =
++    runSafely(completion) {
++        createCoroutineUnintercepted(receiver, completion).intercepted().resumeWith(Result.success(Unit))
++    }
++
+ /**
+  * Use this function to start coroutine in a cancellable way, so that it can be cancelled
+  * while waiting to be dispatched.
+
+diff --git a/kotlinx-coroutines-core/common/test/flow/operators/FlowOnDispatcherFailureTest.kt b/kotlinx-coroutines-core/common/test/flow/operators/FlowOnDispatcherFailureTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/flow/operators/FlowOnDispatcherFailureTest.kt
+@@ -0,0 +1,30 @@
++package kotlinx.coroutines.flow
++
++import kotlinx.coroutines.CoroutineDispatcher
++import kotlinx.coroutines.withTimeout
++import kotlinx.coroutines.testing.*
++import kotlin.coroutines.CoroutineContext
++import kotlin.test.Test
++import kotlin.test.assertFailsWith
++import kotlin.time.Duration.Companion.seconds
++
++class FlowOnDispatcherFailureTest : TestBase() {
++
++    @Test
++    fun testFlowOnDispatcherFailureDoesNotHang() = runTest {
++        val failing = object : CoroutineDispatcher() {
++            override fun dispatch(context: CoroutineContext, block: Runnable) {
++                throw TestException()
++            }
++        }
++
++        val flow = flowOf(1, 2, 3).flowOn(failing)
++
++        assertFailsWith<TestException> {
++            withTimeout(1.seconds) {
++                flow.collect { /* no-op */ }
++            }
++        }
++    }
++}
++

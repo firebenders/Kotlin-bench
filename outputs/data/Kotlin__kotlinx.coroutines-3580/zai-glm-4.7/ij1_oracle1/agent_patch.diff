@@ -1,0 +1,106 @@
+diff --git a/kotlinx-coroutines-core/jdk8/src/future/Future.kt b/kotlinx-coroutines-core/jdk8/src/future/Future.kt
+index 4d9a01ac7..c6f6e97b4 100644
+--- a/kotlinx-coroutines-core/jdk8/src/future/Future.kt
++++ b/kotlinx-coroutines-core/jdk8/src/future/Future.kt
+@@ -60,7 +60,11 @@ private class CompletableFutureCoroutine<T>(
+     override fun onCancelled(cause: Throwable, handled: Boolean) {
+         if (!future.completeExceptionally(cause) && !handled) {
+             // prevents loss of exception that was not handled by parent & could not be set to CompletableFuture
+-            handleCoroutineException(context, cause)
++            // However, if the cause is a CancellationException, it should not be propagated to the global
++            // exception handler as cancellation is a normal operation, not an error
++            if (cause !is CancellationException) {
++                handleCoroutineException(context, cause)
++            }
+         }
+     }
+ }
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/test_future_cancel.kt b/test_future_cancel.kt
+new file mode 100644
+--- /dev/null
++++ b/test_future_cancel.kt
+@@ -0,0 +1,20 @@
++import kotlinx.coroutines.*
++import kotlinx.coroutines.future.*
++
++fun main() {
++    println("Test 1: future with error, then cancel")
++    try {
++        val future = GlobalScope.future {
++            println("Coroutine started")
++            error("foo")
++        }
++        Thread.sleep(100) // Give the coroutine time to start
++        println("Cancelling future")
++        future.cancel(true)
++        Thread.sleep(500)
++        println("Test 1 passed - no exception thrown")
++    } catch (e: Exception) {
++        println("Test 1 FAILED - exception thrown: ${e.message}")
++        e.printStackTrace()
++    }
++}
+
+diff --git a/test_future_issue.kt b/test_future_issue.kt
+new file mode 100644
+--- /dev/null
++++ b/test_future_issue.kt
+@@ -0,0 +1,42 @@
++import kotlinx.coroutines.*
++import kotlinx.coroutines.future.*
++import java.util.concurrent.CompletableFuture
++
++fun main() {
++    println("Test 1: future with error, then cancel")
++    try {
++        val future = GlobalScope.future {
++            error("foo")
++        }
++        future.cancel(true)
++        Thread.sleep(100)
++        println("Test 1 passed - no exception thrown")
++    } catch (e: Exception) {
++        println("Test 1 FAILED - exception thrown: ${e.message}")
++    }
++
++    println("\nTest 2: async with error, then cancel")
++    try {
++        val deferred = GlobalScope.async {
++            error("bar")
++        }
++        deferred.cancel()
++        Thread.sleep(100)
++        println("Test 2 passed - no exception thrown")
++    } catch (e: Exception) {
++        println("Test 2 FAILED - exception thrown: ${e.message}")
++    }
++
++    println("\nTest 3: future with error, await")
++    try {
++        runBlocking {
++            val future = GlobalScope.future {
++                error("baz")
++            }
++            future.await()
++        }
++        println("Test 3 FAILED - should have thrown exception")
++    } catch (e: Exception) {
++        println("Test 3 passed - exception thrown as expected: ${e.message}")
++    }
++}

@@ -1,0 +1,312 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 26e4a6c2..dc801264 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -41,6 +41,7 @@ At this point in time, it is not yet decided what the next steps will be. Ktlint
+ * Ignore property with name `serialVersionUID` in `property-naming` ([#2045](https://github.com/pinterest/ktlint/issues/2045))
+ * Prevent incorrect reporting of violations in case a nullable function type reference exceeds the maximum line length `parameter-list-wrapping` ([#1324](https://github.com/pinterest/ktlint/issues/1324)) 
+ * Prevent false negative on `else` branch when body contains only chained calls or binary expression ([#2057](https://github.com/pinterest/ktlint/issues/2057))
++* Repeat format step until no more auto-correctable errors are found, with a maximum of 3 additional rounds to prevent infinite loops. This ensures that cascading rule dependencies are fully resolved in a single format operation
+ 
+ ### Changed
+ 
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+index eec63c77..d870d41b 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+@@ -123,6 +123,9 @@ public class KtLintRuleEngine(
+      * Fix style violations in [code] for lint errors when possible. If [code] is passed as file reference then the '.editorconfig' files on
+      * the path are taken into account. For each lint violation found, the [callback] is invoked.
+      *
++     * The format function will repeat the formatting process until no more auto-correctable errors are found,
++     * or a maximum of 3 additional rounds have been executed to prevent infinite loops.
++     *
+      * @throws KtLintParseException if text is not a valid Kotlin code
+      * @throws KtLintRuleException in case of internal failure caused by a bug in rule implementation
+      */
+@@ -135,67 +138,102 @@ public class KtLintRuleEngine(
+         val hasUTF8BOM = code.content.startsWith(UTF8_BOM)
+         val ruleExecutionContext = createRuleExecutionContext(this, code)
+ 
+-        var tripped = false
+-        var mutated = false
+-        val errors = mutableSetOf<Pair<LintError, Boolean>>()
+-        val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+-        visitorProvider
+-            .visitor()
+-            .invoke { rule ->
+-                ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
+-                    tripped = true
+-                    if (canBeAutoCorrected) {
+-                        mutated = true
+-                        /**
+-                         * Rebuild the suppression locator after each change in the AST as the offsets of the
+-                         * suppression hints might have changed.
+-                         */
+-                        ruleExecutionContext.rebuildSuppressionLocator()
+-                    }
+-                    val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+-                    errors.add(
+-                        Pair(
+-                            LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
+-                            // It is assumed that a rule that emits that an error can be autocorrected, also
+-                            // does correct the error.
+-                            canBeAutoCorrected,
+-                        ),
+-                    )
+-                    // In trace mode report the violation immediately. The order in which violations are actually found might be different
+-                    // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
+-                    // violations are being solved.
+-                    LOGGER.trace {
+-                        "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
+-                            canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
+-                    }
+-                }
+-            }
+-        if (tripped) {
++        var round = 0
++        val maxRounds = 4 // Initial round + max 3 reruns
++        var overallMutated = false
++        var finalErrors = mutableSetOf<Pair<LintError, Boolean>>()
++
++        do {
++            round++
++            LOGGER.debug { "Format round $round for file '${code.fileNameOrStdin()}'" }
++
++            var tripped = false
++            var mutated = false
++            val errors = mutableSetOf<Pair<LintError, Boolean>>()
++            val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
++
++            // First pass: format with autocorrect enabled
+             visitorProvider
+                 .visitor()
+                 .invoke { rule ->
+-                    ruleExecutionContext.executeRule(
+-                        rule,
+-                        false,
+-                    ) { offset, errorMessage, canBeAutoCorrected ->
++                    ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
++                        tripped = true
++                        if (canBeAutoCorrected) {
++                            mutated = true
++                            overallMutated = true
++                            /**
++                             * Rebuild the suppression locator after each change in the AST as the offsets of the
++                             * suppression hints might have changed.
++                             */
++                            ruleExecutionContext.rebuildSuppressionLocator()
++                        }
+                         val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+                         errors.add(
+                             Pair(
+                                 LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
+-                                // It is assumed that a rule only corrects an error after it has emitted an
+-                                // error and indicating that it actually can be autocorrected.
+-                                false,
++                                // It is assumed that a rule that emits that an error can be autocorrected, also
++                                // does correct the error.
++                                canBeAutoCorrected,
+                             ),
+                         )
++                        // In trace mode report the violation immediately. The order in which violations are actually found might be different
++                        // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
++                        // violations are being solved.
++                        LOGGER.trace {
++                            "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
++                                canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
++                        }
+                     }
+                 }
++
++            // Second pass: lint to collect any remaining errors (only if there were changes in first pass)
++            if (tripped) {
++                visitorProvider
++                    .visitor()
++                    .invoke { rule ->
++                        ruleExecutionContext.executeRule(
++                            rule,
++                            false,
++                        ) { offset, errorMessage, canBeAutoCorrected ->
++                            val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
++                            errors.add(
++                                Pair(
++                                    LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
++                                    // It is assumed that a rule only corrects an error after it has emitted an
++                                    // error and indicating that it actually can be autocorrected.
++                                    false,
++                                ),
++                            )
++                        }
++                    }
++            }
++
++            finalErrors = errors
++
++            if (mutated) {
++                LOGGER.debug { "Round $round completed with mutations, checking for additional auto-correctable errors" }
++            } else {
++                LOGGER.debug { "Round $round completed without mutations" }
++            }
++
++            // Continue if:
++            // 1. We made changes (mutated = true), AND
++            // 2. There are still auto-correctable errors, AND
++            // 3. We haven't reached the maximum number of rounds
++        } while (mutated &&
++                 finalErrors.any { (error, _) -> error.canBeAutoCorrected } &&
++                 round < maxRounds)
++
++        if (round > 1) {
++            LOGGER.debug { "Completed formatting after $round rounds for file '${code.fileNameOrStdin()}'" }
+         }
+ 
+-        errors
++        // Report final errors via callback
++        finalErrors
+             .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
+             .forEach { (e, corrected) -> callback(e, corrected) }
+ 
+-        if (!mutated) {
++        if (!overallMutated) {
+             return code.content
+         }
+ 
+diff --git a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintTest.kt b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintTest.kt
+index f5e868e9..1f62b1fb 100644
+--- a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintTest.kt
++++ b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintTest.kt
+@@ -175,6 +175,51 @@ class KtLintTest {
+                     ),
+                 )
+             }
++
++            @Test
++            fun `Given rules that create cascading auto-correctable errors then format repeats until no more auto-correctable errors are found`() {
++                val callbacks = mutableListOf<CallbackResult>()
++                val actualFormattedCode =
++                    KtLintRuleEngine(
++                        ruleProviders =
++                            setOf(
++                                RuleProvider { CascadingAutoCorrectRule() },
++                            ),
++                    ).format(Code.fromSnippet(CascadingAutoCorrectRule.INITIAL_CODE)) { e, corrected ->
++                        callbacks.add(
++                            CallbackResult(
++                                line = e.line,
++                                col = e.col,
++                                ruleId = e.ruleId,
++                                detail = e.detail,
++                                canBeAutoCorrected = e.canBeAutoCorrected,
++                                corrected = corrected,
++                            ),
++                        )
++                    }
++                assertThat(actualFormattedCode).isEqualTo(CascadingAutoCorrectRule.EXPECTED_FINAL_CODE)
++                // The callbacks should show the final errors after all rounds of auto-correction
++                assertThat(callbacks).hasSize(1)
++                assertThat(callbacks[0].canBeAutoCorrected).isFalse()
++                assertThat(callbacks[0].corrected).isFalse()
++            }
++
++            @Test
++            fun `Given rules that could cause infinite loops then format stops after maximum 3 reruns`() {
++                var formatRounds = 0
++                KtLintRuleEngine(
++                    ruleProviders =
++                        setOf(
++                            RuleProvider { InfiniteLoopAutoCorrectRule() },
++                        ),
++                ).format(Code.fromSnippet("val x = 1")) { _, _ ->
++                    // Count format rounds by tracking when we get callbacks
++                    formatRounds++
++                }
++                // The rule should eventually stop due to max rounds limit (initial + 3 reruns = 4 total)
++                // Since the rule keeps creating new autocorrectable errors, we should reach the limit
++                assertThat(formatRounds).isGreaterThanOrEqualTo(4)
++            }
+         }
+     }
+ 
+@@ -659,3 +704,73 @@ private class WithStateRule : Rule(
+         emit(node.startOffset, "Fake violation which can be autocorrected", true)
+     }
+ }
++
++/**
++ * A rule for testing cascading auto-corrections. This rule demonstrates the scenario where
++ * initial corrections create new auto-correctable errors that need to be fixed in subsequent rounds.
++ */
++private class CascadingAutoCorrectRule : Rule(
++    ruleId = RuleId("test:cascading-autocorrect"),
++    about = About(),
++) {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType == REGULAR_STRING_PART) {
++            when (node.text) {
++                "step1" -> {
++                    emit(node.startOffset, "Step 1 error - can be auto-corrected", true)
++                    if (autoCorrect) {
++                        (node as LeafElement).rawReplaceWithText("step2")
++                    }
++                }
++                "step2" -> {
++                    emit(node.startOffset, "Step 2 error - can be auto-corrected", true)
++                    if (autoCorrect) {
++                        (node as LeafElement).rawReplaceWithText("step3")
++                    }
++                }
++                "step3" -> {
++                    emit(node.startOffset, "Step 3 error - cannot be auto-corrected", false)
++                }
++            }
++        }
++    }
++
++    companion object {
++        const val INITIAL_CODE = """val test = "step1""""
++        const val EXPECTED_FINAL_CODE = """val test = "step3""""
++    }
++}
++
++/**
++ * A rule for testing that infinite loops are prevented. This rule always creates new auto-correctable
++ * errors, but the format function should stop after the maximum number of rounds.
++ */
++private class InfiniteLoopAutoCorrectRule : Rule(
++    ruleId = RuleId("test:infinite-loop"),
++    about = About(),
++) {
++    private var roundCounter = 0
++
++    override fun beforeFirstNode(editorConfig: EditorConfig) {
++        roundCounter++
++    }
++
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType == REGULAR_STRING_PART) {
++            // Always create an auto-correctable error to test the maximum rounds limit
++            emit(node.startOffset, "Round $roundCounter - can be auto-corrected", true)
++            if (autoCorrect) {
++                // Make a small change that doesn't actually fix the "issue"
++                (node as LeafElement).rawReplaceWithText("$roundCounter")
++            }
++        }
++    }
++}
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

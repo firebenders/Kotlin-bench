@@ -1,0 +1,100 @@
+diff --git a/kotlinx-coroutines-core/common/src/Delay.kt b/kotlinx-coroutines-core/common/src/Delay.kt
+index ba06d9778..fe36abd26 100644
+--- a/kotlinx-coroutines-core/common/src/Delay.kt
++++ b/kotlinx-coroutines-core/common/src/Delay.kt
+@@ -7,6 +7,7 @@ package kotlinx.coroutines
+ import kotlinx.coroutines.selects.*
+ import kotlin.coroutines.*
+ import kotlin.time.*
++import kotlin.time.Duration.Companion.milliseconds
+ 
+ /**
+  * This dispatcher _feature_ is implemented by [CoroutineDispatcher] implementations that natively support
+@@ -154,8 +155,19 @@ public suspend fun delay(duration: Duration): Unit = delay(duration.toDelayMilli
+ internal val CoroutineContext.delay: Delay get() = get(ContinuationInterceptor) as? Delay ?: DefaultDelay
+ 
+ /**
+- * Convert this duration to its millisecond value.
+- * Positive durations are coerced at least `1`.
++ * Convert this duration to its millisecond value for use with APIs that take `timeMillis`.
++ *
++ * The duration is always rounded *up* to avoid firing early when it has any sub-millisecond component.
++ * Positive durations are coerced to at least `1`.
+  */
+-internal fun Duration.toDelayMillis(): Long =
+-    if (this > Duration.ZERO) inWholeMilliseconds.coerceAtLeast(1) else 0
++internal fun Duration.toDelayMillis(): Long {
++    if (this <= Duration.ZERO) return 0
++    if (this == Duration.INFINITE) return Long.MAX_VALUE
++
++    val millis = inWholeMilliseconds
++    if (millis >= Long.MAX_VALUE) return Long.MAX_VALUE
++
++    // Round up if there's any sub-millisecond remainder.
++    val roundedMillis = if (this > millis.milliseconds) millis + 1 else millis
++    return roundedMillis.coerceAtLeast(1)
++}
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/common/test/ToDelayMillisRoundingTest.kt b/kotlinx-coroutines-core/common/test/ToDelayMillisRoundingTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/ToDelayMillisRoundingTest.kt
+@@ -0,0 +1,43 @@
++/*
++ * Copyright 2016-2026 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.time.Duration
++import kotlin.time.Duration.Companion.milliseconds
++import kotlin.time.Duration.Companion.nanoseconds
++
++class ToDelayMillisRoundingTest : TestBase() {
++
++    @Test
++    fun testRoundsUpSubMillisecondRemainder() {
++        val d = 998.milliseconds + 902_752.nanoseconds
++        assertEquals(999L, d.toDelayMillis())
++    }
++
++    @Test
++    fun testDoesNotRoundExactMilliseconds() {
++        assertEquals(998L, 998.milliseconds.toDelayMillis())
++    }
++
++    @Test
++    fun testCoercesPositiveToAtLeastOneMillisecond() {
++        assertEquals(1L, 1.nanoseconds.toDelayMillis())
++        assertEquals(1L, 999_999.nanoseconds.toDelayMillis())
++    }
++
++    @Test
++    fun testCoercesNonPositiveToZero() {
++        assertEquals(0L, Duration.ZERO.toDelayMillis())
++        assertEquals(0L, (-1).milliseconds.toDelayMillis())
++    }
++
++    @Test
++    fun testInfiniteCoercesToLongMaxValue() {
++        assertEquals(Long.MAX_VALUE, Duration.INFINITE.toDelayMillis())
++    }
++}
++

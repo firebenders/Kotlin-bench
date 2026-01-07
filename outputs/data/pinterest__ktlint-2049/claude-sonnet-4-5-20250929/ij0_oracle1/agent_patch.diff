@@ -1,0 +1,153 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+index 28a6ebc7..82adc3d5 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+@@ -542,10 +542,14 @@ public class FunctionSignatureRule :
+                 if (whiteSpaceBeforeFunctionBodyExpression.isWhiteSpaceWithNewline()) {
+                     val mergeWithFunctionSignature =
+                         if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression) {
+-                            functionBodyExpressionWrapping == default ||
+-                                (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||
+-                                node.isMultilineFunctionSignatureWithoutExplicitReturnType(
+-                                    lastNodeOfFunctionSignatureWithBodyExpression,
++                            // Do not merge if body expression starts with an annotation as that would violate the annotation rule
++                            !functionBodyExpressionNodes.startsWithAnnotation() &&
++                                (
++                                    functionBodyExpressionWrapping == default ||
++                                        (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||
++                                        node.isMultilineFunctionSignatureWithoutExplicitReturnType(
++                                            lastNodeOfFunctionSignatureWithBodyExpression,
++                                        )
+                                 )
+                         } else {
+                             false
+@@ -658,6 +662,32 @@ public class FunctionSignatureRule :
+             .firstOrNull()
+             ?.takeIf { first -> first.isWhiteSpace() }
+ 
++    private fun List<ASTNode>.startsWithAnnotation(): Boolean =
++        this
++            .firstOrNull()
++            ?.let { firstNode ->
++                // Check if the first node itself is an annotation node
++                firstNode.elementType == ANNOTATION || firstNode.elementType == ANNOTATION_ENTRY ||
++                    // Or check if the first node is a leaf that belongs to an annotation
++                    firstNode.isPartOfAnnotation()
++            }
++            ?: false
++
++    private fun ASTNode.isPartOfAnnotation(): Boolean {
++        var current: ASTNode? = this
++        while (current != null) {
++            if (current.elementType == ANNOTATION || current.elementType == ANNOTATION_ENTRY) {
++                return true
++            }
++            // Stop if we reach a FUN node or certain other boundary nodes
++            if (current.elementType == FUN) {
++                return false
++            }
++            current = current.treeParent
++        }
++        return false
++    }
++
+     private fun isMaxLineLengthSet() = maxLineLength != MAX_LINE_LENGTH_PROPERTY_OFF
+ 
+     private fun List<ASTNode>.collectLeavesRecursively(): List<ASTNode> = flatMap { it.collectLeavesRecursively() }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotationTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotationTest.kt
+@@ -0,0 +1,83 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.EOL_CHAR
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.MAX_LINE_LENGTH_MARKER
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class FunctionSignatureRuleAnnotationTest {
++    private val functionSignatureRuleAssertThat = assertThatRule { FunctionSignatureRule() }
++
++    @Test
++    fun `Given a function with annotated body expression should not merge with function signature`() {
++        val code =
++            """
++            // $MAX_LINE_LENGTH_MARKER                                                                       $EOL_CHAR
++            private fun getErrorMessage(value: String): String =
++                    @Suppress("DEPRECATION")
++                    "some-value"
++            """.trimIndent()
++
++        // The function signature rule should not suggest merging the annotation with the signature
++        // as that would violate the annotation rule
++        functionSignatureRuleAssertThat(code)
++            .setMaxLineLength()
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a function with non-annotated body expression should merge with function signature when it fits`() {
++        val code =
++            """
++            // $MAX_LINE_LENGTH_MARKER                                                                       $EOL_CHAR
++            private fun getErrorMessage(value: String): String =
++                    "some-value"
++            """.trimIndent()
++        val formattedCode =
++            """
++            // $MAX_LINE_LENGTH_MARKER                                                                       $EOL_CHAR
++            private fun getErrorMessage(value: String): String = "some-value"
++            """.trimIndent()
++
++        // Without annotation, it should merge when it fits
++        functionSignatureRuleAssertThat(code)
++            .setMaxLineLength()
++            .hasLintViolation(2, 53, "First line of body expression fits on same line as function signature")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue 2028 - Given a function with annotated body expression should not merge with function signature`() {
++        val code =
++            """
++            // $MAX_LINE_LENGTH_MARKER                                                                       $EOL_CHAR
++            private fun getErrorMessage(value: String): String =
++                    @Suppress("DEPRECATION")
++                    customMessage.takeUnless { it.isEmpty() } ?: DEFAULT_ERROR_MESSAGE
++            """.trimIndent()
++
++        // The function signature rule should not suggest merging the annotation with the signature
++        // This was the original issue reported in #2028
++        functionSignatureRuleAssertThat(code)
++            .setMaxLineLength()
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a function with multiple annotations on body expression should not merge with function signature`() {
++        val code =
++            """
++            // $MAX_LINE_LENGTH_MARKER                                                                       $EOL_CHAR
++            private fun getErrorMessage(value: String): String =
++                    @Suppress("DEPRECATION")
++                    @OptIn(ExperimentalApi::class)
++                    "some-value"
++            """.trimIndent()
++
++        // Should not merge even with multiple annotations
++        functionSignatureRuleAssertThat(code)
++            .setMaxLineLength()
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

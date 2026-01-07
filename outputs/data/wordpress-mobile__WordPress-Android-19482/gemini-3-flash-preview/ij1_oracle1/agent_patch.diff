@@ -1,0 +1,256 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
+index a69565f211e..2cc191b1483 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
+@@ -21,6 +21,7 @@ import androidx.annotation.LayoutRes
+ import androidx.constraintlayout.widget.ConstraintLayout
+ import androidx.core.content.ContextCompat
+ import androidx.core.graphics.drawable.DrawableCompat
++import androidx.core.view.MenuCompat
+ import androidx.recyclerview.widget.RecyclerView
+ import org.wordpress.android.R
+ import org.wordpress.android.WordPress
+@@ -161,7 +162,7 @@ sealed class PostListItemViewHolder(
+         val menu = PopupMenu(v.context, v)
+         actions.forEach { singleItemAction ->
+             val menuItem = menu.menu.add(
+-                Menu.NONE,
++                singleItemAction.groupId,
+                 singleItemAction.buttonType.value,
+                 Menu.NONE,
+                 getMenuItemTitleWithIcon(v.context, singleItemAction)
+@@ -171,6 +172,7 @@ sealed class PostListItemViewHolder(
+                 true
+             }
+         }
++        MenuCompat.setGroupDividerEnabled(menu.menu, true)
+         menu.show()
+     }
+ 
+diff --git a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemType.kt b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemType.kt
+index 9c8a834ba87..dbdd8c2b1b4 100644
+--- a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemType.kt
++++ b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemType.kt
+@@ -1,6 +1,7 @@
+ package org.wordpress.android.viewmodel.posts
+ 
+ import androidx.annotation.ColorRes
++import android.view.Menu
+ import org.wordpress.android.fluxc.model.LocalOrRemoteId
+ import org.wordpress.android.ui.utils.UiString
+ import org.wordpress.android.viewmodel.posts.PostListItemIdentifier.LocalPostId
+@@ -34,9 +35,16 @@ data class PostListItemUiStateData(
+     val disableRippleEffect: Boolean
+ )
+ 
+-sealed class PostListItemAction(val buttonType: PostListButtonType, val onButtonClicked: (PostListButtonType) -> Unit) {
+-    class SingleItem(buttonType: PostListButtonType, onButtonClicked: (PostListButtonType) -> Unit) :
+-        PostListItemAction(buttonType, onButtonClicked)
++sealed class PostListItemAction(
++    val buttonType: PostListButtonType,
++    val onButtonClicked: (PostListButtonType) -> Unit,
++    val groupId: Int = Menu.NONE
++) {
++    class SingleItem(
++        buttonType: PostListButtonType,
++        onButtonClicked: (PostListButtonType) -> Unit,
++        groupId: Int = Menu.NONE
++    ) : PostListItemAction(buttonType, onButtonClicked, groupId)
+ 
+     class MoreItem(
+         val actions: List<PostListItemAction>,
+diff --git a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+index 5e3eed9be28..e223dc4ebb1 100644
+--- a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
++++ b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+@@ -22,6 +22,7 @@ import org.wordpress.android.ui.blaze.BlazeFeatureUtils
+ import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureRemovalPhaseHelper
+ import org.wordpress.android.ui.posts.AuthorFilterSelection
+ import org.wordpress.android.ui.posts.AuthorFilterSelection.EVERYONE
++import org.wordpress.android.ui.posts.PostListType
+ import org.wordpress.android.ui.posts.PostModelUploadStatusTracker
+ import org.wordpress.android.ui.posts.PostUtils
+ import org.wordpress.android.ui.prefs.AppPrefsWrapper
+@@ -90,6 +91,7 @@ class PostListItemUiStateHelper @Inject constructor(
+         performingCriticalAction: Boolean,
+         isSearch: Boolean,
+         uploadStatusTracker: PostModelUploadStatusTracker,
++        postListType: PostListType,
+         onAction: (PostModel, PostListButtonType, AnalyticsTracker.Stat) -> Unit,
+     ): PostListItemUiState {
+         val postStatus: PostStatus = PostStatus.fromPost(post)
+@@ -98,7 +100,7 @@ class PostListItemUiStateHelper @Inject constructor(
+         val onButtonClicked = { buttonType: PostListButtonType ->
+             onAction.invoke(post, buttonType, POST_LIST_BUTTON_PRESSED)
+         }
+-        val buttonTypes = createButtonTypes(
++        val moreActions = createMoreActions(
+             postStatus = postStatus,
+             isLocalDraft = post.isLocalDraft,
+             isLocallyChanged = post.isLocallyChanged,
+@@ -112,9 +114,9 @@ class PostListItemUiStateHelper @Inject constructor(
+                 postStatus,
+                 post
+             ),
++            postListType = postListType,
++            onButtonClicked = onButtonClicked
+         )
+-        // val defaultActions = createDefaultViewActions(buttonTypes, onButtonClicked)
+-        val moreActions = createMoreActions(buttonTypes, onButtonClicked)
+ 
+         val remotePostId = RemotePostId(RemoteId(post.remotePostId))
+         val localPostId = LocalPostId(LocalId(post.id))
+@@ -490,12 +492,134 @@ class PostListItemUiStateHelper @Inject constructor(
+     }
+ 
+     private fun createMoreActions(
+-        buttonTypes: List<PostListButtonType>,
++        postStatus: PostStatus,
++        isLocalDraft: Boolean,
++        isLocallyChanged: Boolean,
++        uploadUiState: PostUploadUiState,
++        siteHasCapabilitiesToPublish: Boolean,
++        statsSupported: Boolean,
++        shouldShowStatsInJetpackRemovalPhase: Boolean,
++        shouldShowPromoteWithBlaze: Boolean,
++        postListType: PostListType,
+         onButtonClicked: (PostListButtonType) -> Unit
+     ): PostListItemAction.MoreItem {
+-        val allItems = buttonTypes.map { buttonType: PostListButtonType ->
+-            PostListItemAction.SingleItem(buttonType, onButtonClicked)
++        val actions = mutableListOf<PostListItemAction>()
++
++        val canRetryUpload = uploadUiState is UploadFailed
++        val canCancelPendingAutoUpload = (uploadUiState is UploadWaitingForConnection ||
++                (uploadUiState is UploadFailed && uploadUiState.isEligibleForAutoUpload))
++        val canPublishPost = (canRetryUpload || uploadUiState is NothingToUpload || !canCancelPendingAutoUpload) &&
++                (isLocallyChanged || isLocalDraft || postStatus == DRAFT ||
++                        (siteHasCapabilitiesToPublish && postStatus == PENDING))
++
++        val canShowStats = statsSupported &&
++                postStatus == PUBLISHED &&
++                !isLocalDraft &&
++                !isLocallyChanged &&
++                shouldShowStatsInJetpackRemovalPhase
++        val canShowCopy = postStatus == PUBLISHED || postStatus == DRAFT
++        val canShowCopyUrlButton = !isLocalDraft && postStatus != TRASHED
++        val canShowViewButton = !canRetryUpload && postStatus != TRASHED
++        val canShowPublishButton = canRetryUpload || canPublishPost
++
++        // Group IDs
++        val groupPrimary = 1
++        val groupSecondary = 2
++        val groupDestructive = 3
++
++        when (postListType) {
++            PostListType.PUBLISHED -> {
++                if (canShowStats) actions.add(PostListItemAction.SingleItem(BUTTON_STATS, onButtonClicked, groupPrimary))
++                actions.add(PostListItemAction.SingleItem(BUTTON_EDIT, onButtonClicked, groupPrimary))
++                if (canShowViewButton) actions.add(PostListItemAction.SingleItem(BUTTON_VIEW, onButtonClicked, groupPrimary))
++                if (canShowCopyUrlButton) actions.add(PostListItemAction.SingleItem(BUTTON_COPY_URL, onButtonClicked, groupPrimary))
++
++                if (canShowCopy) actions.add(PostListItemAction.SingleItem(BUTTON_COPY, onButtonClicked, groupSecondary))
++                if (shouldShowPromoteWithBlaze) actions.add(
++                    PostListItemAction.SingleItem(BUTTON_PROMOTE_WITH_BLAZE, onButtonClicked, groupSecondary)
++                )
++
++                actions.add(PostListItemAction.SingleItem(BUTTON_MOVE_TO_DRAFT, onButtonClicked, groupDestructive))
++                actions.add(PostListItemAction.SingleItem(BUTTON_TRASH, onButtonClicked, groupDestructive))
++            }
++            PostListType.DRAFTS -> {
++                actions.add(PostListItemAction.SingleItem(BUTTON_EDIT, onButtonClicked, groupPrimary))
++                if (canShowViewButton) actions.add(PostListItemAction.SingleItem(BUTTON_PREVIEW, onButtonClicked, groupPrimary))
++                if (canShowPublishButton) {
++                    val type = when {
++                        canRetryUpload -> BUTTON_RETRY
++                        !siteHasCapabilitiesToPublish -> BUTTON_SUBMIT
++                        else -> BUTTON_PUBLISH
++                    }
++                    actions.add(PostListItemAction.SingleItem(type, onButtonClicked, groupPrimary))
++                }
++                if (canCancelPendingAutoUpload) actions.add(
++                    PostListItemAction.SingleItem(BUTTON_CANCEL_PENDING_AUTO_UPLOAD, onButtonClicked, groupPrimary)
++                )
++
++                if (canShowCopy) actions.add(PostListItemAction.SingleItem(BUTTON_COPY, onButtonClicked, groupSecondary))
++                if (canShowCopyUrlButton) actions.add(PostListItemAction.SingleItem(BUTTON_COPY_URL, onButtonClicked, groupSecondary))
++
++                actions.add(PostListItemAction.SingleItem(if (isLocalDraft) BUTTON_DELETE else BUTTON_TRASH, onButtonClicked, groupDestructive))
++            }
++            PostListType.SCHEDULED -> {
++                actions.add(PostListItemAction.SingleItem(BUTTON_EDIT, onButtonClicked, groupPrimary))
++                if (canShowViewButton) actions.add(PostListItemAction.SingleItem(BUTTON_PREVIEW, onButtonClicked, groupPrimary))
++                if (canShowPublishButton && postStatus == SCHEDULED && isLocallyChanged) {
++                    actions.add(PostListItemAction.SingleItem(BUTTON_SYNC, onButtonClicked, groupPrimary))
++                }
++
++                if (canShowCopy) actions.add(PostListItemAction.SingleItem(BUTTON_COPY, onButtonClicked, groupSecondary))
++                if (canShowCopyUrlButton) actions.add(PostListItemAction.SingleItem(BUTTON_COPY_URL, onButtonClicked, groupSecondary))
++
++                actions.add(PostListItemAction.SingleItem(BUTTON_MOVE_TO_DRAFT, onButtonClicked, groupDestructive))
++                actions.add(PostListItemAction.SingleItem(BUTTON_TRASH, onButtonClicked, groupDestructive))
++            }
++            PostListType.TRASHED -> {
++                actions.add(PostListItemAction.SingleItem(BUTTON_MOVE_TO_DRAFT, onButtonClicked, groupPrimary))
++                actions.add(PostListItemAction.SingleItem(BUTTON_DELETE_PERMANENTLY, onButtonClicked, groupPrimary))
++
++                if (canShowViewButton) actions.add(PostListItemAction.SingleItem(BUTTON_VIEW, onButtonClicked, groupSecondary))
++            }
++            else -> { // SEARCH or unknown
++                if (postStatus != TRASHED) actions.add(PostListItemAction.SingleItem(BUTTON_EDIT, onButtonClicked, groupPrimary))
++                if (canCancelPendingAutoUpload) actions.add(
++                    PostListItemAction.SingleItem(BUTTON_CANCEL_PENDING_AUTO_UPLOAD, onButtonClicked, groupPrimary)
++                )
++                if (canShowPublishButton) {
++                    val type = when {
++                        canRetryUpload -> BUTTON_RETRY
++                        !siteHasCapabilitiesToPublish -> BUTTON_SUBMIT
++                        postStatus == SCHEDULED && isLocallyChanged -> BUTTON_SYNC
++                        else -> BUTTON_PUBLISH
++                    }
++                    actions.add(PostListItemAction.SingleItem(type, onButtonClicked, groupPrimary))
++                }
++                if (canShowViewButton) {
++                    val type = if (isLocalDraft || isLocallyChanged) BUTTON_PREVIEW else BUTTON_VIEW
++                    actions.add(PostListItemAction.SingleItem(type, onButtonClicked, groupPrimary))
++                }
++                if (canShowStats) actions.add(PostListItemAction.SingleItem(BUTTON_STATS, onButtonClicked, groupPrimary))
++
++                if (canShowCopy) actions.add(PostListItemAction.SingleItem(BUTTON_COPY, onButtonClicked, groupSecondary))
++                if (canShowCopyUrlButton) actions.add(PostListItemAction.SingleItem(BUTTON_COPY_URL, onButtonClicked, groupSecondary))
++                if (shouldShowPromoteWithBlaze) actions.add(
++                    PostListItemAction.SingleItem(BUTTON_PROMOTE_WITH_BLAZE, onButtonClicked, groupSecondary)
++                )
++
++                if (postStatus == PUBLISHED || postStatus == TRASHED) {
++                    actions.add(PostListItemAction.SingleItem(BUTTON_MOVE_TO_DRAFT, onButtonClicked, groupDestructive))
++                }
++
++                val deleteType = when {
++                    isLocalDraft -> BUTTON_DELETE
++                    postStatus == TRASHED -> BUTTON_DELETE_PERMANENTLY
++                    else -> BUTTON_TRASH
++                }
++                actions.add(PostListItemAction.SingleItem(deleteType, onButtonClicked, groupDestructive))
++            }
+         }
+-        return PostListItemAction.MoreItem(allItems, onButtonClicked)
++
++        return PostListItemAction.MoreItem(actions, onButtonClicked)
+     }
+ }
+diff --git a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListViewModel.kt b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListViewModel.kt
+index c53d8db66c7..cf4f5343bee 100644
+--- a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListViewModel.kt
+@@ -381,8 +381,9 @@ class PostListViewModel @Inject constructor(
+             convertToPhotonUrlIfPossible(connector.getFeaturedImageUrl(post.featuredImageId)),
+             formattedDate = PostUtils.getFormattedDate(post),
+             performingCriticalAction = connector.postActionHandler.isPerformingCriticalAction(LocalId(post.id)),
++            postListType = connector.postListType,
+             onAction = { postModel, buttonType, statEvent ->
+-                trackPostListAction(connector.site, buttonType, postModel, statEvent)
++trackPostListAction(connector.site, buttonType, postModel, statEvent)
+                 connector.postActionHandler.handlePostButton(buttonType, postModel, hasAutoSave)
+             },
+             uploadStatusTracker = connector.uploadStatusTracker,

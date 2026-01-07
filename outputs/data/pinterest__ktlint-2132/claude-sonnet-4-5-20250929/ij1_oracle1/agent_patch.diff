@@ -1,0 +1,188 @@
+diff --git a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+index 201e7dac..30b5a488 100644
+--- a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
++++ b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+@@ -238,7 +238,16 @@ public fun ASTNode.upsertWhitespaceBeforeMe(text: String) {
+         }
+         val previous = treePrev ?: prevLeaf()
+         if (previous != null && previous.elementType == WHITE_SPACE) {
+-            previous.replaceWhitespaceWith(text)
++            // Only replace the whitespace if it's a direct sibling or if it's the immediately previous leaf
++            // and there are no other non-whitespace nodes between this node and the whitespace.
++            if (previous == treePrev || noIntermediateCodeElements(previous, this)) {
++                previous.replaceWhitespaceWith(text)
++            } else {
++                // Whitespace exists but is separated by other code elements, so insert new whitespace here
++                PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
++                    (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
++                }
++            }
+         } else {
+             PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
+                 (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
+@@ -272,7 +281,16 @@ public fun ASTNode.upsertWhitespaceAfterMe(text: String) {
+         }
+         val next = treeNext ?: nextLeaf()
+         if (next != null && next.elementType == WHITE_SPACE) {
+-            next.replaceWhitespaceWith(text)
++            // Only replace the whitespace if it's a direct sibling or if it's the immediately next leaf
++            // and there are no other non-whitespace nodes between this node and the whitespace.
++            if (next == treeNext || noIntermediateCodeElements(this, next)) {
++                next.replaceWhitespaceWith(text)
++            } else {
++                // Whitespace exists but is separated by other code elements, so insert new whitespace here
++                PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
++                    (psi as LeafElement).rawInsertAfterMe(psiWhiteSpace)
++                }
++            }
+         } else {
+             PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
+                 (psi as LeafElement).rawInsertAfterMe(psiWhiteSpace)
+@@ -283,6 +301,20 @@ public fun ASTNode.upsertWhitespaceAfterMe(text: String) {
+     }
+ }
+ 
++private fun noIntermediateCodeElements(
++    from: ASTNode,
++    to: ASTNode,
++): Boolean {
++    var current = from.nextLeaf()
++    while (current != null && current != to) {
++        if (current.elementType != WHITE_SPACE && !current.isPartOfComment()) {
++            return false
++        }
++        current = current.nextLeaf()
++    }
++    return current == to
++}
++
+ public val ASTNode.column: Int
+     get() {
+         var leaf = this.prevLeaf()
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue2535Test.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue2535Test.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue2535Test.kt
+@@ -0,0 +1,113 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++/**
++ * Test for issue #2535: Missing whitespace before function body is inserted in wrong place in AST.
++ *
++ * The issue was that when multiple rules tried to insert whitespace before a function body block,
++ * the whitespace element was inserted in the wrong position in the AST, causing ktlint to report
++ * that not all violations could be resolved in 3 consecutive runs of format.
++ */
++class Issue2535Test {
++    private val functionSignatureRuleAssertThat = assertThatRule { FunctionSignatureRule() }
++
++    @Test
++    fun `Issue 2535 - Given a function without space before body block in class then format correctly in single run`() {
++        val code =
++            """
++            class UampNotificationManager(
++                private val context: Context,
++                sessionToken: MediaSessionCompat.Token,
++                notificationListener: PlayerNotificationManager.NotificationListener,
++            ) {
++                fun showNotificationForPlayer(player: Player){
++                    notificationManager.setPlayer(player)
++                }
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            class UampNotificationManager(
++                private val context: Context,
++                sessionToken: MediaSessionCompat.Token,
++                notificationListener: PlayerNotificationManager.NotificationListener,
++            ) {
++                fun showNotificationForPlayer(player: Player) {
++                    notificationManager.setPlayer(player)
++                }
++            }
++            """.trimIndent()
++        functionSignatureRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .addAdditionalRuleProvider { FunctionStartOfBodySpacingRule() }
++            .addAdditionalRuleProvider { SpacingAroundCurlyRule() }
++            .hasLintViolation(6, 50, "Expected a single space before body block")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue 2535 - Given a simple function without space before body block then format correctly`() {
++        val code =
++            """
++            fun foo(){
++                bar()
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun foo() {
++                bar()
++            }
++            """.trimIndent()
++        functionSignatureRuleAssertThat(code)
++            .addAdditionalRuleProvider { FunctionStartOfBodySpacingRule() }
++            .addAdditionalRuleProvider { SpacingAroundCurlyRule() }
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue 2535 - Given a function with parameters and no space before body block then format correctly`() {
++        val code =
++            """
++            fun calculate(a: Int, b: Int){
++                return a + b
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun calculate(a: Int, b: Int) {
++                return a + b
++            }
++            """.trimIndent()
++        functionSignatureRuleAssertThat(code)
++            .addAdditionalRuleProvider { FunctionStartOfBodySpacingRule() }
++            .addAdditionalRuleProvider { SpacingAroundCurlyRule() }
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue 2535 - Given a function with return type and no space before body block then format correctly`() {
++        val code =
++            """
++            fun calculate(a: Int, b: Int): Int{
++                return a + b
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun calculate(a: Int, b: Int): Int {
++                return a + b
++            }
++            """.trimIndent()
++        functionSignatureRuleAssertThat(code)
++            .addAdditionalRuleProvider { FunctionStartOfBodySpacingRule() }
++            .addAdditionalRuleProvider { SpacingAroundCurlyRule() }
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

@@ -1,5 +1,5 @@
 diff --git a/WordPress/src/main/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProvider.kt b/WordPress/src/main/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProvider.kt
-index 0600bbcff44..35f50dbb782 100644
+index 0600bbcff44..a758f3b9fee 100644
 --- a/WordPress/src/main/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProvider.kt
 +++ b/WordPress/src/main/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProvider.kt
 @@ -2,6 +2,7 @@ package org.wordpress.android.ui.bloggingprompts
@@ -10,7 +10,7 @@ index 0600bbcff44..35f50dbb782 100644
  import org.wordpress.android.ui.reader.utils.ReaderUtilsWrapper
  import javax.inject.Inject
  
-@@ -16,13 +17,23 @@ class BloggingPromptsPostTagProvider @Inject constructor(
+@@ -16,13 +17,22 @@ class BloggingPromptsPostTagProvider @Inject constructor(
  
      fun promptIdSearchReaderTag(
          tagUrl: String
@@ -19,14 +19,13 @@ index 0600bbcff44..35f50dbb782 100644
 -        ReaderTagType.FOLLOWED,
 -    )
 +    ): ReaderTag {
-+        val tagSlug = ReaderUtils.sanitizeWithDashes(promptIdTag(tagUrl))
-+        // The endpoint must contain "/read/tags/" for isTagTopic() to return true,
-+        // which ensures the correct sort column (date_tagged) is used for pagination.
++        val tagName = promptIdTag(tagUrl)
++        val tagSlug = ReaderUtils.sanitizeWithDashes(tagName).lowercase()
 +        val endpoint = String.format(TAG_ENDPOINT_FORMAT, tagSlug)
 +        return ReaderTag(
 +            tagSlug,
 +            tagSlug,
-+            tagSlug,
++            tagName,
 +            endpoint,
 +            ReaderTagType.FOLLOWED
 +        )
@@ -38,67 +37,110 @@ index 0600bbcff44..35f50dbb782 100644
 +        private const val TAG_ENDPOINT_FORMAT = "read/tags/%s/posts"
      }
  }
-diff --git a/WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderTest.kt
-index 8c901817c0f..c5d6160c688 100644
---- a/WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderTest.kt
-+++ b/WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderTest.kt
-@@ -5,14 +5,11 @@ import org.assertj.core.api.Assertions.assertThat
- import org.junit.Before
- import org.junit.Test
- import org.mockito.Mock
--import org.mockito.Mockito.mock
- import org.mockito.kotlin.any
- import org.mockito.kotlin.whenever
- import org.wordpress.android.BaseUnitTest
--import org.wordpress.android.models.ReaderTag
- import org.wordpress.android.models.ReaderTagType
- import org.wordpress.android.ui.reader.utils.ReaderUtilsWrapper
--import kotlin.test.assertEquals
- 
- @OptIn(ExperimentalCoroutinesApi::class)
- class BloggingPromptsPostTagProviderTest : BaseUnitTest() {
-@@ -23,9 +20,6 @@ class BloggingPromptsPostTagProviderTest : BaseUnitTest() {
- 
-     @Before
-     fun setUp() {
--        whenever(readerUtilsWrapper.getTagFromTagName(BLOGGING_PROMPT_ID_TAG, ReaderTagType.FOLLOWED))
--            .thenReturn(BLOGGING_PROMPT_ID_READER_TAG)
--
-         tagProvider = BloggingPromptsPostTagProvider(readerUtilsWrapper)
-     }
- 
-@@ -48,16 +42,31 @@ class BloggingPromptsPostTagProviderTest : BaseUnitTest() {
-     }
- 
-     @Test
--    fun `Should return the expected ReaderTag when promptIdSearchReaderTag is called`() {
-+    fun `Should return ReaderTag with correct properties when promptIdSearchReaderTag is called`() {
-         whenever(readerUtilsWrapper.getTagFromTagUrl(any())).thenReturn(BLOGGING_PROMPT_ID_TAG)
- 
-         val actual = tagProvider.promptIdSearchReaderTag("valid-url")
- 
--        assertEquals(BLOGGING_PROMPT_ID_READER_TAG, actual)
-+        assertThat(actual.tagSlug).isEqualTo(BLOGGING_PROMPT_ID_TAG)
-+        assertThat(actual.tagType).isEqualTo(ReaderTagType.FOLLOWED)
-+        // The endpoint must contain "/read/tags/" for isTagTopic() to return true
-+        assertThat(actual.endpoint).contains("/read/tags/")
-+        assertThat(actual.isTagTopic).isTrue()
+
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderPaginationTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderPaginationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderPaginationTest.kt
+@@ -0,0 +1,101 @@
++package org.wordpress.android.ui.bloggingprompts
++
++import kotlinx.coroutines.ExperimentalCoroutinesApi
++import org.assertj.core.api.Assertions.assertThat
++import org.junit.Before
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.mockito.Mock
++import org.mockito.junit.MockitoJUnitRunner
++import org.mockito.kotlin.any
++import org.mockito.kotlin.whenever
++import org.wordpress.android.BaseUnitTest
++import org.wordpress.android.models.ReaderTagType
++import org.wordpress.android.ui.reader.utils.ReaderUtilsWrapper
++
++/**
++ * Tests for [BloggingPromptsPostTagProvider] focusing on pagination fix.
++ *
++ * This test verifies that the ReaderTag returned by promptIdSearchReaderTag has the proper
++ * endpoint set so that isTagTopic() returns true. This is critical for correct pagination
++ * behavior in the Reader when viewing blogging prompt responses.
++ *
++ * Related issue: Regression in Prompts responses list pagination
++ * - Posts were shifting places when loading due to incorrect sorting column selection
++ * - Pagination was stopping prematurely
++ * - Root cause: ReaderTag was created without an endpoint, causing isTagTopic() to return false
++ */
++@ExperimentalCoroutinesApi
++@RunWith(MockitoJUnitRunner::class)
++class BloggingPromptsPostTagProviderPaginationTest : BaseUnitTest() {
++    @Mock
++    private lateinit var readerUtilsWrapper: ReaderUtilsWrapper
++
++    private lateinit var tagProvider: BloggingPromptsPostTagProvider
++
++    @Before
++    fun setUp() {
++        tagProvider = BloggingPromptsPostTagProvider(readerUtilsWrapper)
 +    }
 +
 +    @Test
-+    fun `Should return ReaderTag with sanitized tag slug when promptIdSearchReaderTag is called`() {
-+        val tagWithSpaces = "daily prompt 1234"
-+        whenever(readerUtilsWrapper.getTagFromTagUrl(any())).thenReturn(tagWithSpaces)
++    fun `promptIdSearchReaderTag returns tag with endpoint containing read tags path`() {
++        whenever(readerUtilsWrapper.getTagFromTagUrl(any())).thenReturn(BLOGGING_PROMPT_ID_TAG)
 +
-+        val actual = tagProvider.promptIdSearchReaderTag("valid-url")
++        val readerTag = tagProvider.promptIdSearchReaderTag("valid-url")
 +
-+        // Tag slug should be sanitized with dashes
-+        assertThat(actual.tagSlug).isEqualTo("daily-prompt-1234")
-+        assertThat(actual.isTagTopic).isTrue()
-     }
- 
-     companion object {
-         private const val BLOGGING_PROMPT_ID_TAG = "dailyprompt-1234"
--        private val BLOGGING_PROMPT_ID_READER_TAG = mock<ReaderTag>()
-     }
- }
++        assertThat(readerTag.endpoint).contains("/read/tags/")
++    }
++
++    @Test
++    fun `promptIdSearchReaderTag returns tag where isTagTopic returns true`() {
++        whenever(readerUtilsWrapper.getTagFromTagUrl(any())).thenReturn(BLOGGING_PROMPT_ID_TAG)
++
++        val readerTag = tagProvider.promptIdSearchReaderTag("valid-url")
++
++        assertThat(readerTag.isTagTopic).isTrue()
++    }
++
++    @Test
++    fun `promptIdSearchReaderTag returns tag with correct tag type`() {
++        whenever(readerUtilsWrapper.getTagFromTagUrl(any())).thenReturn(BLOGGING_PROMPT_ID_TAG)
++
++        val readerTag = tagProvider.promptIdSearchReaderTag("valid-url")
++
++        assertThat(readerTag.tagType).isEqualTo(ReaderTagType.FOLLOWED)
++    }
++
++    @Test
++    fun `promptIdSearchReaderTag returns tag with correct tag slug`() {
++        whenever(readerUtilsWrapper.getTagFromTagUrl(any())).thenReturn(BLOGGING_PROMPT_ID_TAG)
++
++        val readerTag = tagProvider.promptIdSearchReaderTag("valid-url")
++
++        assertThat(readerTag.tagSlug).isEqualTo(BLOGGING_PROMPT_ID_TAG)
++    }
++
++    @Test
++    fun `promptIdSearchReaderTag returns tag with endpoint in correct format`() {
++        whenever(readerUtilsWrapper.getTagFromTagUrl(any())).thenReturn(BLOGGING_PROMPT_ID_TAG)
++
++        val readerTag = tagProvider.promptIdSearchReaderTag("valid-url")
++
++        val expectedEndpoint = "read/tags/$BLOGGING_PROMPT_ID_TAG/posts"
++        assertThat(readerTag.endpoint).isEqualTo(expectedEndpoint)
++    }
++
++    @Test
++    fun `promptIdSearchReaderTag with fallback tag returns tag with proper endpoint`() {
++        whenever(readerUtilsWrapper.getTagFromTagUrl(any())).thenReturn("")
++
++        val readerTag = tagProvider.promptIdSearchReaderTag("invalid-url")
++
++        assertThat(readerTag.isTagTopic).isTrue()
++        assertThat(readerTag.tagSlug).isEqualTo(BloggingPromptsPostTagProvider.BLOGGING_PROMPT_TAG)
++    }
++
++    companion object {
++        private const val BLOGGING_PROMPT_ID_TAG = "dailyprompt-1234"
++    }
++}
++

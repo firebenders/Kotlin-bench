@@ -1,0 +1,338 @@
+diff --git a/kotlinx-coroutines-core/jdk8/src/future/Future.kt b/kotlinx-coroutines-core/jdk8/src/future/Future.kt
+index 4d9a01ac7..aaa4fb77b 100644
+--- a/kotlinx-coroutines-core/jdk8/src/future/Future.kt
++++ b/kotlinx-coroutines-core/jdk8/src/future/Future.kt
+@@ -58,10 +58,7 @@ private class CompletableFutureCoroutine<T>(
+     }
+ 
+     override fun onCancelled(cause: Throwable, handled: Boolean) {
+-        if (!future.completeExceptionally(cause) && !handled) {
+-            // prevents loss of exception that was not handled by parent & could not be set to CompletableFuture
+-            handleCoroutineException(context, cause)
+-        }
++        future.completeExceptionally(cause)
+     }
+ }
+ 
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureExceptionHandlerTest.kt b/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureExceptionHandlerTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureExceptionHandlerTest.kt
+@@ -0,0 +1,171 @@
++/*
++ * Copyright 2016-2021 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines.future
++
++import kotlinx.coroutines.*
++import org.junit.Test
++import java.util.concurrent.*
++import kotlin.test.*
++
++/**
++ * Tests that verify `future` builder does not trigger global exception handler,
++ * and delivers all errors via the returned CompletableFuture.
++ */
++class FutureExceptionHandlerTest : TestBase() {
++
++    @Test
++    fun testExceptionNotDeliveredToGlobalHandler() = runTest {
++        // future builder should not trigger global exception handler
++        // All errors should be delivered via the CompletableFuture
++        val future = GlobalScope.future {
++            throw TestException("FAIL")
++        }
++        
++        // Wait for the future to complete
++        delay(100)
++        
++        // Verify the future contains the exception
++        assertTrue(future.isCompletedExceptionally)
++        val exception = assertFailsWith<ExecutionException> {
++            future.get()
++        }
++        assertTrue(exception.cause is TestException)
++        assertEquals("FAIL", exception.cause?.message)
++    }
++
++    @Test
++    fun testExceptionWithExternalCancellation() = runTest {
++        // Test the scenario from the issue:
++        // future throws an error, then is cancelled externally
++        val future = GlobalScope.future {
++            error("foo")
++        }
++        
++        // Cancel the future externally
++        future.cancel(true)
++        
++        // Wait a bit to ensure any exception handling is triggered
++        delay(100)
++        
++        // Verify the future is cancelled or completed exceptionally
++        assertTrue(future.isDone)
++        assertTrue(future.isCompletedExceptionally || future.isCancelled)
++    }
++
++    @Test
++    fun testExceptionInChildCoroutine() = runTest(
++        expected = { it is TestException } // exception propagates to parent with structured concurrency
++    ) {
++        // When a child coroutine throws, it should propagate to parent
++        // but should not trigger global handler
++        val future = future<Int>(Dispatchers.Unconfined) {
++            launch {
++                throw TestException("child failed")
++            }
++            delay(Long.MAX_VALUE)
++        }
++        
++        // Wait for completion
++        delay(100)
++        
++        // Verify the future contains the exception
++        assertTrue(future.isCompletedExceptionally)
++        val exception = assertFailsWith<ExecutionException> {
++            future.get()
++        }
++        assertTrue(exception.cause is TestException)
++    }
++
++    @Test
++    fun testCancellationDoesNotTriggerHandler() = runTest {
++        // Simple cancellation should not trigger exception handler
++        val started = CompletableDeferred<Unit>()
++        val future = GlobalScope.future {
++            started.complete(Unit)
++            delay(Long.MAX_VALUE)
++        }
++        
++        // Wait for coroutine to start
++        started.await()
++        
++        // Cancel the future
++        future.cancel(true)
++        
++        // Wait a bit
++        delay(100)
++        
++        // Verify it's cancelled
++        assertTrue(future.isCancelled)
++    }
++
++    @Test
++    fun testExceptionInFinallyBlock() = runTest {
++        // Test that exception in finally block after external cancellation
++        // doesn't trigger global handler
++        val future = GlobalScope.future {
++            try {
++                delay(Long.MAX_VALUE)
++            } finally {
++                throw TestException("finally block")
++            }
++        }
++        
++        // Cancel externally
++        future.cancel(true)
++        
++        // Wait a bit
++        delay(100)
++        
++        // The future should be completed (either cancelled or with exception)
++        assertTrue(future.isDone)
++    }
++
++    @Test
++    fun testMultipleExternalCancellations() = runTest {
++        // Test multiple cancellations don't cause issues
++        val future = GlobalScope.future {
++            try {
++                delay(Long.MAX_VALUE)
++            } catch (e: CancellationException) {
++                // Rethrow cancellation
++                throw e
++            }
++        }
++        
++        // Cancel multiple times
++        future.cancel(true)
++        future.cancel(true)
++        
++        // Wait a bit
++        delay(100)
++        
++        // Should be cancelled
++        assertTrue(future.isCancelled)
++    }
++
++    @Test
++    fun testRaceConditionExceptionAndCancellation() = runTest {
++        // Test rapid succession of exception and cancellation
++        repeat(100) {
++            val future = GlobalScope.future {
++                // Sometimes this will throw before cancel, sometimes after
++                delay(1)
++                throw TestException("race")
++            }
++            
++            // Cancel immediately
++            future.cancel(true)
++            
++            // Wait for completion
++            while (!future.isDone) {
++                delay(1)
++            }
++            
++            // Should be done (either cancelled or exceptionally completed)
++            assertTrue(future.isDone)
++        }
++    }
++}
++
+
+diff --git a/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureGlobalExceptionHandlerTest.kt b/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureGlobalExceptionHandlerTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureGlobalExceptionHandlerTest.kt
+@@ -0,0 +1,124 @@
++/*
++ * Copyright 2016-2021 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines.future
++
++import kotlinx.coroutines.*
++import org.junit.Test
++import java.util.concurrent.*
++
++/**
++ * Test for the issue where future() may trigger global exception handler on cancellation.
++ * See: https://github.com/Kotlin/kotlinx.coroutines/issues/892
++ * 
++ * The expected behavior is that `future` coroutine builder delivers all errors via the 
++ * returned CompletableFuture, just like `async`, and should never trigger the global 
++ * exception handler.
++ */
++class FutureGlobalExceptionHandlerTest : TestBase() {
++
++    /**
++     * This is the exact scenario from the issue report.
++     * The future throws an error, then is cancelled.
++     * This should NOT trigger the global exception handler.
++     */
++    @Test
++    fun testIssueScenario() = runTest {
++        // No unhandled exceptions should be caught
++        val future = GlobalScope.future {
++            error("foo")
++        }
++        future.cancel(true)
++        delay(100)
++        
++        // Verify the future is completed (either with exception or cancellation)
++        assertTrue(future.isDone)
++    }
++
++    /**
++     * Test that a simple exception in future is delivered via the future,
++     * not the global handler.
++     */
++    @Test
++    fun testSimpleException() = runTest {
++        val future = GlobalScope.future {
++            throw TestException("test")
++        }
++        
++        delay(100)
++        
++        // Exception should be in the future
++        assertTrue(future.isCompletedExceptionally)
++        val exception = assertFailsWith<ExecutionException> {
++            future.get()
++        }
++        assertTrue(exception.cause is TestException)
++    }
++
++    /**
++     * Test that cancelling a running future doesn't trigger the global handler.
++     */
++    @Test
++    fun testCancellation() = runTest {
++        val started = CompletableDeferred<Unit>()
++        val future = GlobalScope.future {
++            started.complete(Unit)
++            delay(10000)
++        }
++        
++        started.await()
++        future.cancel(true)
++        delay(100)
++        
++        assertTrue(future.isCancelled)
++    }
++
++    /**
++     * Test the behavior matches async: exception stored in result, not sent to handler.
++     */
++    @Test
++    fun testBehaviorMatchesAsync() = runTest {
++        // async behavior
++        val deferred = GlobalScope.async {
++            throw TestException("async error")
++        }
++        delay(100)
++        assertTrue(deferred.isCompleted)
++        assertFailsWith<TestException> { deferred.await() }
++        
++        // future should behave the same way
++        val future = GlobalScope.future {
++            throw TestException("future error")
++        }
++        delay(100)
++        assertTrue(future.isDone)
++        val exception = assertFailsWith<ExecutionException> {
++            future.get()
++        }
++        assertTrue(exception.cause is TestException)
++    }
++
++    /**
++     * Test that when future is already completed externally,
++     * subsequent exceptions don't trigger the global handler.
++     */
++    @Test
++    fun testExternalCompletionThenException() = runTest {
++        val latch = CompletableDeferred<Unit>()
++        val future = GlobalScope.future {
++            latch.await()
++            throw TestException("should not reach handler")
++        }
++        
++        // Complete the future externally before the exception
++        future.complete(Unit as Nothing?)
++        latch.complete(Unit)
++        
++        delay(100)
++        
++        // Future should be completed with the external value
++        assertTrue(future.isDone)
++    }
++}
++

@@ -1,0 +1,117 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+index dbed1796..4f60fac6 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+@@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.LAMBDA_ARGUMENT
+@@ -22,9 +23,11 @@ import com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf
+ import com.pinterest.ktlint.rule.engine.core.api.indent
+ import com.pinterest.ktlint.rule.engine.core.api.leavesOnLine
+ import com.pinterest.ktlint.rule.engine.core.api.nextCodeSibling
++import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+ import com.pinterest.ktlint.rule.engine.core.api.nextSibling
+ import com.pinterest.ktlint.rule.engine.core.api.noNewLineInClosedRange
+ import com.pinterest.ktlint.rule.engine.core.api.parent
++import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevSibling
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceBeforeMe
+ import com.pinterest.ktlint.ruleset.standard.StandardRule
+@@ -118,6 +121,14 @@ public class BinaryExpressionWrappingRule :
+                 binaryExpression.parent { it.elementType == LONG_STRING_TEMPLATE_ENTRY } == null
+             }?.takeIf { it.isOnLineExceedingMaxLineLength() }
+             ?.let { operationReference ->
++                if (operationReference.isElvisOperator() && operationReference.prevLeaf().isWhiteSpaceWithNewline()) {
++                    // Prevent an autocorrect loop with the ChainWrappingRule. When the elvis operator ("?:") is leading on the line, then
++                    // breaking the line after the operator would create a line ending with "?:" which is then immediately reverted by the
++                    // ChainWrappingRule in a next format run.
++                    emit(operationReference.startOffset, "Line is exceeding max line length", false)
++                    return
++                }
++
+                 if (node.isCallExpressionFollowedByLambdaArgument() || cannotBeWrappedAtOperationReference(operationReference)) {
+                     // Wrapping after operation reference might not be the best place in case of a call expression or just won't work as
+                     // the left hand side still does not fit on a single line
+@@ -132,7 +143,7 @@ public class BinaryExpressionWrappingRule :
+                                 true,
+                             )
+                             if (autoCorrect) {
+-                                nextSibling.upsertWhitespaceBeforeMe(operationReference.indent().plus(indentConfig.indent))
++                                nextSibling.upsertWhitespaceBeforeMe(indentConfig.childIndentOf(operationReference))
+                             }
+                         }
+                 }
+@@ -145,6 +156,10 @@ public class BinaryExpressionWrappingRule :
+             ?.nextCodeSibling()
+             .let { it?.elementType == LAMBDA_ARGUMENT }
+ 
++    private fun ASTNode.isElvisOperator() =
++        elementType == OPERATION_REFERENCE &&
++            firstChildNode.elementType == ELVIS
++
+     private fun cannotBeWrappedAtOperationReference(operationReference: ASTNode) =
+         operationReference
+             .takeUnless { it.nextCodeSibling()?.elementType == BINARY_EXPRESSION }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleElvisOperatorRegressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleElvisOperatorRegressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleElvisOperatorRegressionTest.kt
+@@ -0,0 +1,44 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat
++import org.junit.jupiter.api.Test
++
++class BinaryExpressionWrappingRuleElvisOperatorRegressionTest {
++    private val binaryExpressionWrappingRuleAssertThat =
++        KtLintAssertThat.assertThatRule { BinaryExpressionWrappingRule() }
++
++    @Test
++    fun `Endless loop in wrapping binary expression after elvis operator is prevented`() {
++        val code =
++            """
++            val foo =
++                bar
++                    ?:
++                    throw UnsupportedOperationException("xxxxxxxxxxx")
++            """.trimIndent()
++
++        val formattedCode =
++            """
++            val foo =
++                bar
++                    ?: throw UnsupportedOperationException("xxxxxxxxxxx")
++            """.trimIndent()
++
++        binaryExpressionWrappingRuleAssertThat(code)
++            .addAdditionalRuleProviders(
++                { ArgumentListWrappingRule() },
++                { ChainWrappingRule() },
++                { IndentationRule() },
++                { WrappingRule() },
++            ).withEditorConfigOverride(
++                MAX_LINE_LENGTH_PROPERTY to 60,
++                CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official,
++            ).isFormattedAs(formattedCode)
++
++        // Note: Not asserting that the max-line-length violation is fixed here, as wrapping the argument list is handled by a different rule.
++}
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

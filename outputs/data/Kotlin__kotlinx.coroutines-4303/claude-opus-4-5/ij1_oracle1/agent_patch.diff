@@ -1,0 +1,176 @@
+diff --git a/kotlinx-coroutines-core/common/src/internal/Scopes.kt b/kotlinx-coroutines-core/common/src/internal/Scopes.kt
+index 7e561c83d..fda093f93 100644
+--- a/kotlinx-coroutines-core/common/src/internal/Scopes.kt
++++ b/kotlinx-coroutines-core/common/src/internal/Scopes.kt
+@@ -27,6 +27,16 @@ internal open class ScopeCoroutine<in T>(
+         // Resume direct because scope is already in the correct context
+         uCont.resumeWith(recoverResult(state, uCont))
+     }
++
++    /**
++     * Called when the undispatched coroutine completes synchronously without suspension.
++     * This is used on JVM to clean up thread-local state that would otherwise leak
++     * when afterResume() is not called (because it only runs when the coroutine suspends).
++     * See https://github.com/Kotlin/kotlinx.coroutines/issues/4289
++     */
++    open fun onSynchronousCompletionForUndispatched() {
++        // No-op by default, overridden in JVM's UndispatchedCoroutine
++    }
+ }
+ 
+ internal class ContextScope(context: CoroutineContext) : CoroutineScope {
+diff --git a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+index 254182b38..320a731f3 100644
+--- a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
++++ b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+@@ -79,6 +79,11 @@ private inline fun <T> ScopeCoroutine<T>.undispatchedResult(
+     if (result === COROUTINE_SUSPENDED) return COROUTINE_SUSPENDED // (1)
+     val state = makeCompletingOnce(result)
+     if (state === COMPLETING_WAITING_CHILDREN) return COROUTINE_SUSPENDED // (2)
++    // Clean up thread-local state that may have been set by UndispatchedCoroutine's init block
++    // when the coroutine completes synchronously without suspension.
++    // afterResume() won't be called in this path, so we need to clean up here.
++    // See https://github.com/Kotlin/kotlinx.coroutines/issues/4289
++    onSynchronousCompletionForUndispatched()
+     return if (state is CompletedExceptionally) { // (3)
+         when {
+             shouldThrow(state.cause) -> throw recoverStackTrace(state.cause, uCont)
+diff --git a/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt b/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
+index ae8275f86..05026e966 100644
+--- a/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
++++ b/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
+@@ -266,6 +266,17 @@ internal actual class UndispatchedCoroutine<in T>actual constructor (
+             uCont.resumeWith(result)
+         }
+     }
++
++    /**
++     * Called when the undispatched coroutine completes synchronously without suspension.
++     * In this case, afterResume() is not called, so we need to clean up the thread-local state here.
++     * See https://github.com/Kotlin/kotlinx.coroutines/issues/4289
++     */
++    override fun onSynchronousCompletionForUndispatched() {
++        if (threadLocalIsSet) {
++            threadStateToRecover.remove()
++        }
++    }
+ }
+ 
+ internal actual val CoroutineContext.coroutineName: String? get() {
+
+diff --git a/kotlinx-coroutines-core/jvm/test/CustomContinuationInterceptorLeakTest.kt b/kotlinx-coroutines-core/jvm/test/CustomContinuationInterceptorLeakTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/CustomContinuationInterceptorLeakTest.kt
+@@ -0,0 +1,111 @@
++package kotlinx.coroutines
++
++import kotlinx.coroutines.testing.*
++import org.junit.Test
++import java.lang.ref.*
++import kotlin.coroutines.*
++import kotlin.test.*
++
++/**
++ * Tests to verify that UndispatchedCoroutine doesn't leak CoroutineContext via thread local
++ * when using custom ContinuationInterceptor that is not a CoroutineDispatcher.
++ *
++ * See https://github.com/Kotlin/kotlinx.coroutines/issues/4289
++ */
++class CustomContinuationInterceptorLeakTest : TestBase() {
++
++    @Test
++    fun testCoroutineDispatcherNotSuspendingDoesNotLeakCoroutineContext() =
++        ensureCoroutineContextGCed(Dispatchers.Default, suspend = false)
++
++    @Test
++    fun testCoroutineDispatcherSuspendingDoesNotLeakCoroutineContext() =
++        ensureCoroutineContextGCed(Dispatchers.Default, suspend = true)
++
++    @Test
++    fun testCustomContinuationInterceptorSuspendingDoesNotLeakCoroutineContext() =
++        ensureCoroutineContextGCed(
++            CustomContinuationInterceptor(Dispatchers.Default),
++            suspend = true
++        )
++
++    /**
++     * This is the key test case from the issue.
++     * Before the fix, this test would fail because:
++     * 1. UndispatchedCoroutine.init() saves thread context when ContinuationInterceptor !is CoroutineDispatcher
++     * 2. When the coroutine doesn't suspend, afterResume() is never called
++     * 3. The thread local is never cleaned up, causing the CoroutineContext to leak
++     */
++    @Test
++    fun testCustomContinuationInterceptorNotSuspendingDoesNotLeakCoroutineContext() =
++        ensureCoroutineContextGCed(
++            CustomContinuationInterceptor(Dispatchers.Default),
++            suspend = false
++        )
++
++    @Test
++    fun testCustomNeverEqualContinuationInterceptorSuspendingDoesNotLeakCoroutineContext() =
++        ensureCoroutineContextGCed(
++            CustomNeverEqualContinuationInterceptor(Dispatchers.Default),
++            suspend = true
++        )
++
++    @Test
++    fun testCustomNeverEqualContinuationInterceptorNotSuspendingDoesNotLeakCoroutineContext() =
++        ensureCoroutineContextGCed(
++            CustomNeverEqualContinuationInterceptor(Dispatchers.Default),
++            suspend = false
++        )
++
++    private fun ensureCoroutineContextGCed(coroutineContext: CoroutineContext, suspend: Boolean) {
++        runTest {
++            lateinit var ref: WeakReference<CoroutineName>
++            val job = GlobalScope.launch(coroutineContext) {
++                val coroutineName = CoroutineName("TestCoroutine")
++                ref = WeakReference(coroutineName)
++                withContext(coroutineName) {
++                    if (suspend) {
++                        delay(1)
++                    }
++                }
++            }
++            job.join()
++
++            // Force GC to collect unreferenced objects
++            System.gc()
++            // Give GC time to run
++            Thread.sleep(100)
++            System.gc()
++
++            assertNull(ref.get(), "CoroutineContext should have been garbage collected but was retained")
++        }
++    }
++}
++
++/**
++ * A custom ContinuationInterceptor that is NOT a CoroutineDispatcher.
++ * This triggers the special code path in UndispatchedCoroutine's init block.
++ */
++class CustomContinuationInterceptor(private val delegate: ContinuationInterceptor) :
++    AbstractCoroutineContextElement(ContinuationInterceptor), ContinuationInterceptor {
++
++    override fun <T> interceptContinuation(continuation: Continuation<T>): Continuation<T> {
++        return delegate.interceptContinuation(continuation)
++    }
++}
++
++/**
++ * A custom ContinuationInterceptor that never equals any other interceptor.
++ * This causes withContext to skip FAST PATH #2 and use the SLOW PATH instead,
++ * which doesn't have the leak issue.
++ */
++class CustomNeverEqualContinuationInterceptor(private val delegate: ContinuationInterceptor) :
++    AbstractCoroutineContextElement(ContinuationInterceptor), ContinuationInterceptor {
++
++    override fun <T> interceptContinuation(continuation: Continuation<T>): Continuation<T> {
++        return delegate.interceptContinuation(continuation)
++    }
++
++    override fun equals(other: Any?) = false
++}
++

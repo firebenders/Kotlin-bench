@@ -441,7 +441,7 @@ LOCAL_OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"
 # =============================================================================
 
 # How long to wait for IntelliJ IDE to start and be ready for queries
-SERVER_STARTUP_TIMEOUT = 900  # 10 minutes
+SERVER_STARTUP_TIMEOUT = 600  # 10 minutes
 
 # How long to wait for the agent to complete its code changes
 AGENT_QUERY_TIMEOUT = 1800  # 30 minutes
@@ -456,7 +456,7 @@ MODAL_TASK_TIMEOUT = 7200  # 2 hours
 SETUP_TIMEOUT = 300  # 5 minutes
 
 # Download/utility function timeout
-DOWNLOAD_TIMEOUT = 300  # 5 minutes
+DOWNLOAD_TIMEOUT = 1800  # 30 minutes (large models have 1000+ files)
 
 
 def get_result_paths(instance_id: str, model: str, settings: "EvalSettings" = None) -> dict:
@@ -685,6 +685,19 @@ def generate_eval_prompt(task: "TaskInstance", settings: "EvalSettings" = None) 
     lines.append("- Understanding the root cause of the issue")
     lines.append("- Making minimal, targeted changes to fix the problem")
     lines.append("- Ensuring your changes don't break existing functionality")
+    lines.append("")
+    
+    # Evaluation context and testing guidance
+    lines.append("## Important Evaluation Notes")
+    lines.append("")
+    lines.append("**Your work will be evaluated by running hidden tests that you do not have access to.** These tests will verify that your fix correctly addresses the issue. You should be confident in your solution before finishing.")
+    lines.append("**If you write tests to verify your changes, create them in NEW test files only** - do NOT modify existing test files")
+    lines.append("")
+    
+    # Critical restrictions
+    lines.append("## CRITICAL RESTRICTIONS")
+    lines.append("")
+    lines.append("**NEVER use git commands.** Do not run `git status`, `git diff`, `git checkout`, `git reset`, or ANY other git commands. Using git will corrupt the evaluation environment and invalidate your entire submission. All file operations should be done through normal file editing and reading tools, not git.")
     
     return "\n".join(lines)
 
@@ -1896,6 +1909,15 @@ def _run_eval_task_impl(
     log(f"  Patch Source: {patch_source or 'agent'}")
     log(f"  Use Agent Cache: {use_agent_cache}")
     log(f"  Use Test Cache: {use_test_cache}")
+    
+    # CRITICAL: If agent cache is disabled, test cache MUST also be disabled
+    # to ensure tests are run against fresh agent output, not stale cached results.
+    # This is enforced regardless of what was passed for use_test_cache.
+    if not use_agent_cache and patch_source is None:
+        if use_test_cache:
+            log("  [CACHE OVERRIDE] Agent cache disabled → Test cache also disabled")
+            use_test_cache = False
+    
     log(f"  Settings: {settings.to_dict()}")
     
     # Get result paths for caching (includes settings in path)
@@ -2870,18 +2892,27 @@ def download_and_report(model: str) -> dict:
     print("=" * 60)
     print(f"Models: {', '.join(report.get('models', []))}")
     print(f"Tasks:  {len(report.get('tasks', []))}")
+    print(f"Settings: {', '.join(report.get('settings_variants', []))}")
     print()
     
-    # Per-model summary
-    for model_name, stats in report.get("summary", {}).get("by_model", {}).items():
-        passed = stats.get("passed", 0)
-        failed = stats.get("failed", 0)
-        total = stats.get("total", 0)
-        print(f"  {model_name}:")
-        print(f"    Tests Passed: {passed}/{total}")
-        print(f"    Tests Failed: {failed}/{total}")
+    # Per-model-settings summary (grouped by settings first for clarity)
+    by_model_settings = report.get("summary", {}).get("by_model_settings", {})
+    settings_variants = report.get("settings_variants", [])
     
-    print(f"\nResults saved to: {LOCAL_OUTPUTS_DIR / 'data'}")
+    for settings_id in settings_variants:
+        print(f"[{settings_id}]")
+        for model_name in report.get("models", []):
+            model_settings = by_model_settings.get(model_name, {})
+            stats = model_settings.get(settings_id, {})
+            if stats:
+                passed = stats.get("passed", 0)
+                failed = stats.get("failed", 0)
+                total = stats.get("total", 0)
+                pass_rate = (passed / total * 100) if total > 0 else 0
+                print(f"  {model_name}: {passed}/{total} passed ({pass_rate:.1f}%)")
+        print()
+    
+    print(f"Results saved to: {LOCAL_OUTPUTS_DIR / 'data'}")
     print(f"Report saved to:  {LOCAL_OUTPUTS_DIR / 'report.json'}")
     
     return report

@@ -1,0 +1,82 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt
+index 9c79f4b6a21..662d1693fda 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt
+@@ -4,6 +4,7 @@ import androidx.lifecycle.viewModelScope
+ import dagger.hilt.android.lifecycle.HiltViewModel
+ import kotlinx.coroutines.CoroutineDispatcher
+ import kotlinx.coroutines.FlowPreview
++import kotlinx.coroutines.Job
+ import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.flow.MutableSharedFlow
+ import kotlinx.coroutines.flow.MutableStateFlow
+@@ -36,20 +37,38 @@ class NewDomainSearchViewModel @Inject constructor(
+     private val _uiStateFlow: MutableStateFlow<UiState> = MutableStateFlow(UiState.PopulatedDomains(emptyList()))
+     val uiStateFlow = _uiStateFlow.asStateFlow()
+ 
+-    private val debouncedQuery = MutableStateFlow("")
++    private data class SearchQuery(val text: String, val requestId: Int)
++
++    private val debouncedQuery = MutableStateFlow(SearchQuery(text = "", requestId = 0))
++
++    private var activeSearchJob: Job? = null
++    private var latestSearchRequestId: Int = 0
++    private var currentQueryText: String = ""
+ 
+     init {
+         analyticsTracker.track(AnalyticsTracker.Stat.DOMAIN_MANAGEMENT_SEARCH_FOR_A_DOMAIN_SCREEN_SHOWN)
+         debouncedQuery
+-            .filter { it.isNotBlank() }
++            .filter { it.text.isNotBlank() }
+             .debounce(SEARCH_QUERY_DELAY_MS)
+-            .onEach(::fetchDomains)
++            .onEach { query ->
++                activeSearchJob?.cancel()
++                activeSearchJob = launch {
++                    fetchDomains(query.text, query.requestId)
++                }
++            }
+             .launchIn(viewModelScope)
+     }
+ 
+-    private suspend fun fetchDomains(query: String) {
++    private suspend fun fetchDomains(query: String, requestId: Int) {
++        // This request can become stale if the user updates the query while the network request is in-flight.
++        if (requestId != latestSearchRequestId) return
++
+         _uiStateFlow.emit(UiState.Loading)
+         val result = newDomainsSearchRepository.searchForDomains(query)
++
++        // Ignore responses from stale requests (e.g., when the user typed a new query).
++        if (requestId != latestSearchRequestId) return
++
+         _uiStateFlow.emit(
+             when (result) {
+                 is NewDomainsSearchRepository.DomainsResult.Success -> UiState.PopulatedDomains(result.proposedDomains)
+@@ -59,8 +78,25 @@ class NewDomainSearchViewModel @Inject constructor(
+     }
+ 
+     fun onSearchQueryChanged(query: String) {
++        val trimmedQuery = query.trim()
++        if (trimmedQuery == currentQueryText) return
++
++        currentQueryText = trimmedQuery
++        latestSearchRequestId += 1
++        val requestId = latestSearchRequestId
++
++        // Cancel any in-flight request immediately; its response should never update the UI for the new query.
++        activeSearchJob?.cancel()
++        activeSearchJob = null
++
++        if (trimmedQuery.isBlank()) {
++            launch {
++                _uiStateFlow.emit(UiState.PopulatedDomains(emptyList()))
++            }
++        }
++
+         launch {
+-           debouncedQuery.emit(query.trim())
++            debouncedQuery.emit(SearchQuery(text = trimmedQuery, requestId = requestId))
+         }
+     }
+ 

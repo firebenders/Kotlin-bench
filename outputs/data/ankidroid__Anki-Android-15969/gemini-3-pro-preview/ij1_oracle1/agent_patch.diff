@@ -1,0 +1,158 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 5daff4f4c4..13018a52f2 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.9.0'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -228,12 +227,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -248,12 +247,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -366,7 +359,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.5.1'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+index 01bb151f93..7259a30439 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+@@ -347,7 +347,7 @@ fun parseVideos(text: String, mediaDir: String): String {
+  */
+ @NotInLibAnki
+ @VisibleForTesting
+-fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
++fun parseSourcesToFileScheme(content: String, mediaDir: String, fileExists: (File) -> Boolean = { it.exists() }): String {
+     val doc = Jsoup.parseBodyFragment(content)
+     doc.outputSettings(OutputSettings().prettyPrint(false))
+ 
+@@ -364,7 +364,17 @@ fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
+             }
+             if (attrUri.scheme != null) continue
+ 
+-            val path = Paths.get(mediaDir, attrUri.path).toString()
++            var pathStr = attrUri.path
++            if (attrUri.fragment != null) {
++                // If the file exists with the fragment as part of the name, use it.
++                // This fixes issues with filenames containing '#'
++                val candidate = "$pathStr#${attrUri.fragment}"
++                if (fileExists(File(mediaDir, candidate))) {
++                    pathStr = candidate
++                }
++            }
++
++            val path = Paths.get(mediaDir, pathStr).toString()
+             val newUri = getFileUri(path)
+ 
+             elem.attr(attr, newUri.toString())
+diff --git a/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt b/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
+index c0ae21f061..948176f0b2 100644
+--- a/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
++++ b/AnkiDroid/src/test/java/com/ichi2/libanki/TemplateManagerTest.kt
+@@ -134,9 +134,38 @@ class TemplateManagerTest {
+         assertEquals("""<img src="file:///storage/emulated/0/AnkiDroid@%23$%25/collection.media/magenta.png">""", result)
+     }
+ 
++    @Test
++    fun `parseSourcesToFileScheme - parses filenames with hash`() {
++        val mediaDir = "storage/emulated/0/AnkiDroid/collection.media"
++        val filename = "image#1.png"
++        val content = """<img src="$filename">"""
++
++        // We simulate that the file exists
++        val result = parseSourcesToFileScheme(content, mediaDir) {
++            it.name == filename
++        }
++
++        assertEquals("""<img src="file:///$mediaDir/image%231.png">""", result)
++    }
++
++    @Test
++    fun `parseSourcesToFileScheme - handles real fragments if file does not exist`() {
++        val mediaDir = "storage/emulated/0/AnkiDroid/collection.media"
++        val filename = "image.png"
++        val content = """<img src="$filename#fragment">"""
++
++        val result = parseSourcesToFileScheme(content, mediaDir) {
++            // Simulate that "image.png#fragment" does not exist.
++            // Only "image.png" exists.
++            it.name == "image.png"
++        }
++
++        assertEquals("""<img src="file:///$mediaDir/image.png">""", result)
++    }
++
+     @Test
+     fun `parseSourcesToFileScheme - mixed script`() {
+-        @Language("HTML")
++@Language("HTML")
+         val input = """
+             <!-- VERSION 1.14 -->
+             <script>
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index df05afef76..4d2ca9684e 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

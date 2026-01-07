@@ -1,0 +1,178 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 65486fb6..3684fe7f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -4,6 +4,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ 
+ ## Unreleased
+ 
++### Fixed
++- Fix `range-spacing` rule to also handle spacing around the range until operator (`..<`) consistently with the range operator (`..`) ([#issue-id](https://github.com/pinterest/ktlint/issues/issue-id))
++
+ WARNING: This version on KtLint contains a number of breaking changes in KtLint CLI and KtLint API. If you are using KtLint with custom ruleset jars or custom reporter jars, then those need to be upgrade before you can use them with this version of ktlint. Please contact the maintainers of those jars and ask them to upgrade a.s.a.p.
+ 
+ All rule id's in the output of Ktlint are now prefixed with a rule set. Although KtLint currently supports standard rules to be unqualified, users are encouraged to migrate to include the rule set id in all references to rules. This includes following:
+diff --git a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ElementType.kt b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ElementType.kt
+index 1158353d..ee3d0ce7 100644
+--- a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ElementType.kt
++++ b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ElementType.kt
+@@ -213,6 +213,7 @@ public object ElementType {
+     public val SEMICOLON: IElementType = KtTokens.SEMICOLON
+     public val DOUBLE_SEMICOLON: IElementType = KtTokens.DOUBLE_SEMICOLON
+     public val RANGE: IElementType = KtTokens.RANGE
++    public val RANGE_UNTIL: IElementType = KtTokens.RANGE_UNTIL
+     public val EQ: IElementType = KtTokens.EQ
+     public val MULTEQ: IElementType = KtTokens.MULTEQ
+     public val DIVEQ: IElementType = KtTokens.DIVEQ
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRule.kt
+index 05180372..d92d062d 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRule.kt
+@@ -1,6 +1,7 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.RANGE
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.RANGE_UNTIL
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+@@ -14,25 +15,26 @@ public class SpacingAroundRangeOperatorRule : StandardRule("range-spacing") {
+         autoCorrect: Boolean,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+     ) {
+-        if (node.elementType == RANGE) {
++        if (node.elementType == RANGE || node.elementType == RANGE_UNTIL) {
++            val rangeOperator = if (node.elementType == RANGE) ".." else "..<"
+             val prevLeaf = node.prevLeaf()
+             val nextLeaf = node.nextLeaf()
+             when {
+                 prevLeaf is PsiWhiteSpace && nextLeaf is PsiWhiteSpace -> {
+-                    emit(node.startOffset, "Unexpected spacing around \"..\"", true)
++                    emit(node.startOffset, "Unexpected spacing around \"$rangeOperator\"", true)
+                     if (autoCorrect) {
+                         prevLeaf.node.treeParent.removeChild(prevLeaf.node)
+                         nextLeaf.node.treeParent.removeChild(nextLeaf.node)
+                     }
+                 }
+                 prevLeaf is PsiWhiteSpace -> {
+-                    emit(prevLeaf.node.startOffset, "Unexpected spacing before \"..\"", true)
++                    emit(prevLeaf.node.startOffset, "Unexpected spacing before \"$rangeOperator\"", true)
+                     if (autoCorrect) {
+                         prevLeaf.node.treeParent.removeChild(prevLeaf.node)
+                     }
+                 }
+                 nextLeaf is PsiWhiteSpace -> {
+-                    emit(nextLeaf.node.startOffset, "Unexpected spacing after \"..\"", true)
++                    emit(nextLeaf.node.startOffset, "Unexpected spacing after \"$rangeOperator\"", true)
+                     if (autoCorrect) {
+                         nextLeaf.node.treeParent.removeChild(nextLeaf.node)
+                     }
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRuleTest.kt
+index 8c13a21f..699b4c80 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRuleTest.kt
+@@ -64,4 +64,96 @@ class SpacingAroundRangeOperatorRuleTest {
+                 LintViolation(5, 16, "Unexpected spacing before \"..\""),
+             ).isFormattedAs(formattedCode)
+     }
++
++    @Test
++    fun `Given a range until operator`() {
++        val code =
++            """
++            val foo1 = (1..<12 step 2).last
++            val foo2 = (1..< 12 step 2).last
++            val foo3 = (1 ..< 12 step 2).last
++            val foo4 = (1 ..<12 step 2).last
++            fun foo() {
++                for (i in 1..<4) print(i)
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            val foo1 = (1..<12 step 2).last
++            val foo2 = (1..<12 step 2).last
++            val foo3 = (1..<12 step 2).last
++            val foo4 = (1..<12 step 2).last
++            fun foo() {
++                for (i in 1..<4) print(i)
++            }
++            """.trimIndent()
++        spacingAroundRangeOperatorRuleAssertThat(code)
++            .hasLintViolations(
++                LintViolation(2, 17, "Unexpected spacing after \"..<\""),
++                LintViolation(3, 15, "Unexpected spacing around \"..<\""),
++                LintViolation(4, 14, "Unexpected spacing before \"..<\""),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a range until operator in a for loop`() {
++        val code =
++            """
++            fun foo() {
++                for (i in 1..<4) print(i)
++                for (i in 1..< 4) print(i)
++                for (i in 1 ..< 4) print(i)
++                for (i in 1 ..<4) print(i)
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun foo() {
++                for (i in 1..<4) print(i)
++                for (i in 1..<4) print(i)
++                for (i in 1..<4) print(i)
++                for (i in 1..<4) print(i)
++            }
++            """.trimIndent()
++        spacingAroundRangeOperatorRuleAssertThat(code)
++            .hasLintViolations(
++                LintViolation(3, 19, "Unexpected spacing after \"..<\""),
++                LintViolation(4, 17, "Unexpected spacing around \"..<\""),
++                LintViolation(5, 16, "Unexpected spacing before \"..<\""),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a when condition with range until operator`() {
++        val code =
++            """
++            @OptIn(ExperimentalStdlibApi::class)
++            fun foo(int: Int): String =
++                when (int) {
++                    in 10..<20 -> "A"
++                    in 20..< 30 -> "B"
++                    in 30 ..< 40 -> "C"
++                    in 40 ..<50 -> "D"
++                    else -> "unknown"
++                }
++            """.trimIndent()
++        val formattedCode =
++            """
++            @OptIn(ExperimentalStdlibApi::class)
++            fun foo(int: Int): String =
++                when (int) {
++                    in 10..<20 -> "A"
++                    in 20..<30 -> "B"
++                    in 30..<40 -> "C"
++                    in 40..<50 -> "D"
++                    else -> "unknown"
++                }
++            """.trimIndent()
++        spacingAroundRangeOperatorRuleAssertThat(code)
++            .hasLintViolations(
++                LintViolation(5, 18, "Unexpected spacing after \"..<\""),
++                LintViolation(6, 17, "Unexpected spacing around \"..<\""),
++                LintViolation(7, 16, "Unexpected spacing before \"..<\""),
++            ).isFormattedAs(formattedCode)
++    }
+ }
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

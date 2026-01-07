@@ -1,49 +1,88 @@
-diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 472119cf..d5667234 100644
---- a/CHANGELOG.md
-+++ b/CHANGELOG.md
-@@ -292,6 +292,7 @@ if (node.isRoot()) {
- * Add newline after adding trailing comma in parameter list of a function literal `trailing-comma-on-declaration-site` ([#1911](https://github.com/pinterest/ktlint/issues/1911))
- * Wrap annotations before class constructor in code style `ktlint_official`. `annotation` ([#1916](https://github.com/pinterest/ktlint/issues/1916))
- * Annotations on type projections should be wrapped in same way as other annotations `annotation` ([#1917](https://github.com/pinterest/ktlint/issues/1917))
-+* Fix false positive for `else if` constructs in multiline if-else statements `multiline-if-else` ([#1904](https://github.com/pinterest/ktlint/issues/1904))
- 
- ### Changed
- * Wrap the parameters of a function literal containing a multiline parameter list (only in `ktlint_official` code style) `parameter-list-wrapping` ([#1681](https://github.com/pinterest/ktlint/issues/1681)).
 diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
-index 33f6a6e4..9ad5a791 100644
+index 33f6a6e4..5b7d3507 100644
 --- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
 +++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
-@@ -57,12 +57,13 @@ public class MultiLineIfElseRule :
+@@ -3,7 +3,6 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELSE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELSE_KEYWORD
+-import com.pinterest.ktlint.rule.engine.core.api.ElementType.IF
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.LBRACE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.RBRACE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.RPAR
+@@ -57,12 +56,25 @@ public class MultiLineIfElseRule :
                  return
              }
  
-+            if (node.firstChildNode?.elementType == IF) {
-+                // Allow "else if" construct both single-line and multi-line:
-+                // else if (...)
-+                return
-+            }
-+
-             if (!node.treePrev.textContains('\n')) {
+-            if (!node.treePrev.textContains('\n')) {
 -                if (node.firstChildNode.elementType == IF) {
 -                    // Allow single line for:
 -                    // else if (...)
 -                    return
--                }
++            if (node.elementType == ELSE) {
++                // For "else if" constructs on the same line, the IF is the content of ELSE.
++                // We should NOT wrap it with braces. The inner IF's branches will be validated separately.
++                // Only skip if it's "else if" on the same line (no newline between else and if)
++                val nodeText = node.text.trimStart()
++                if (nodeText.startsWith("if")) {
++                    // Check if there's a newline between ELSE_KEYWORD and the IF
++                    // This whitespace is the treePrev of the ELSE node
++                    val prevSibling = node.treePrev
++                    if (prevSibling == null ||
++                        prevSibling.elementType == ELSE_KEYWORD ||
++                        (prevSibling.isWhiteSpace() && !prevSibling.textContains('\n'))) {
++                        // "else if" on the same line - don't wrap
++                        return
++                    }
+                 }
++            }
++
++            if (!node.treePrev.textContains('\n')) {
                  if (!node.treeParent.textContains('\n')) {
                      // Allow single line if statements as long as they are really simple (e.g. do not contain newlines)
                      //    if (...) <statement> // no else statement
+@@ -78,6 +90,30 @@ public class MultiLineIfElseRule :
+         }
+     }
+ 
++    private fun hasNewlineBetweenElseAndIf(elseNode: ASTNode, ifNode: ASTNode): Boolean {
++        // Check if there's a newline between ELSE_KEYWORD and IF by checking:
++        // 1. The whitespace sibling before ELSE (treePrev of ELSE, which is between ELSE_KEYWORD and ELSE)
++        // 2. Any whitespace at the start of ELSE before the IF
++
++        // Check the whitespace between ELSE_KEYWORD and ELSE
++        val treePrevOfElse = elseNode.treePrev
++        if (treePrevOfElse != null && treePrevOfElse.isWhiteSpace() && treePrevOfElse.textContains('\n')) {
++            return true
++        }
++
++        // Check if there's whitespace with newline inside ELSE before IF
++        // (in case ELSE has whitespace as first child before IF)
++        var child = elseNode.firstChildNode
++        while (child != null && child != ifNode) {
++            if (child.isWhiteSpace() && child.textContains('\n')) {
++                return true
++            }
++            child = child.treeNext
++        }
++
++        return false
++    }
++
+     private fun autocorrect(node: ASTNode) {
+         val prevLeaves =
+             node
 diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleTest.kt
-index a2f55390..872c833a 100644
+index a2f55390..6edc5753 100644
 --- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleTest.kt
 +++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleTest.kt
-@@ -569,4 +569,34 @@ class MultiLineIfElseRuleTest {
+@@ -569,4 +569,55 @@ class MultiLineIfElseRuleTest {
                  LintViolation(3, 10, "Missing { ... }"),
              ).isFormattedAs(formattedCode)
      }
 +
 +    @Test
-+    fun `Issue 1904 - Given a multiline if-else-if statement with braces then else if should not be wrapped in braces`() {
++    fun `Issue xxx - Given an if-else-if expression with braces on multiple lines followed by elvis operator`() {
 +        val code =
 +            """
 +            val x = if (showFilter) {
@@ -58,7 +97,7 @@ index a2f55390..872c833a 100644
 +    }
 +
 +    @Test
-+    fun `Issue 1904 - Given a multiline if-else-if statement with braces and dotted suffix then else if should not be wrapped in braces`() {
++    fun `Issue xxx - Given an if-else-if expression with braces on multiple lines followed by dot call`() {
 +        val code =
 +            """
 +            val foo = if (bar1) {
@@ -68,6 +107,27 @@ index a2f55390..872c833a 100644
 +            } else {
 +                "bar3"
 +            }.plus("foo")
++            """.trimIndent()
++        multiLineIfElseRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue xxx - Given nested if-else-if expression with braces`() {
++        val code =
++            """
++            val result = if (condition1) {
++                if (nestedCondition1) {
++                    1
++                } else if (nestedCondition2) {
++                    2
++                } else {
++                    3
++                }
++            } else if (condition2) {
++                4
++            } else {
++                5
++            }
 +            """.trimIndent()
 +        multiLineIfElseRuleAssertThat(code).hasNoLintViolations()
 +    }

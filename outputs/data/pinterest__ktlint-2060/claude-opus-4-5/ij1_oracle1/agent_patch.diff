@@ -1,34 +1,17 @@
-diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 862b4428..9f27229e 100644
---- a/CHANGELOG.md
-+++ b/CHANGELOG.md
-@@ -39,6 +39,7 @@ At this point in time, it is not yet decided what the next steps will be. Ktlint
- * Do not flag a (potential) mutable extension property in case the getter is annotated or prefixed with a modifier `property-naming` ([#2024](https://github.com/pinterest/ktlint/issues/2024))
- * Do not merge an annotated expression body with the function signature even if it fits on a single line ([#2043](https://github.com/pinterest/ktlint/issues/2043))
- * Ignore property with name `serialVersionUID` in `property-naming` ([#2045](https://github.com/pinterest/ktlint/issues/2045))
-+* Do not report "Unnecessary newline before '('" for opening parenthesis of function type in nullable type after wrapping `parameter-list-wrapping` ([#1324](https://github.com/pinterest/ktlint/issues/1324))
- 
- ### Changed
- 
 diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
-index ae7573bd..ab96beed 100644
+index ae7573bd..f2fe1520 100644
 --- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
 +++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
-@@ -229,9 +229,18 @@ public class ParameterListWrappingRule :
+@@ -229,9 +229,13 @@ public class ParameterListWrappingRule :
              LPAR -> {
                  val prevLeaf = child.prevLeaf()
                  if (prevLeaf is PsiWhiteSpace && prevLeaf.textContains('\n')) {
 -                    emit(child.startOffset, errorMessage(child), true)
 -                    if (autoCorrect) {
 -                        prevLeaf.delete()
-+                    // Check if this whitespace is part of nullable type wrapping.
-+                    // In that case, the structure is: NULLABLE_TYPE -> LPAR -> WHITESPACE -> FUNCTION_TYPE -> VALUE_PARAMETER_LIST -> LPAR
-+                    // The whitespace is between the outer LPAR and FUNCTION_TYPE, so we shouldn't flag the inner LPAR.
-+                    val prevPrevLeaf = prevLeaf.prevLeaf()
-+                    val isNullableTypeWrapping =
-+                        prevPrevLeaf?.elementType == LPAR &&
-+                            prevPrevLeaf.treeParent?.elementType == NULLABLE_TYPE
-+                    if (!isNullableTypeWrapping) {
++                    // When a function type is wrapped in a nullable type, the newline before the inner
++                    // LPAR is intentional (added by wrapNullableType) and should not be removed
++                    if (!child.treeParent.isFunctionTypeWrappedInNullableType()) {
 +                        emit(child.startOffset, errorMessage(child), true)
 +                        if (autoCorrect) {
 +                            prevLeaf.delete()
@@ -36,23 +19,63 @@ index ae7573bd..ab96beed 100644
                      }
                  }
              }
-diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleTest.kt
-index 304c8675..2e4b1c58 100644
---- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleTest.kt
-+++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleTest.kt
-@@ -542,6 +542,22 @@ class ParameterListWrappingRuleTest {
-             ).isFormattedAs(formattedCode)
-     }
- 
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleIssue1324Test.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleIssue1324Test.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRuleIssue1324Test.kt
+@@ -0,0 +1,140 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for issue 1324: Bug on parameter's class that reached maximum line
++ *
++ * When a nullable function type exceeds the max line length, the rule should:
++ * 1. Wrap the nullable type correctly
++ * 2. NOT report "Unnecessary newline before "("" for the inner function type's LPAR
++ */
++class ParameterListWrappingRuleIssue1324Test {
++    private val parameterListWrappingRuleAssertThat =
++        assertThatRule(
++            provider = { ParameterListWrappingRule() },
++            additionalRuleProviders =
++                setOf(
++                    RuleProvider { IndentationRule() },
++                ),
++        )
++
 +    @Test
-+    fun `Issue 1324 - Given an already wrapped nullable function type then do not report unnecessary newline before opening parenthesis`() {
-+        // After wrapping a nullable function type, the inner opening parenthesis should not be flagged
-+        // as having an unnecessary newline before it. The whitespace before the inner '(' belongs to
-+        // the nullable type wrapping, not to the parameter list.
++    fun `Issue 1324 - Given a nullable function type property that exceeds max line length then wrap without reporting unnecessary newline`() {
 +        val code =
 +            """
-+            var changesListener: (
-+                (width: Double?, depth: Double?, length: Double?, area: Double?) -> Unit
++            val foo1: ((s1: String, s2: String, s3: String, s4: String, s5: String, s6: String) -> Unit)? = null
++            """.trimIndent()
++        val formattedCode =
++            """
++            val foo1: (
++                (s1: String, s2: String, s3: String, s4: String, s5: String, s6: String) -> Unit
++            )? = null
++            """.trimIndent()
++        parameterListWrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 80)
++            .hasLintViolations(
++                LintViolation(1, 11, "Parameter of nullable type should be on a separate line (unless the type fits on a single line)"),
++                LintViolation(1, 90, """Missing newline before ")""""),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue 1324 - Given a formatted nullable function type property then no violations should be reported`() {
++        val code =
++            """
++            val foo1: (
++                (s1: String, s2: String, s3: String, s4: String, s5: String, s6: String) -> Unit
 +            )? = null
 +            """.trimIndent()
 +        parameterListWrappingRuleAssertThat(code)
@@ -60,9 +83,88 @@ index 304c8675..2e4b1c58 100644
 +            .hasNoLintViolations()
 +    }
 +
-     @Nested
-     inner class `Given a single line function signature with an annotated parameter` {
-         @Test
++    @Test
++    fun `Issue 1324 - Given a nullable function type in function parameter that exceeds max line length then wrap correctly`() {
++        val code =
++            """
++            fun foo(callback: ((s1: String, s2: String, s3: String, s4: String) -> Unit)?) {
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun foo(
++                callback: (
++                    (s1: String, s2: String, s3: String, s4: String) -> Unit
++                )?
++            ) {
++            }
++            """.trimIndent()
++        parameterListWrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 60)
++            .hasLintViolations(
++                LintViolation(1, 9, "Parameter should start on a newline"),
++                LintViolation(1, 19, "Parameter of nullable type should be on a separate line (unless the type fits on a single line)"),
++                LintViolation(1, 72, """Missing newline before ")""""),
++                LintViolation(1, 76, """Missing newline before ")""""),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue 1324 - Given a properly wrapped nullable function type in function parameter then no violations should be reported`() {
++        val code =
++            """
++            fun foo(
++                callback: (
++                    (s1: String, s2: String, s3: String, s4: String) -> Unit
++                )?
++            ) {
++            }
++            """.trimIndent()
++        parameterListWrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 60)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue 1324 - Given a local variable with nullable function type that exceeds max line length then wrap correctly`() {
++        val code =
++            """
++            fun foo() {
++                var changesListener: ((width: Double?, depth: Double?, length: Double?, area: Double?) -> Unit)? = null
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun foo() {
++                var changesListener: (
++                    (width: Double?, depth: Double?, length: Double?, area: Double?) -> Unit
++                )? = null
++            }
++            """.trimIndent()
++        parameterListWrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 80)
++            .hasLintViolations(
++                LintViolation(2, 26, "Parameter of nullable type should be on a separate line (unless the type fits on a single line)"),
++                LintViolation(2, 99, """Missing newline before ")""""),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue 1324 - Given a properly wrapped local variable with nullable function type then no violations should be reported`() {
++        val code =
++            """
++            fun foo() {
++                var changesListener: (
++                    (width: Double?, depth: Double?, length: Double?, area: Double?) -> Unit
++                )? = null
++            }
++            """.trimIndent()
++        parameterListWrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 80)
++            .hasNoLintViolations()
++    }
++}
++
 
 diff --git a/local.properties b/local.properties
 new file mode 100644

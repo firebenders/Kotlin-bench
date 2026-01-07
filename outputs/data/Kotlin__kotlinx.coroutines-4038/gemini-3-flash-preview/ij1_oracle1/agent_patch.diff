@@ -1,0 +1,81 @@
+diff --git a/kotlinx-coroutines-core/common/src/flow/internal/Combine.kt b/kotlinx-coroutines-core/common/src/flow/internal/Combine.kt
+index eb8242676..479c1b57d 100644
+--- a/kotlinx-coroutines-core/common/src/flow/internal/Combine.kt
++++ b/kotlinx-coroutines-core/common/src/flow/internal/Combine.kt
+@@ -100,9 +100,12 @@ internal fun <T1, T2, R> zipImpl(flow: Flow<T1>, flow2: Flow<T2>, transform: sus
+              * Invariant: this clause is invoked only when all elements from the channel were processed (=> rendezvous restriction).
+              */
+             val collectJob = Job()
++            val owner = object : FlowCollector<Any?> {
++                override suspend fun emit(value: Any?) = error("Should not be called")
++            }
+             (second as SendChannel<*>).invokeOnClose {
+                 // Optimization to avoid AFE allocation when the other flow is done
+-                if (collectJob.isActive) collectJob.cancel(AbortFlowException(this@unsafeFlow))
++                if (collectJob.isActive) collectJob.cancel(AbortFlowException(owner))
+             }
+ 
+             try {
+@@ -124,14 +127,14 @@ internal fun <T1, T2, R> zipImpl(flow: Flow<T1>, flow2: Flow<T2>, transform: sus
+                     flow.collect { value ->
+                         withContextUndispatched(scopeContext, Unit, cnt) {
+                             val otherValue = second.receiveCatching().getOrElse {
+-                                throw it ?:AbortFlowException(this@unsafeFlow)
++                                throw it ?: AbortFlowException(owner)
+                             }
+                             emit(transform(value, NULL.unbox(otherValue)))
+                         }
+                     }
+                 }
+             } catch (e: AbortFlowException) {
+-                e.checkOwnership(owner = this@unsafeFlow)
++                e.checkOwnership(owner)
+             } finally {
+                 second.cancel()
+             }
+diff --git a/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt b/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt
+index 3d489aa94..87a414f26 100644
+--- a/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt
++++ b/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt
+@@ -47,20 +47,20 @@ public fun <T> Flow<T>.take(count: Int): Flow<T> {
+     require(count > 0) { "Requested element count $count should be positive" }
+     return flow {
+         var consumed = 0
++        val collector = object : FlowCollector<T> {
++            override suspend fun emit(value: T) = error("Should not be called")
++        }
+         try {
+             collect { value ->
+-                // Note: this for take is not written via collectWhile on purpose.
+-                // It checks condition first and then makes a tail-call to either emit or emitAbort.
+-                // This way normal execution does not require a state machine, only a termination (emitAbort).
+-                // See "TakeBenchmark" for comparision of different approaches.
+                 if (++consumed < count) {
+                     return@collect emit(value)
+                 } else {
+-                    return@collect emitAbort(value)
++                    emit(value)
++                    throw AbortFlowException(collector)
+                 }
+             }
+         } catch (e: AbortFlowException) {
+-            e.checkOwnership(owner = this)
++            e.checkOwnership(collector)
+         }
+     }
+ }
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index 781d5d070..a693aa516 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -4,10 +4,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */

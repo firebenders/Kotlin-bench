@@ -1,0 +1,154 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 2b2d53b9..d05c4123 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -109,6 +109,7 @@ import com.pinterest.ktlint.ruleset.standard.StandardRule
+ import mu.KotlinLogging
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+ import org.jetbrains.kotlin.com.intellij.psi.PsiComment
++import org.jetbrains.kotlin.com.intellij.psi.tree.IElementType
+ import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
+ import org.jetbrains.kotlin.psi.KtStringTemplateExpression
+ import org.jetbrains.kotlin.psi.psiUtil.leaves
+@@ -274,7 +275,7 @@ public class IndentationRule :
+                         fromAstNode = node.treeParent,
+                         toAstNode = node.treeParent.treeParent.lastChildLeafOrSelf(),
+                     )
+-                } else if (node.treeParent?.elementType != node.elementType) {
++                } else if (node.treeParent.shouldStartIndentContext(node.elementType)) {
+                     startIndentContext(node)
+                 }
+             }
+@@ -1138,6 +1139,19 @@ public class IndentationRule :
+     }
+ }
+ 
++private fun ASTNode?.shouldStartIndentContext(childElementType: IElementType): Boolean {
++    // For DOT_QUALIFIED_EXPRESSION and SAFE_ACCESS_EXPRESSION, treat them as the same type of chain.
++    // When they are nested within each other, only one indent context should be created for the entire chain.
++    // For USER_TYPE, keep the original behavior (only skip when parent is also USER_TYPE).
++    val parentElementType = this?.elementType
++    return when {
++        childElementType == USER_TYPE -> parentElementType != USER_TYPE
++        childElementType == DOT_QUALIFIED_EXPRESSION || childElementType == SAFE_ACCESS_EXPRESSION ->
++            parentElementType != DOT_QUALIFIED_EXPRESSION && parentElementType != SAFE_ACCESS_EXPRESSION
++        else -> parentElementType != childElementType
++    }
++}
++
+ private fun ASTNode.textWithEscapedTabAndNewline() = text.textWithEscapedTabAndNewline()
+ 
+ private fun String.textWithEscapedTabAndNewline(): String {
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleMixedChainTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleMixedChainTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleMixedChainTest.kt
+@@ -0,0 +1,99 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Nested
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for issue: False positive indent after updating from 0.47.1
++ * https://github.com/pinterest/ktlint/issues/1888
++ *
++ * When DOT_QUALIFIED_EXPRESSION and SAFE_ACCESS_EXPRESSION are mixed in a chain,
++ * only one indent context should be created for the entire chain.
++ */
++internal class IndentationRuleMixedChainTest {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Nested
++    inner class `Given a mixed chain of dot qualified and safe access expressions` {
++        @Test
++        fun `Issue 1888 - Given a function with expression body containing runCatching followed by safe access`() {
++            val code =
++                """
++                private fun test(): Boolean? =
++                    runCatching { true }
++                        .getOrNull()?.let { result ->
++                            !result
++                        }
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a property with mixed chain of dot qualified followed by safe access expressions`() {
++            val code =
++                """
++                val foo = bar
++                    .doSomething()?.let { result ->
++                        result.process()
++                    }
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a property with mixed chain of safe access followed by dot qualified expressions`() {
++            val code =
++                """
++                val foo = bar
++                    ?.doSomething().let { result ->
++                        result.process()
++                    }
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a complex mixed chain`() {
++            val code =
++                """
++                val result = someObject
++                    .method1()
++                    ?.method2()
++                    .method3()?.let { value ->
++                        value.transform()
++                    }
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a function with expression body and multiple mixed chain operations`() {
++            val code =
++                """
++                fun process() =
++                    getData()
++                        .transform()
++                        ?.validate()?.let { validData ->
++                            validData.save()
++                        }
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given nested lambdas within mixed chain`() {
++            val code =
++                """
++                val result = items
++                    .map { item ->
++                        item.value
++                    }?.filter { value ->
++                        value > 0
++                    }
++                """.trimIndent()
++            indentationRuleAssertThat(code).hasNoLintViolations()
++        }
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

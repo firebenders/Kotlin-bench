@@ -1,0 +1,165 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+index 79f1e477..71bc5ec2 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+@@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS_BODY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONST_KEYWORD
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.GET_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.IDENTIFIER
+@@ -11,10 +12,12 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OVERRIDE_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIVATE_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY_ACCESSOR
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VAL_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.Rule
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.children
++import com.pinterest.ktlint.rule.engine.core.api.nextCodeLeaf
+ import com.pinterest.ktlint.ruleset.standard.StandardRule
+ import com.pinterest.ktlint.ruleset.standard.rules.internal.regExIgnoringDiacriticsAndStrokesOnLetters
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+@@ -119,7 +122,10 @@ public class PropertyNamingRule :
+             .orEmpty()
+             .any { it.elementType == iElementType }
+ 
+-    private fun ASTNode.isTopLevelValue() = treeParent.elementType == FILE && containsValKeyword()
++    private fun ASTNode.isTopLevelValue() =
++        treeParent.elementType == FILE &&
++            containsValKeyword() &&
++            !isMutableCollection()
+ 
+     private fun ASTNode.containsValKeyword() = children().any { it.elementType == VAL_KEYWORD }
+ 
+@@ -127,7 +133,48 @@ public class PropertyNamingRule :
+         treeParent.elementType == CLASS_BODY &&
+             treeParent?.treeParent?.elementType == OBJECT_DECLARATION &&
+             containsValKeyword() &&
+-            !hasModifier(OVERRIDE_KEYWORD)
++            !hasModifier(OVERRIDE_KEYWORD) &&
++            !isMutableCollection()
++
++    private fun ASTNode.isMutableCollection(): Boolean =
++        hasTypeReferenceMatchingMutableCollection() ||
++            hasInitializerMatchingMutableCollection()
++
++    private fun ASTNode.hasTypeReferenceMatchingMutableCollection(): Boolean {
++        val typeReference = findChildByType(TYPE_REFERENCE)
++        if (typeReference != null) {
++            val typeText = typeReference.text
++            return typeText.contains("Mutable") ||
++                typeText.contains("ArrayList") ||
++                typeText.contains("HashMap") ||
++                typeText.contains("HashSet") ||
++                typeText.contains("LinkedHashMap") ||
++                typeText.contains("LinkedHashSet") ||
++                typeText.contains("TreeMap") ||
++                typeText.contains("TreeSet")
++        }
++        return false
++    }
++
++    private fun ASTNode.hasInitializerMatchingMutableCollection(): Boolean =
++        findChildByType(EQ)
++            ?.nextCodeLeaf()
++            ?.let { initializer ->
++                val text = initializer.text
++                text.startsWith("mutable") ||
++                    text.startsWith("arrayListOf") ||
++                    text.startsWith("hashMapOf") ||
++                    text.startsWith("hashSetOf") ||
++                    text.startsWith("linkedMapOf") ||
++                    text.startsWith("linkedSetOf") ||
++                    text.startsWith("ArrayList") ||
++                    text.startsWith("HashMap") ||
++                    text.startsWith("HashSet") ||
++                    text.startsWith("LinkedHashMap") ||
++                    text.startsWith("LinkedHashSet") ||
++                    text.startsWith("TreeMap") ||
++                    text.startsWith("TreeSet")
++            } ?: false
+ 
+     private fun ASTNode.isBackingProperty() =
+         takeIf { hasModifier(PRIVATE_KEYWORD) }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt
+@@ -0,0 +1,64 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat
++import org.junit.jupiter.api.Test
++
++class PropertyNamingRuleMutableCollectionTest {
++    private val propertyNamingRuleAssertThat =
++        KtLintAssertThat.assertThatRule { PropertyNamingRule() }
++
++    @Test
++    fun `Given a mutable collection property in an object then do not emit`() {
++        val code =
++            """
++            object Foo {
++                val someMap: MutableMap<String, String> = mutableMapOf()
++                val someList: MutableList<String> = mutableListOf()
++                val someSet: MutableSet<String> = mutableSetOf()
++                val someArrayList: ArrayList<String> = arrayListOf()
++                val someHashMap: HashMap<String, String> = hashMapOf()
++                val someHashSet: HashSet<String> = hashSetOf()
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a mutable collection property at top level then do not emit`() {
++        val code =
++            """
++            val someMap: MutableMap<String, String> = mutableMapOf()
++            val someList: MutableList<String> = mutableListOf()
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a mutable collection property with inferred type in an object then do not emit`() {
++        val code =
++            """
++            object Foo {
++                val someMap = mutableMapOf<String, String>()
++                val someList = mutableListOf<String>()
++                val someSet = mutableSetOf<String>()
++                val someArrayList = arrayListOf<String>()
++                val someHashMap = hashMapOf<String, String>()
++                val someHashSet = hashSetOf<String>()
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a mutable collection property with inferred type and comment in an object then do not emit`() {
++        val code =
++            """
++            object Foo {
++                val someMap = // comment
++                    mutableMapOf<String, String>()
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

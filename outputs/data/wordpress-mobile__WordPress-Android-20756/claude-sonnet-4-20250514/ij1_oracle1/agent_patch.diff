@@ -1,0 +1,381 @@
+diff --git a/RELEASE-NOTES.txt b/RELEASE-NOTES.txt
+index ca376cca8b4..6e92212cc08 100644
+--- a/RELEASE-NOTES.txt
++++ b/RELEASE-NOTES.txt
+@@ -2,6 +2,7 @@
+ 
+ 24.9
+ -----
++* [**] Deep link support: Added support for deep links to Subscribers tab and Traffic tab with appropriate granularity selection [https://github.com/Automattic/wordpress-mobile/issues/47]
+ 
+ 
+ 24.8
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt b/WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt
+index ceed1dbb5b1..484e3763351 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandler.kt
+@@ -25,35 +25,127 @@ class StatsLinkHandler
+      * Builds navigate action from URL like:
+      * https://wordpress.com/stats/$timeframe/$site
+      * where timeframe and site are optional
++     * or for new traffic/subscribers tabs:
++     * https://wordpress.com/stats/traffic/$granularity/$site
++     * https://wordpress.com/stats/subscribers/$site
+      * or
+      * wordpress://stats
+      */
+     override fun buildNavigateAction(uri: UriWrapper): NavigateAction {
+         val pathSegments = uri.pathSegments
+         val length = pathSegments.size
+-        val site = pathSegments.getOrNull(length - 1)?.toSite()
+-        val statsTimeframe = pathSegments.getOrNull(length - 2)?.toStatsTimeframe()
++
+         return when {
+             jetpackFeatureRemovalPhaseHelper.shouldShowStaticPage() -> OpenJetpackStaticPosterView
++            else -> parseStatsDeepLink(pathSegments)
++        }
++    }
++
++    private fun parseStatsDeepLink(pathSegments: List<String>): NavigateAction {
++        val length = pathSegments.size
++
++        // Handle traditional timeframe URLs: /stats/day/$site or /stats/day
++        val site = pathSegments.getOrNull(length - 1)?.toSite()
++        val statsTimeframe = pathSegments.getOrNull(length - 2)?.toStatsTimeframe()
++
++        // Handle new format URLs
++        when {
++            length >= 2 && pathSegments[0] == "stats" -> {
++                val firstParam = pathSegments[1]
++
++                when (firstParam) {
++                    "traffic" -> {
++                        return handleTrafficDeepLink(pathSegments, length)
++                    }
++                    "subscribers" -> {
++                        return handleSubscribersDeepLink(pathSegments, length)
++                    }
++                    else -> {
++                        // Traditional format: /stats/$timeframe or /stats/$timeframe/$site
++                        val timeframe = firstParam.toStatsTimeframe()
++                        return when {
++                            timeframe != null && site != null -> OpenStatsForSiteAndTimeframe(site, timeframe)
++                            timeframe != null -> OpenStatsForTimeframe(timeframe)
++                            site != null -> OpenStatsForSite(site)
++                            else -> OpenStats
++                        }
++                    }
++                }
++            }
+             site != null && statsTimeframe != null -> {
+-                OpenStatsForSiteAndTimeframe(site, statsTimeframe)
++                return OpenStatsForSiteAndTimeframe(site, statsTimeframe)
+             }
+             site != null -> {
+-                OpenStatsForSite(site)
++                return OpenStatsForSite(site)
+             }
+             statsTimeframe != null -> {
+-                OpenStatsForTimeframe(statsTimeframe)
++                return OpenStatsForTimeframe(statsTimeframe)
+             }
+             else -> {
+-                // In other cases, launch stats with the current selected site.
+-                OpenStats
++                return OpenStats
+             }
+         }
+     }
+ 
++    private fun handleTrafficDeepLink(pathSegments: List<String>, length: Int): NavigateAction {
++        // URLs like /stats/traffic, /stats/traffic/$site, /stats/traffic/$granularity/$site
++        return when (length) {
++            2 -> OpenStatsForTimeframe(StatsTimeframe.TRAFFIC) // /stats/traffic
++            3 -> {
++                val param = pathSegments[2]
++                val site = param.toSite()
++                if (site != null) {
++                    // /stats/traffic/$site
++                    OpenStatsForSiteAndTimeframe(site, StatsTimeframe.TRAFFIC)
++                } else {
++                    // /stats/traffic/$granularity - treat granularity as traditional timeframe for traffic
++                    val granularityTimeframe = param.toStatsTimeframe()
++                    OpenStatsForTimeframe(granularityTimeframe ?: StatsTimeframe.TRAFFIC)
++                }
++            }
++            4 -> {
++                // /stats/traffic/$granularity/$site
++                val granularityParam = pathSegments[2]
++                val site = pathSegments[3].toSite()
++                val granularityTimeframe = granularityParam.toStatsTimeframe()
++
++                when {
++                    site != null && granularityTimeframe != null ->
++                        OpenStatsForSiteAndTimeframe(site, granularityTimeframe)
++                    site != null ->
++                        OpenStatsForSiteAndTimeframe(site, StatsTimeframe.TRAFFIC)
++                    else ->
++                        OpenStatsForTimeframe(StatsTimeframe.TRAFFIC)
++                }
++            }
++            else -> OpenStatsForTimeframe(StatsTimeframe.TRAFFIC)
++        }
++    }
++
++    private fun handleSubscribersDeepLink(pathSegments: List<String>, length: Int): NavigateAction {
++        // URLs like /stats/subscribers, /stats/subscribers/$site
++        return when (length) {
++            2 -> OpenStatsForTimeframe(StatsTimeframe.SUBSCRIBERS) // /stats/subscribers
++            3 -> {
++                val site = pathSegments[2].toSite()
++                if (site != null) {
++                    // /stats/subscribers/$site
++                    OpenStatsForSiteAndTimeframe(site, StatsTimeframe.SUBSCRIBERS)
++                } else {
++                    OpenStatsForTimeframe(StatsTimeframe.SUBSCRIBERS)
++                }
++            }
++            else -> OpenStatsForTimeframe(StatsTimeframe.SUBSCRIBERS)
++        }
++    }
++
+     /**
+      * Returns true if the URI should be handled by StatsLinkHandler.
+-     * The handled links are `https://wordpress.com/stats/day/$site` and `wordpress://stats`
++     * The handled links are:
++     * - `https://wordpress.com/stats/day/$site` (traditional)
++     * - `https://wordpress.com/stats/traffic/$site` (new Traffic tab)
++     * - `https://wordpress.com/stats/subscribers/$site` (new Subscribers tab)
++     * - `wordpress://stats` (app links)
+      */
+     override fun shouldHandleUrl(uri: UriWrapper): Boolean {
+         return (uri.host == HOST_WORDPRESS_COM &&
+@@ -72,13 +164,44 @@ class StatsLinkHandler
+             append(STATS_PATH)
+             val pathSegments = uri.pathSegments
+             val size = pathSegments.size
+-            val statsTimeframe = if (size > offset) pathSegments.getOrNull(offset) else null
+-            val hasSiteUrl = if (size > offset + 1) pathSegments.getOrNull(offset + 1) != null else false
+-            if (statsTimeframe != null) {
+-                append("/$statsTimeframe")
+-            }
+-            if (hasSiteUrl) {
+-                append("/$SITE_DOMAIN")
++
++            // Handle new format URLs with traffic/subscribers
++            if (size > offset) {
++                val firstParam = pathSegments.getOrNull(offset)
++                when (firstParam) {
++                    "traffic" -> {
++                        append("/traffic")
++                        if (size > offset + 1) {
++                            val secondParam = pathSegments.getOrNull(offset + 1)
++                            // Check if this is a granularity or site
++                            if (secondParam?.toStatsTimeframe() != null) {
++                                append("/$secondParam")
++                                if (size > offset + 2) {
++                                    append("/$SITE_DOMAIN")
++                                }
++                            } else {
++                                append("/$SITE_DOMAIN")
++                            }
++                        }
++                    }
++                    "subscribers" -> {
++                        append("/subscribers")
++                        if (size > offset + 1) {
++                            append("/$SITE_DOMAIN")
++                        }
++                    }
++                    else -> {
++                        // Traditional format
++                        val statsTimeframe = firstParam
++                        val hasSiteUrl = size > offset + 1
++                        if (statsTimeframe != null) {
++                            append("/$statsTimeframe")
++                        }
++                        if (hasSiteUrl) {
++                            append("/$SITE_DOMAIN")
++                        }
++                    }
++                }
+             }
+         }
+     }
+@@ -98,6 +221,8 @@ class StatsLinkHandler
+             "month" -> StatsTimeframe.MONTH
+             "year" -> StatsTimeframe.YEAR
+             "insights" -> StatsTimeframe.INSIGHTS
++            "traffic" -> StatsTimeframe.TRAFFIC
++            "subscribers" -> StatsTimeframe.SUBSCRIBERS
+             else -> null
+         }
+     }
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandlerTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandlerTest.kt
+index 1c6984ff5c9..4ee88199d0a 100644
+--- a/WordPress/src/test/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandlerTest.kt
++++ b/WordPress/src/test/java/org/wordpress/android/ui/deeplinks/handlers/StatsLinkHandlerTest.kt
+@@ -15,6 +15,8 @@ import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureRemovalPhaseHelper
+ import org.wordpress.android.ui.stats.StatsTimeframe.DAY
+ import org.wordpress.android.ui.stats.StatsTimeframe.INSIGHTS
+ import org.wordpress.android.ui.stats.StatsTimeframe.MONTH
++import org.wordpress.android.ui.stats.StatsTimeframe.SUBSCRIBERS
++import org.wordpress.android.ui.stats.StatsTimeframe.TRAFFIC
+ import org.wordpress.android.ui.stats.StatsTimeframe.WEEK
+ import org.wordpress.android.ui.stats.StatsTimeframe.YEAR
+ 
+@@ -171,4 +173,154 @@ class StatsLinkHandlerTest {
+ 
+         assertThat(strippedUrl).isEqualTo("wordpress.com/stats")
+     }
++
++    // Tests for new Traffic tab functionality
++
++    @Test
++    fun `opens traffic tab from traffic URL`() {
++        val uri = buildUri(host = null, "stats", "traffic")
++
++        val buildNavigateAction = statsLinkHandler.buildNavigateAction(uri)
++
++        assertThat(buildNavigateAction).isEqualTo(NavigateAction.OpenStatsForTimeframe(TRAFFIC))
++    }
++
++    @Test
++    fun `opens traffic tab for a site when URL ends with site URL`() {
++        val siteUrl = "example.com"
++        val uri = buildUri(host = null, "stats", "traffic", siteUrl)
++        whenever(deepLinkUriUtils.hostToSite(siteUrl)).thenReturn(site)
++
++        val buildNavigateAction = statsLinkHandler.buildNavigateAction(uri)
++
++        assertThat(buildNavigateAction).isEqualTo(NavigateAction.OpenStatsForSiteAndTimeframe(site, TRAFFIC))
++    }
++
++    @Test
++    fun `opens traffic tab with granularity for a site`() {
++        val siteUrl = "example.com"
++        val granularityTimeframes = mapOf(
++            "day" to DAY,
++            "week" to WEEK,
++            "month" to MONTH,
++            "year" to YEAR
++        )
++        granularityTimeframes.forEach { (key, timeframe) ->
++            val uri = buildUri(host = null, "stats", "traffic", key, siteUrl)
++            whenever(deepLinkUriUtils.hostToSite(siteUrl)).thenReturn(site)
++
++            val buildNavigateAction = statsLinkHandler.buildNavigateAction(uri)
++
++            assertThat(buildNavigateAction).isEqualTo(
++                NavigateAction.OpenStatsForSiteAndTimeframe(
++                    site,
++                    timeframe
++                )
++            )
++        }
++    }
++
++    @Test
++    fun `opens traffic tab with granularity when no site URL`() {
++        val granularityTimeframes = mapOf(
++            "day" to DAY,
++            "week" to WEEK,
++            "month" to MONTH,
++            "year" to YEAR
++        )
++        granularityTimeframes.forEach { (key, timeframe) ->
++            val uri = buildUri(host = null, "stats", "traffic", key)
++
++            val buildNavigateAction = statsLinkHandler.buildNavigateAction(uri)
++
++            assertThat(buildNavigateAction).isEqualTo(NavigateAction.OpenStatsForTimeframe(timeframe))
++        }
++    }
++
++    // Tests for new Subscribers tab functionality
++
++    @Test
++    fun `opens subscribers tab from subscribers URL`() {
++        val uri = buildUri(host = null, "stats", "subscribers")
++
++        val buildNavigateAction = statsLinkHandler.buildNavigateAction(uri)
++
++        assertThat(buildNavigateAction).isEqualTo(NavigateAction.OpenStatsForTimeframe(SUBSCRIBERS))
++    }
++
++    @Test
++    fun `opens subscribers tab for a site when URL ends with site URL`() {
++        val siteUrl = "example.com"
++        val uri = buildUri(host = null, "stats", "subscribers", siteUrl)
++        whenever(deepLinkUriUtils.hostToSite(siteUrl)).thenReturn(site)
++
++        val buildNavigateAction = statsLinkHandler.buildNavigateAction(uri)
++
++        assertThat(buildNavigateAction).isEqualTo(NavigateAction.OpenStatsForSiteAndTimeframe(site, SUBSCRIBERS))
++    }
++
++    // Tests for stripUrl with new traffic/subscribers functionality
++
++    @Test
++    fun `strips traffic deeplink with site`() {
++        val uri = buildUri(host = "wordpress.com", "stats", "traffic", "example.com")
++
++        val strippedUrl = statsLinkHandler.stripUrl(uri)
++
++        assertThat(strippedUrl).isEqualTo("wordpress.com/stats/traffic/domain")
++    }
++
++    @Test
++    fun `strips traffic deeplink with granularity and site`() {
++        val uri = buildUri(host = "wordpress.com", "stats", "traffic", "day", "example.com")
++
++        val strippedUrl = statsLinkHandler.stripUrl(uri)
++
++        assertThat(strippedUrl).isEqualTo("wordpress.com/stats/traffic/day/domain")
++    }
++
++    @Test
++    fun `strips traffic deeplink without site`() {
++        val uri = buildUri(host = "wordpress.com", "stats", "traffic")
++
++        val strippedUrl = statsLinkHandler.stripUrl(uri)
++
++        assertThat(strippedUrl).isEqualTo("wordpress.com/stats/traffic")
++    }
++
++    @Test
++    fun `strips subscribers deeplink with site`() {
++        val uri = buildUri(host = "wordpress.com", "stats", "subscribers", "example.com")
++
++        val strippedUrl = statsLinkHandler.stripUrl(uri)
++
++        assertThat(strippedUrl).isEqualTo("wordpress.com/stats/subscribers/domain")
++    }
++
++    @Test
++    fun `strips subscribers deeplink without site`() {
++        val uri = buildUri(host = "wordpress.com", "stats", "subscribers")
++
++        val strippedUrl = statsLinkHandler.stripUrl(uri)
++
++        assertThat(strippedUrl).isEqualTo("wordpress.com/stats/subscribers")
++    }
++
++    @Test
++    fun `strips traffic app link with site`() {
++        val uri = buildUri(host = "stats", "traffic", "example.com")
++
++        val strippedUrl = statsLinkHandler.stripUrl(uri)
++
++        assertThat(strippedUrl).isEqualTo("wordpress://stats/traffic/domain")
++    }
++
++    @Test
++    fun `strips subscribers app link with site`() {
++        val uri = buildUri(host = "stats", "subscribers", "example.com")
++
++        val strippedUrl = statsLinkHandler.stripUrl(uri)
++
++        assertThat(strippedUrl).isEqualTo("wordpress://stats/subscribers/domain")
++    }
+ }

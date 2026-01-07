@@ -1,0 +1,145 @@
+diff --git a/kotlinx-coroutines-core/common/src/Delay.kt b/kotlinx-coroutines-core/common/src/Delay.kt
+index ba06d9778..32d0c0775 100644
+--- a/kotlinx-coroutines-core/common/src/Delay.kt
++++ b/kotlinx-coroutines-core/common/src/Delay.kt
+@@ -7,6 +7,7 @@ package kotlinx.coroutines
+ import kotlinx.coroutines.selects.*
+ import kotlin.coroutines.*
+ import kotlin.time.*
++import kotlin.time.Duration.Companion.milliseconds
+ 
+ /**
+  * This dispatcher _feature_ is implemented by [CoroutineDispatcher] implementations that natively support
+@@ -158,4 +159,7 @@ internal val CoroutineContext.delay: Delay get() = get(ContinuationInterceptor)
+  * Positive durations are coerced at least `1`.
+  */
+ internal fun Duration.toDelayMillis(): Long =
+-    if (this > Duration.ZERO) inWholeMilliseconds.coerceAtLeast(1) else 0
++    if (this > Duration.ZERO) {
++        val millis = inWholeMilliseconds
++        if (millis < Long.MAX_VALUE && millis.milliseconds < this) millis + 1 else millis
++    } else 0
+diff --git a/kotlinx-coroutines-core/common/src/flow/SharingStarted.kt b/kotlinx-coroutines-core/common/src/flow/SharingStarted.kt
+index 055414240..9ce6ce04a 100644
+--- a/kotlinx-coroutines-core/common/src/flow/SharingStarted.kt
++++ b/kotlinx-coroutines-core/common/src/flow/SharingStarted.kt
+@@ -139,7 +139,7 @@ public fun SharingStarted.Companion.WhileSubscribed(
+     stopTimeout: Duration = Duration.ZERO,
+     replayExpiration: Duration = Duration.INFINITE
+ ): SharingStarted =
+-    StartedWhileSubscribed(stopTimeout.inWholeMilliseconds, replayExpiration.inWholeMilliseconds)
++    StartedWhileSubscribed(stopTimeout.toDelayMillis(), replayExpiration.toDelayMillis())
+ 
+ // -------------------------------- implementation --------------------------------
+ 
+diff --git a/kotlinx-coroutines-core/jdk8/src/time/Time.kt b/kotlinx-coroutines-core/jdk8/src/time/Time.kt
+index 78cf6e530..cf200643f 100644
+--- a/kotlinx-coroutines-core/jdk8/src/time/Time.kt
++++ b/kotlinx-coroutines-core/jdk8/src/time/Time.kt
+@@ -66,11 +66,12 @@ public suspend fun <T> withTimeoutOrNull(duration: Duration, block: suspend Coro
+  */
+ private fun Duration.coerceToMillis(): Long {
+     if (this <= Duration.ZERO) return 0
+-    if (this <= ChronoUnit.MILLIS.duration) return 1
+-
+-    // Maximum scalar values of Duration.ofMillis(Long.MAX_VALUE)
+-    val maxSeconds = 9223372036854775
++    val maxSeconds = 9223372036854775L
+     val maxNanos = 807000000
+-    return if (seconds < maxSeconds || seconds == maxSeconds && nano < maxNanos) toMillis()
+-    else Long.MAX_VALUE
++    return if (seconds < maxSeconds || (seconds == maxSeconds && nano < maxNanos)) {
++        val millis = toMillis()
++        if (Duration.ofMillis(millis) < this) millis + 1 else millis
++    } else {
++        Long.MAX_VALUE
++    }
+ }
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+diff --git a/kotlinx-coroutines-test/common/src/TestCoroutineScheduler.kt b/kotlinx-coroutines-test/common/src/TestCoroutineScheduler.kt
+index 04e320d84..16f862df9 100644
+--- a/kotlinx-coroutines-test/common/src/TestCoroutineScheduler.kt
++++ b/kotlinx-coroutines-test/common/src/TestCoroutineScheduler.kt
+@@ -165,7 +165,11 @@ public class TestCoroutineScheduler : AbstractCoroutineContextElement(TestCorout
+     public fun advanceTimeBy(delayTime: Duration) {
+         require(!delayTime.isNegative()) { "Can not advance time by a negative delay: $delayTime" }
+         val startingTime = currentTime
+-        val targetTime = addClamping(startingTime, delayTime.inWholeMilliseconds)
++        val delayMillis = if (delayTime > Duration.ZERO) {
++            val m = delayTime.inWholeMilliseconds
++            if (m < Long.MAX_VALUE && m.milliseconds < delayTime) m + 1 else m
++        } else 0L
++        val targetTime = addClamping(startingTime, delayMillis)
+         while (true) {
+             val event = synchronized(lock) {
+                 val timeMark = currentTime
+
+diff --git a/kotlinx-coroutines-core/common/test/DelayPrecisionTest.kt b/kotlinx-coroutines-core/common/test/DelayPrecisionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/DelayPrecisionTest.kt
+@@ -0,0 +1,50 @@
++/*
++ * Copyright 2016-2021 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines
++
++import kotlin.test.*
++import kotlin.time.*
++import kotlin.time.Duration.Companion.milliseconds
++import kotlin.time.Duration.Companion.nanoseconds
++import kotlin.coroutines.*
++
++class DelayPrecisionTest : TestBase() {
++    @Test
++    fun testToDelayMillis() {
++        assertEquals(0, 0.milliseconds.toDelayMillis())
++        assertEquals(1, 1.nanoseconds.toDelayMillis())
++        assertEquals(1, 999_999.nanoseconds.toDelayMillis())
++        assertEquals(1, 1.milliseconds.toDelayMillis())
++        assertEquals(2, (1.milliseconds + 1.nanoseconds).toDelayMillis())
++        assertEquals(1000, (999.milliseconds + 1_000_000.nanoseconds).toDelayMillis())
++        assertEquals(1000, (999.milliseconds + 999_999.nanoseconds).toDelayMillis())
++        
++        val expectedDuration = 998.milliseconds + 902752.nanoseconds
++        assertEquals(999, expectedDuration.toDelayMillis())
++    }
++
++    @Test
++    fun testDelayPrecision() = runTest {
++        val expectedDuration = 998.milliseconds + 902752.nanoseconds
++        // With the fix, delay(expectedDuration) should delay for 999ms
++        // We use a fake delay to verify the value
++        val delayNode = object : CoroutineDispatcher(), Delay {
++            var delayedTime = -1L
++            override fun dispatch(context: CoroutineContext, block: Runnable) {
++                block.run()
++            }
++            override fun scheduleResumeAfterDelay(timeMillis: Long, continuation: CancellableContinuation<Unit>) {
++                delayedTime = timeMillis
++                continuation.resume(Unit, null)
++            }
++        }
++        
++        withContext(delayNode) {
++            delay(expectedDuration)
++        }
++        assertEquals(999, delayNode.delayedTime)
++    }
++}
++

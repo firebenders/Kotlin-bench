@@ -1,0 +1,244 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
+index 06a2f93e..dba05d9a 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
+@@ -5,6 +5,10 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
+ import com.pinterest.ktlint.rule.engine.core.api.Rule
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.column
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY_OFF
+ import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe
+@@ -12,8 +16,17 @@ import com.pinterest.ktlint.ruleset.standard.StandardRule
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+ 
+ public class FunctionReturnTypeSpacingRule :
+-    StandardRule("function-return-type-spacing"),
++    StandardRule(
++        id = "function-return-type-spacing",
++        usesEditorConfigProperties = setOf(MAX_LINE_LENGTH_PROPERTY),
++    ),
+     Rule.Experimental {
++    private var maxLineLength: Int = MAX_LINE_LENGTH_PROPERTY.defaultValue
++
++    override fun beforeFirstNode(editorConfig: EditorConfig) {
++        maxLineLength = editorConfig[MAX_LINE_LENGTH_PROPERTY]
++    }
++
+     override fun beforeVisitChildNodes(
+         node: ASTNode,
+         autoCorrect: Boolean,
+@@ -57,6 +70,15 @@ public class FunctionReturnTypeSpacingRule :
+             ?.takeIf { it.elementType == WHITE_SPACE }
+             .let { whiteSpaceAfterColon ->
+                 if (whiteSpaceAfterColon?.text != " ") {
++                    if (whiteSpaceAfterColon != null &&
++                        whiteSpaceAfterColon.textContains('\n') &&
++                        exceedsMaxLineLength(node)
++                    ) {
++                        // Merging the return type with the function signature would exceed the max line length. So do
++                        // not report this as a lint violation. Note that the function-signature will take care of
++                        // this kind of situations.
++                        return
++                    }
+                     emit(node.startOffset, "Single space expected between colon and return type", true)
+                     if (autoCorrect) {
+                         node.upsertWhitespaceAfterMe(" ")
+@@ -64,6 +86,46 @@ public class FunctionReturnTypeSpacingRule :
+                 }
+             }
+     }
++
++    private fun exceedsMaxLineLength(colonNode: ASTNode): Boolean {
++        if (maxLineLength == MAX_LINE_LENGTH_PROPERTY_OFF) {
++            return false
++        }
++
++        // Calculate the length of the line if whitespace is replaced with a single space
++        // colonNode.column is 1-based position where colon is. Since it's 1-based, it also
++        // represents the length of the line up to and including the colon.
++        // We need to add: space (1 char) + return type text length
++        val returnTypeText = getReturnTypeText(colonNode)
++        val lineLength = colonNode.column + 1 + returnTypeText.length
++
++        return lineLength > maxLineLength
++    }
++
++    private fun getReturnTypeText(colonNode: ASTNode): String {
++        val returnTypeBuilder = StringBuilder()
++        var currentNode = colonNode.nextLeaf()
++
++        // Skip the whitespace after the colon
++        if (currentNode?.elementType == WHITE_SPACE) {
++            currentNode = currentNode.nextLeaf()
++        }
++
++        // Collect all text until we hit a newline (in whitespace) or reach the end
++        while (currentNode != null) {
++            if (currentNode.elementType == WHITE_SPACE && currentNode.textContains('\n')) {
++                // Include text before the newline
++                val text = currentNode.text
++                val newlineIndex = text.indexOf('\n')
++                returnTypeBuilder.append(text.substring(0, newlineIndex))
++                break
++            }
++            returnTypeBuilder.append(currentNode.text)
++            currentNode = currentNode.nextLeaf()
++        }
++
++        return returnTypeBuilder.toString()
++    }
+ }
+ 
+ public val FUNCTION_RETURN_TYPE_SPACING_RULE_ID: RuleId = FunctionReturnTypeSpacingRule().ruleId
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRuleMaxLineLengthTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRuleMaxLineLengthTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRuleMaxLineLengthTest.kt
+@@ -0,0 +1,133 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class FunctionReturnTypeSpacingRuleMaxLineLengthTest {
++    private val functionReturnTypeSpacingRuleAssertThat = assertThatRule { FunctionReturnTypeSpacingRule() }
++
++    @Test
++    fun `Given a function signature with return type on a new line and merging would exceed max line length then do not report`() {
++        // Merged line would be:
++        // "fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction(): AndAlsoALongReturnType {"
++        // which is 126 characters > 120
++        val code =
++            """
++            fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction():
++                AndAlsoALongReturnType {
++            }
++            """.trimIndent()
++        functionReturnTypeSpacingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 120)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a function signature with return type on a new line and merging would not exceed max line length then report`() {
++        val code =
++            """
++            fun foo():
++                String {
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun foo(): String {
++            }
++            """.trimIndent()
++        functionReturnTypeSpacingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 120)
++            .hasLintViolation(1, 10, "Single space expected between colon and return type")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a function signature with return type on a new line and max line length not set then report`() {
++        // "fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction():" = 102 chars
++        // So colon is at column 102
++        val code =
++            """
++            fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction():
++                AndAlsoALongReturnType {
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction(): AndAlsoALongReturnType {
++            }
++            """.trimIndent()
++        // When max line length is not set (off), the rule should still reformat
++        functionReturnTypeSpacingRuleAssertThat(code)
++            .hasLintViolation(1, 102, "Single space expected between colon and return type")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a function signature with return type on a new line where merging would exactly hit max line length then report`() {
++        // When merged line length exactly equals max_line_length, it should still be allowed (not exceed)
++        // "fun someFunction(): Unit {" = 26 chars
++        val code =
++            """
++            fun someFunction():
++                Unit {
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun someFunction(): Unit {
++            }
++            """.trimIndent()
++        functionReturnTypeSpacingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 26)
++            .hasLintViolation(1, 19, "Single space expected between colon and return type")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a function signature with return type on a new line where merging would exceed max line length by 1 then do not report`() {
++        // "fun someFunction(): Unit {" = 26 chars, with max_line_length = 25 it exceeds
++        val code =
++            """
++            fun someFunction():
++                Unit {
++            }
++            """.trimIndent()
++        functionReturnTypeSpacingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 25)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a function with expression body and return type on a new line and merging would exceed max line length then do not report`() {
++        // "fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction(): String = "result"" = 120 chars
++        // Using max_line_length of 119 to ensure it would exceed
++        val code =
++            """
++            fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction():
++                String = "result"
++            """.trimIndent()
++        functionReturnTypeSpacingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 119)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a function with expression body and return type on a new line and merging would exactly match max line length then report`() {
++        // "fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction(): String = "result"" = 120 chars
++        val code =
++            """
++            fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction():
++                String = "result"
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction(): String = "result"
++            """.trimIndent()
++        functionReturnTypeSpacingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 120)
++            .hasLintViolation(1, 102, "Single space expected between colon and return type")
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

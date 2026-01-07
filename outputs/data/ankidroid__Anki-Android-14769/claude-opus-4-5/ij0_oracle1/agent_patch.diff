@@ -1,0 +1,336 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index a275f03b41..91b51abaf1 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.6'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -161,9 +160,6 @@ android {
+         play {
+             dimension "appStore"
+         }
+-        amazon {
+-            dimension "appStore"
+-        }
+         // A 'full' build has no restrictions on storage/camera. Distributed on GitHub/F-Droid
+         full {
+             dimension "appStore"
+@@ -226,12 +222,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -246,12 +242,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ task installGitHook(type: Copy) {
+@@ -360,7 +350,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+     implementation 'com.github.AppIntro:AppIntro:6.3.1'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
+index f13e3c77a2..aa0405db3c 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
+@@ -44,6 +44,8 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+     private var mEditedModelFileName: String? = null
+     private var mEditedNotetype: NotetypeJson? = null
+     private var mOrdinal = 0
++    /** Whether an ordinal was explicitly provided in the intent */
++    private var mOrdinalProvided = false
+ 
+     /** The index of the card in cardList to show  */
+     private var mCardListIndex = 0
+@@ -86,6 +88,12 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+             mEditedModelFileName = parameters.getString(CardTemplateNotetype.INTENT_MODEL_FILENAME)
+             mCardList = parameters.getLongArray("cardList")
+             mOrdinal = parameters.getInt("ordinal")
++            // If restoring from saved state, read ordinalProvided; otherwise check if ordinal key exists
++            mOrdinalProvided = if (savedInstanceState != null) {
++                parameters.getBoolean("ordinalProvided", false)
++            } else {
++                parameters.containsKey("ordinal")
++            }
+             mCardListIndex = parameters.getInt("cardListIndex")
+             mShowingAnswer = parameters.getBoolean("showingAnswer", mShowingAnswer)
+         }
+@@ -224,6 +232,7 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+         outState.putString(CardTemplateNotetype.INTENT_MODEL_FILENAME, mEditedModelFileName)
+         outState.putLongArray("cardList", mCardList)
+         outState.putInt("ordinal", mOrdinal)
++        outState.putBoolean("ordinalProvided", mOrdinalProvided)
+         outState.putInt("cardListIndex", mCardListIndex)
+         outState.putBundle("noteEditorBundle", mNoteEditorBundle)
+         outState.putBoolean("showingAnswer", mShowingAnswer)
+@@ -235,11 +244,18 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+         if (mNoteEditorBundle != null) {
+             mAllFieldsNull = false
+             // loading from the note editor
++            // Initialize cardIndex from mOrdinal if an ordinal was explicitly provided
++            if (mOrdinalProvided) {
++                cardIndex = getCardIndexFromOrdinal(col, mOrdinal)
++            }
+             val toPreview = setCurrentCardFromNoteEditorBundle(col)
+             if (toPreview != null) {
+                 cardCount = toPreview.note().numberOfCardsEphemeral()
+                 if (cardCount >= 2) {
+                     previewLayout!!.showNavigationButtons()
++                    // Set navigation button states based on the current cardIndex
++                    previewLayout!!.setPrevButtonEnabled(isPrevBtnEnabled(cardIndex))
++                    previewLayout!!.setNextButtonEnabled(isNextBtnEnabled(cardIndex))
+                 }
+             }
+         } else {
+@@ -307,6 +323,35 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+         }
+     }
+ 
++    /**
++     * Converts the card's `ord` (ordinal) to the `cardIndex` used for preview navigation.
++     * For standard note types, ord equals cardIndex.
++     * For cloze note types, the index is determined by the position in clozeNumbersInNote.
++     * @param col The collection
++     * @param ordinal The card's ord value
++     * @return The card index for preview, or 0 if not found
++     */
++    private fun getCardIndexFromOrdinal(col: Collection, ordinal: Int): Int {
++        if (mEditedNotetype == null) {
++            return ordinal
++        }
++        return if (mEditedNotetype!!.isCloze) {
++            val note = col.newNote(mEditedNotetype!!)
++            val fieldValues = getBundleEditFields(mNoteEditorBundle)
++            for (i in fieldValues.indices) {
++                if (i < note.fields.size) {
++                    note.setField(i, fieldValues[i])
++                }
++            }
++            val clozeNumbers = col.clozeNumbersInNote(note)
++            // ordinal is 0-indexed, clozeNumbers are 1-indexed (c1 -> 1, c2 -> 2, etc.)
++            val index = clozeNumbers.indexOf(ordinal + 1)
++            if (index >= 0) index else 0
++        } else {
++            ordinal
++        }
++    }
++
+     private fun getLabels(fieldValues: MutableList<String>) {
+         if (mCardType != null && mCardType == getString(R.string.cloze_model_name)) {
+             fieldValues[0] = getString(R.string.cloze_sample_text, "c1")
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {
+
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/CardTemplatePreviewerOrdinalTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/CardTemplatePreviewerOrdinalTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/CardTemplatePreviewerOrdinalTest.kt
+@@ -0,0 +1,149 @@
++/****************************************************************************************
++ * Copyright (c) 2024 AnkiDroid Open Source Team                                        *
++ *                                                                                      *
++ * This program is free software; you can redistribute it and/or modify it under        *
++ * the terms of the GNU General Public License as published by the Free Software        *
++ * Foundation; either version 3 of the License, or (at your option) any later           *
++ * version.                                                                             *
++ *                                                                                      *
++ * This program is distributed in the hope that it will be useful, but WITHOUT ANY      *
++ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A      *
++ * PARTICULAR PURPOSE. See the GNU General Public License for more details.             *
++ *                                                                                      *
++ * You should have received a copy of the GNU General Public License along with         *
++ * this program.  If not, see <http://www.gnu.org/licenses/>.                           *
++ ****************************************************************************************/
++package com.ichi2.anki
++
++import android.content.Intent
++import androidx.core.os.bundleOf
++import com.ichi2.anki.servicelayer.NoteService
++import com.ichi2.anki.servicelayer.NoteService.getFieldsAsBundleForPreview
++import org.hamcrest.CoreMatchers.containsString
++import org.hamcrest.CoreMatchers.not
++import org.hamcrest.MatcherAssert.assertThat
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++
++/**
++ * Tests for Issue 14694: Edit Note Preview does not show the expected card
++ * 
++ * When a user selects a card that is not card 1 of the note and opens the preview,
++ * the preview should show the selected card, not the first card.
++ */
++@RunWith(RobolectricTestRunner::class)
++class CardTemplatePreviewerOrdinalTest : RobolectricTest() {
++
++    /**
++     * Test that the ordinal provided is used for standard note types.
++     * When editing a note with a "Basic (and reversed card)" type and selecting the second card,
++     * the preview should display the second card (which shows "World" on the front).
++     */
++    @Test
++    fun `ordinal provided shows correct card for standard note type - Issue 14694`() {
++        val fields: MutableList<NoteService.NoteField?> = arrayListOf(
++            Field(0, "Hello"),
++            Field(1, "World")
++        )
++
++        val intent = Intent(Intent.ACTION_VIEW).apply {
++            val basicModel = getCurrentDatabaseModelCopy("Basic (and reversed card)")
++            val tempModelPath = CardTemplateNotetype.saveTempModel(targetContext, basicModel)
++            putExtra(CardTemplateNotetype.INTENT_MODEL_FILENAME, tempModelPath)
++            putExtra(
++                "noteEditorBundle",
++                bundleOf(
++                    "editFields" to getFieldsAsBundleForPreview(fields, false),
++                    "did" to 1L
++                )
++            )
++            putExtra("ordinal", 1) // Select the second card (reversed card)
++        }
++
++        val testCardTemplatePreviewer = super.startActivityNormallyOpenCollectionWithIntent(TestCardTemplatePreviewer::class.java, intent)
++
++        // The second card (reversed) has "Back" template that shows field 1 on the front
++        assertThat("Front field should not be displayed", testCardTemplatePreviewer.cardContent, not(containsString("Hello")))
++        assertThat("Back field should be displayed", testCardTemplatePreviewer.cardContent, containsString("World"))
++    }
++
++    /**
++     * Test that the ordinal provided is used for cloze note types.
++     * With cloze text "{{c1::Hello}} {{c3::World}}", ordinal 2 corresponds to c3 (the second card).
++     * The preview should show the c3 card which has "Hello" visible and "World" as cloze deletion.
++     */
++    @Test
++    fun `ordinal provided shows correct card for cloze note type - Issue 14694`() {
++        val fields: MutableList<NoteService.NoteField?> = arrayListOf(
++            Field(0, "{{c1::Hello}} {{c3::World}}"),
++            Field(1, "Extra")
++        )
++        // For cloze with c1 and c3: c1 has ord=0, c3 has ord=2
++        val ordinalOfSecondCard = 2
++
++        val intent = Intent(Intent.ACTION_VIEW).apply {
++            val clozeModel = getCurrentDatabaseModelCopy("Cloze")
++            val tempModelPath = CardTemplateNotetype.saveTempModel(targetContext, clozeModel)
++            putExtra(CardTemplateNotetype.INTENT_MODEL_FILENAME, tempModelPath)
++            putExtra(
++                "noteEditorBundle",
++                bundleOf(
++                    "editFields" to getFieldsAsBundleForPreview(fields, false),
++                    "did" to 1L
++                )
++            )
++            putExtra("ordinal", ordinalOfSecondCard)
++        }
++
++        val testCardTemplatePreviewer = super.startActivityNormallyOpenCollectionWithIntent(TestCardTemplatePreviewer::class.java, intent)
++
++        // For c3 card: Hello is visible as inactive text, World is the active cloze (shown as [...])
++        // c1 should be marked as inactive (data-ordinal="1" with class "cloze-inactive")
++        assertThat("c1 text should be visible (Hello)", testCardTemplatePreviewer.cardContent, containsString("Hello"))
++        // The card should be card3 (for c3 cloze), not card1
++        assertThat("Should be showing card 3 (for c3)", testCardTemplatePreviewer.cardContent, containsString("card3"))
++        // c3 should be the active cloze with [...] replacement
++        assertThat("c3 should be active cloze", testCardTemplatePreviewer.cardContent, containsString("data-ordinal=\"3\""))
++        assertThat("Cloze replacement shown", testCardTemplatePreviewer.cardContent, containsString("[...]"))
++    }
++
++    /**
++     * Test that navigation buttons have correct state when starting at a non-first card.
++     * When ordinal is provided to select the second card, the previous button should be enabled.
++     */
++    @Test
++    fun `navigation buttons have correct state when starting at non-first card - Issue 14694`() {
++        val fields: MutableList<NoteService.NoteField?> = arrayListOf(
++            Field(0, "Hello"),
++            Field(1, "World")
++        )
++
++        val intent = Intent(Intent.ACTION_VIEW).apply {
++            val basicModel = getCurrentDatabaseModelCopy("Basic (and reversed card)")
++            val tempModelPath = CardTemplateNotetype.saveTempModel(targetContext, basicModel)
++            putExtra(CardTemplateNotetype.INTENT_MODEL_FILENAME, tempModelPath)
++            putExtra(
++                "noteEditorBundle",
++                bundleOf(
++                    "editFields" to getFieldsAsBundleForPreview(fields, false),
++                    "did" to 1L
++                )
++            )
++            putExtra("ordinal", 1) // Start at second card
++        }
++
++        val testCardTemplatePreviewer = super.startActivityNormallyOpenCollectionWithIntent(TestCardTemplatePreviewer::class.java, intent)
++
++        // Starting at second card: previous should be enabled, next should be disabled
++        assertThat("Previous button should be enabled", testCardTemplatePreviewer.previousButtonEnabled())
++        assertThat("Next button should be disabled", !testCardTemplatePreviewer.nextButtonEnabled())
++        assertThat("Card index should be 1", testCardTemplatePreviewer.cardIndex == 1)
++    }
++
++    private inner class Field(override val ord: Int, private val text: String) : NoteService.NoteField {
++        override val fieldText: String
++            get() = text
++    }
++}
++

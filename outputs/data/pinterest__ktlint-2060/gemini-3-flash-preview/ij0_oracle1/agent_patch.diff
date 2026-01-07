@@ -1,0 +1,150 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 862b4428..129106be 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -36,6 +36,7 @@ At this point in time, it is not yet decided what the next steps will be. Ktlint
+ 
+ ### Fixed
+ 
++* Fix `parameter-list-wrapping` reporting `Unnecessary newline before "("` for long function types wrapped in nullable types ([#1324](https://github.com/pinterest/ktlint/issues/1324))
+ * Do not flag a (potential) mutable extension property in case the getter is annotated or prefixed with a modifier `property-naming` ([#2024](https://github.com/pinterest/ktlint/issues/2024))
+ * Do not merge an annotated expression body with the function signature even if it fits on a single line ([#2043](https://github.com/pinterest/ktlint/issues/2043))
+ * Ignore property with name `serialVersionUID` in `property-naming` ([#2045](https://github.com/pinterest/ktlint/issues/2045))
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
+index ae7573bd..d68158d8 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/ParameterListWrappingRule.kt
+@@ -126,7 +126,7 @@ public class ParameterListWrappingRule :
+             codeStyle != ktlint_official && isPartOfFunctionLiteralInNonKtlintOfficialCodeStyle() -> false
+             codeStyle == ktlint_official && isPartOfFunctionLiteralStartingOnSameLineAsClosingParenthesisOfPrecedingReferenceExpression() ->
+                 false
+-            isFunctionTypeWrappedInNullableType() -> false
++            isFunctionTypeWrappedInNullableType() && !textContains('\n') -> false
+             textContains('\n') -> true
+             codeStyle == ktlint_official && containsAnnotatedParameter() -> true
+             exceedsMaxLineLength() -> true
+@@ -161,7 +161,7 @@ public class ParameterListWrappingRule :
+ 
+     private fun ASTNode.isFunctionTypeWrappedInNullableType(): Boolean {
+         require(elementType == VALUE_PARAMETER_LIST)
+-        return treeParent.elementType == FUNCTION_TYPE && treeParent?.treeParent?.elementType == NULLABLE_TYPE
++        return treeParent?.elementType == FUNCTION_TYPE && treeParent?.treeParent?.elementType == NULLABLE_TYPE
+     }
+ 
+     private fun ASTNode.containsAnnotatedParameter(): Boolean {
+@@ -203,7 +203,7 @@ public class ParameterListWrappingRule :
+             //         param1: T
+             //         param2: R
+             //     )
+-            child.treeParent.hasTypeParameterListInFront() -> -1
++            child.treeParent?.hasTypeParameterListInFront() == true -> -1
+ 
+             else -> 0
+         }.let {
+@@ -215,7 +215,7 @@ public class ParameterListWrappingRule :
+         }.let { indentLevelFix ->
+             val indentLevel =
+                 indentConfig
+-                    .indentLevelFrom(child.treeParent.indent(false))
++                    .indentLevelFrom(child.treeParent?.indent(false) ?: "")
+                     .plus(indentLevelFix)
+             "\n" + indentConfig.indent.repeat(indentLevel)
+         }
+@@ -228,7 +228,10 @@ public class ParameterListWrappingRule :
+         when (child.elementType) {
+             LPAR -> {
+                 val prevLeaf = child.prevLeaf()
+-                if (prevLeaf is PsiWhiteSpace && prevLeaf.textContains('\n')) {
++                if (prevLeaf is PsiWhiteSpace &&
++                    prevLeaf.textContains('\n') &&
++                    !child.treeParent.isFunctionTypeWrappedInNullableType()
++                ) {
+                     emit(child.startOffset, errorMessage(child), true)
+                     if (autoCorrect) {
+                         prevLeaf.delete()
+@@ -284,7 +287,7 @@ public class ParameterListWrappingRule :
+         }
+ 
+     private fun ASTNode.hasTypeParameterListInFront(): Boolean {
+-        val parent = this.treeParent
++        val parent = this.treeParent ?: return false
+         val typeParameterList =
+             if (parent.elementType == PRIMARY_CONSTRUCTOR) {
+                 parent.prevSibling { it.elementType == TYPE_PARAMETER_LIST }
+@@ -293,7 +296,7 @@ public class ParameterListWrappingRule :
+             }
+         val typeListNode =
+             typeParameterList
+-                ?: parent.psi.collectDescendantsOfType<KtTypeArgumentList>().firstOrNull()?.node
++                ?: parent.psi?.collectDescendantsOfType<KtTypeArgumentList>()?.firstOrNull()?.node
+                 ?: return false
+         return typeListNode.children().any { it.isWhiteSpaceWithNewline() }
+     }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue1324Test.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue1324Test.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue1324Test.kt
+@@ -0,0 +1,54 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++class Issue1324Test {
++    private val parameterListWrappingRuleAssertThat =
++        assertThatRule(
++            provider = { ParameterListWrappingRule() },
++            additionalRuleProviders =
++                setOf(
++                    RuleProvider { IndentationRule() },
++                ),
++        )
++
++    @Test
++    fun `Issue 1324 - Unnecessary newline before open parenthesis in function type`() {
++        val code =
++            """
++            val foo1: (
++                (
++                    s1: String,
++                    s2: String,
++                    s3: String,
++                    s4: String,
++                    s5: String,
++                    s6: String
++                ) -> Unit
++            )? = null
++            """.trimIndent()
++        parameterListWrappingRuleAssertThat(code)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue 1324 - Still reports unnecessary newline before open parenthesis in normal function`() {
++        val code =
++            """
++            fun foo
++            (
++                s1: String,
++                s2: String
++            ) {}
++            """.trimIndent()
++        parameterListWrappingRuleAssertThat(code)
++            .hasLintViolations(
++                LintViolation(2, 1, "Unnecessary newline before \"(\""),
++            )
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

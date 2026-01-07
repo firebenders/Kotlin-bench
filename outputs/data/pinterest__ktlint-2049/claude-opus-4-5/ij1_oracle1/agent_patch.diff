@@ -1,17 +1,17 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 8722a8cd..c1fefc12 100644
+index 8722a8cd..a5685a28 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
 @@ -11,6 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
  ### Fixed
  
  * Do not flag a (potential) mutable extension property in case the getter is annotated or prefixed with a modifier `property-naming` ([#2024](https://github.com/pinterest/ktlint/issues/2024))
-+* Do not merge an annotated expression body with the function signature to avoid a conflict with the `annotation` rule `function-signature` ([#2028](https://github.com/pinterest/ktlint/issues/2028))
++* Do not merge an annotated expression body with the function signature as it would result in a violation of the `annotation` rule `function-signature` ([#2028](https://github.com/pinterest/ktlint/issues/2028))
  
  ### Changed
  
 diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
-index 28a6ebc7..17898dd8 100644
+index 28a6ebc7..6d6ad0cc 100644
 --- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
 +++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
 @@ -1,5 +1,6 @@
@@ -21,30 +21,40 @@ index 28a6ebc7..17898dd8 100644
  import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
  import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
  import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
-@@ -541,7 +542,9 @@ public class FunctionSignatureRule :
+@@ -531,6 +532,9 @@ public class FunctionSignatureRule :
+         val bodyNodes = node.getFunctionBody(lastNodeOfFunctionSignatureWithBodyExpression)
+         val whiteSpaceBeforeFunctionBodyExpression = bodyNodes.getStartingWhitespaceOrNull()
+         val functionBodyExpressionNodes = bodyNodes.dropWhile { it.isWhiteSpace() }
++        // Do not merge an annotated expression body with function signature as that would result in a violation of
++        // the annotation rule
++        val bodyExpressionIsAnnotated = functionBodyExpressionNodes.containsAnnotatedExpression()
+ 
+         val functionBodyExpressionLines =
+             functionBodyExpressionNodes
+@@ -541,7 +545,9 @@ public class FunctionSignatureRule :
              ?.also { firstLineOfBodyExpression ->
                  if (whiteSpaceBeforeFunctionBodyExpression.isWhiteSpaceWithNewline()) {
                      val mergeWithFunctionSignature =
 -                        if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression) {
-+                        if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression &&
-+                            !functionBodyExpressionNodes.startsWithAnnotatedExpression()
-+                        ) {
++                        if (bodyExpressionIsAnnotated) {
++                            false
++                        } else if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression) {
                              functionBodyExpressionWrapping == default ||
                                  (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||
                                  node.isMultilineFunctionSignatureWithoutExplicitReturnType(
-@@ -658,6 +661,20 @@ public class FunctionSignatureRule :
+@@ -658,6 +664,20 @@ public class FunctionSignatureRule :
              .firstOrNull()
              ?.takeIf { first -> first.isWhiteSpace() }
  
-+    private fun List<ASTNode>.startsWithAnnotatedExpression(): Boolean =
++    private fun List<ASTNode>.containsAnnotatedExpression(): Boolean =
 +        firstOrNull()
 +            ?.let { first ->
-+                var node: ASTNode? = first
-+                while (node != null && node.elementType != FUN) {
-+                    if (node.elementType == ANNOTATED_EXPRESSION) {
++                var current: ASTNode? = first
++                while (current != null && current.elementType != FUN) {
++                    if (current.elementType == ANNOTATED_EXPRESSION) {
 +                        return@let true
 +                    }
-+                    node = node.treeParent
++                    current = current.treeParent
 +                }
 +                false
 +            }
@@ -53,31 +63,142 @@ index 28a6ebc7..17898dd8 100644
      private fun isMaxLineLengthSet() = maxLineLength != MAX_LINE_LENGTH_PROPERTY_OFF
  
      private fun List<ASTNode>.collectLeavesRecursively(): List<ASTNode> = flatMap { it.collectLeavesRecursively() }
-diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt
-index 661faffd..6b9621b5 100644
---- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt
-+++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt
-@@ -1092,6 +1092,20 @@ class FunctionSignatureRuleTest {
-             .hasNoLintViolations()
-     }
- 
-+    @Test
-+    fun `Issue 2028 - Given a function signature with a body expression that starts with an annotated expression, do not merge it with the function signature`() {
-+        val code =
-+            """
-+            // $MAX_LINE_LENGTH_MARKER                                                      $EOL_CHAR
-+            private fun getErrorMessage(value: String): String =
-+                @Suppress("DEPRECATION")
-+                customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT, value)
-+            """.trimIndent()
-+        functionSignatureWrappingRuleAssertThat(code)
-+            .setMaxLineLength()
-+            .hasNoLintViolations()
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt
+@@ -0,0 +1,130 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.ruleset.standard.rules.FunctionSignatureRule.Companion.FUNCTION_BODY_EXPRESSION_WRAPPING_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Nested
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.params.ParameterizedTest
++import org.junit.jupiter.params.provider.EnumSource
++
++/**
++ * Tests for https://github.com/pinterest/ktlint/issues/2028
++ *
++ * The function-signature rule should not merge annotated expression with the function signature
++ * as that would result in a violation of the annotation rule.
++ */
++class FunctionSignatureRuleAnnotatedExpressionTest {
++    private val functionSignatureWrappingRuleAssertThat = assertThatRule { FunctionSignatureRule() }
++
++    @Nested
++    inner class `Given a function with an annotated expression body on a separate line` {
++        @ParameterizedTest(name = "bodyExpressionWrapping: {0}")
++        @EnumSource(
++            value = FunctionSignatureRule.FunctionBodyExpressionWrapping::class,
++        )
++        fun `Given an annotated expression body on a separate line then do not merge with the function signature`(
++            bodyExpressionWrapping: FunctionSignatureRule.FunctionBodyExpressionWrapping,
++        ) {
++            val code =
++                """
++                private fun getErrorMessage(value: String): String =
++                    @Suppress("DEPRECATION")
++                    customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT_ERROR_MESSAGE, value)
++                """.trimIndent()
++            functionSignatureWrappingRuleAssertThat(code)
++                .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 120)
++                .withEditorConfigOverride(FUNCTION_BODY_EXPRESSION_WRAPPING_PROPERTY to bodyExpressionWrapping)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a multiline function signature with an annotated expression body on a separate line then do not merge with the function signature`() {
++            // The function signature can be rewritten to single line, but the annotated expression body should stay on separate line
++            val code =
++                """
++                private fun getErrorMessage(
++                    value: String,
++                    otherValue: String
++                ): String =
++                    @Suppress("DEPRECATION")
++                    customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT_ERROR_MESSAGE, value)
++                """.trimIndent()
++            val formattedCode =
++                """
++                private fun getErrorMessage(value: String, otherValue: String): String =
++                    @Suppress("DEPRECATION")
++                    customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT_ERROR_MESSAGE, value)
++                """.trimIndent()
++            functionSignatureWrappingRuleAssertThat(code)
++                .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 120)
++                .hasLintViolations(
++                    LintViolation(2, 5, "No whitespace expected between opening parenthesis and first parameter name"),
++                    LintViolation(3, 5, "Single whitespace expected before parameter"),
++                    LintViolation(3, 23, "No whitespace expected between last parameter and closing parenthesis"),
++                ).isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given a function with an annotated expression that would fit on one line then still do not merge`() {
++            val code =
++                """
++                fun foo(): String =
++                    @Suppress("DEPRECATION")
++                    bar
++                """.trimIndent()
++            functionSignatureWrappingRuleAssertThat(code)
++                .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 100)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a multiline function signature without explicit return type and an annotated expression body on a separate line then do not merge with the function signature`() {
++            // The function signature can be rewritten to single line, but the annotated expression body should stay on separate line
++            val code =
++                """
++                private fun getErrorMessage(
++                    value: String,
++                    otherValue: String
++                ) =
++                    @Suppress("DEPRECATION")
++                    customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT_ERROR_MESSAGE, value)
++                """.trimIndent()
++            val formattedCode =
++                """
++                private fun getErrorMessage(value: String, otherValue: String) =
++                    @Suppress("DEPRECATION")
++                    customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT_ERROR_MESSAGE, value)
++                """.trimIndent()
++            functionSignatureWrappingRuleAssertThat(code)
++                .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 120)
++                .hasLintViolations(
++                    LintViolation(2, 5, "No whitespace expected between opening parenthesis and first parameter name"),
++                    LintViolation(3, 5, "Single whitespace expected before parameter"),
++                    LintViolation(3, 23, "No whitespace expected between last parameter and closing parenthesis"),
++                ).isFormattedAs(formattedCode)
++        }
 +    }
 +
-     @Nested
-     inner class `Issue 1773 - Given a unction signature without parameters exceeding the max line length` {
-         @Test
++    @Nested
++    inner class `Given a function with a non-annotated expression body` {
++        @Test
++        fun `Given that a non-annotated expression body fits on the same line then it can be merged`() {
++            val code =
++                """
++                fun foo(): String =
++                    bar
++                """.trimIndent()
++            val formattedCode =
++                """
++                fun foo(): String = bar
++                """.trimIndent()
++            functionSignatureWrappingRuleAssertThat(code)
++                .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 100)
++                .hasLintViolation(1, 20, "First line of body expression fits on same line as function signature")
++                .isFormattedAs(formattedCode)
++        }
++    }
++}
++
 
 diff --git a/local.properties b/local.properties
 new file mode 100644

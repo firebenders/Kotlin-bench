@@ -1,0 +1,83 @@
+diff --git a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+index de1522526..ca28c1354 100644
+--- a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
++++ b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+@@ -38,7 +38,19 @@ private fun <E : Throwable> createConstructor(clz: Class<E>): Ctor {
+     * Try to reflectively find constructor(), constructor(message, cause), constructor(cause) or constructor(message).
+     * Exceptions are shared among coroutines, so we should copy exception before recovering current stacktrace.
+     */
+-    val constructors = clz.constructors.sortedByDescending { it.parameterTypes.size }
++    val constructors = clz.constructors.sortedByDescending {
++        var score = 0
++        val p = it.parameterTypes
++        when (p.size) {
++            2 -> if (p[0] == String::class.java && p[1] == Throwable::class.java) score = 3
++            1 -> {
++                if (p[0] == Throwable::class.java) score = 2
++                else if (p[0] == String::class.java) score = 1
++            }
++            0 -> score = 0
++        }
++        score
++    }
+     for (constructor in constructors) {
+         val result = createSafeConstructor(constructor)
+         if (result != null) return result
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/jvm/test/exceptions/NestedExceptionTest.kt b/kotlinx-coroutines-core/jvm/test/exceptions/NestedExceptionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/exceptions/NestedExceptionTest.kt
+@@ -0,0 +1,37 @@
++/*
++ * Copyright 2016-2021 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines.exceptions
++
++import kotlinx.coroutines.*
++import org.junit.Test
++import kotlin.test.*
++
++class NestedExceptionTest : TestBase() {
++
++    @Test
++    fun testNestedException() = runTest {
++        val result = runCatching {
++            coroutineScope<Unit> {
++                throw NestedException(IllegalStateException("ERROR"))
++            }
++        }
++        val ex = result.exceptionOrNull() ?: error("Expected to fail")
++        
++        assertTrue(ex is NestedException, "Expected NestedException, but was ${ex::class}")
++        if (ex.cause is NestedException) {
++            val nestedEx = ex.cause as NestedException
++            fail("StackTraceRecovery nested the exception: ex.cause is NestedException, which has cause ${nestedEx.cause}")
++        }
++        assertTrue(ex.cause is IllegalStateException, "Expected cause to be IllegalStateException, but was ${ex.cause?.let { it::class }}")
++        assertEquals("ERROR", (ex.cause as IllegalStateException).message)
++    }
++}
++
++class NestedException : RuntimeException {
++    constructor(message: String) : super(message)
++    constructor(cause: Throwable) : super(cause)
++    constructor() : super()
++}
++

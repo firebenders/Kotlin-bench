@@ -1,0 +1,120 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/reader/ReaderPostListFragment.java b/WordPress/src/main/java/org/wordpress/android/ui/reader/ReaderPostListFragment.java
+index 61c49c1d81a..02b3cdc3111 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/reader/ReaderPostListFragment.java
++++ b/WordPress/src/main/java/org/wordpress/android/ui/reader/ReaderPostListFragment.java
+@@ -2300,7 +2300,12 @@ public class ReaderPostListFragment extends ViewPagerFragment
+             showNewPostsBar();
+         } else if (event.getResult().isNewOrChanged()
+                    || event.getAction() == UpdateAction.REQUEST_REFRESH) {
+-            refreshPosts();
++            // Handle pagination differently to avoid posts shifting places
++            if (event.getAction() == UpdateAction.REQUEST_OLDER && hasPostAdapter()) {
++                getPostAdapter().refreshForPagination();
++            } else {
++                refreshPosts();
++            }
+         } else {
+             boolean requestFailed = (event.getResult() == ReaderActions.UpdateResult.FAILED);
+             setEmptyTitleDescriptionAndButton(requestFailed);
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/reader/adapters/ReaderPostAdapter.java b/WordPress/src/main/java/org/wordpress/android/ui/reader/adapters/ReaderPostAdapter.java
+index df4131dd8cf..f79b7048adb 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/reader/adapters/ReaderPostAdapter.java
++++ b/WordPress/src/main/java/org/wordpress/android/ui/reader/adapters/ReaderPostAdapter.java
+@@ -743,6 +743,14 @@ public class ReaderPostAdapter extends RecyclerView.Adapter<RecyclerView.ViewHol
+         loadPosts();
+     }
+ 
++    /*
++     * refresh posts for pagination - appends new posts to the end of the list
++     * instead of rebuilding the entire list
++     */
++    public void refreshForPagination() {
++        loadPosts(true);
++    }
++
+     /*
+      * same as refresh() above but first clears the existing posts
+      */
+@@ -753,11 +761,15 @@ public class ReaderPostAdapter extends RecyclerView.Adapter<RecyclerView.ViewHol
+ 
+     @SuppressWarnings("deprecation")
+     private void loadPosts() {
++        loadPosts(false); // Default to not being for pagination
++    }
++
++    private void loadPosts(boolean isForPagination) {
+         if (mIsTaskRunning) {
+             AppLog.w(AppLog.T.READER, "reader posts task already running");
+             return;
+         }
+-        new LoadPostsTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
++        new LoadPostsTask(isForPagination).executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+     }
+ 
+     private ReaderPost getItem(int position) {
+@@ -871,9 +883,15 @@ public class ReaderPostAdapter extends RecyclerView.Adapter<RecyclerView.ViewHol
+     @SuppressLint("StaticFieldLeak")
+     private class LoadPostsTask extends AsyncTask<Void, Void, Boolean> {
+         private ReaderPostList mAllPosts;
++        private ReaderPostList mNewPosts; // New posts to append for pagination
+ 
+         private boolean mCanRequestMorePostsTemp;
+         private int mGapMarkerPositionTemp;
++        private boolean mIsForPagination;
++
++        LoadPostsTask(boolean isForPagination) {
++            mIsForPagination = isForPagination;
++        }
+ 
+         @Override
+         protected void onPreExecute() {
+@@ -908,8 +926,24 @@ public class ReaderPostAdapter extends RecyclerView.Adapter<RecyclerView.ViewHol
+                     return false;
+             }
+ 
+-            if (mPosts.isSameListWithBookmark(mAllPosts)) {
+-                return false;
++            if (mIsForPagination) {
++                // For pagination, identify new posts that aren't already in the current list
++                mNewPosts = new ReaderPostList();
++                for (ReaderPost post : mAllPosts) {
++                    if (mPosts.indexOfPost(post) == -1) {
++                        mNewPosts.add(post);
++                    }
++                }
++
++                // If there are no new posts, don't update
++                if (mNewPosts.isEmpty()) {
++                    return false;
++                }
++            } else {
++                // For initial load or refresh, check if the list has changed
++                if (mPosts.isSameListWithBookmark(mAllPosts)) {
++                    return false;
++                }
+             }
+ 
+             // if we're not already displaying the max # posts, enable requesting more when
+@@ -956,9 +990,19 @@ public class ReaderPostAdapter extends RecyclerView.Adapter<RecyclerView.ViewHol
+             if (result) {
+                 ReaderPostAdapter.this.mGapMarkerPosition = mGapMarkerPositionTemp;
+                 ReaderPostAdapter.this.mCanRequestMorePosts = mCanRequestMorePostsTemp;
+-                mPosts.clear();
+-                mPosts.addAll(mAllPosts);
+-                notifyDataSetChanged();
++
++                if (mIsForPagination) {
++                    // For pagination, append new posts to the end of the existing list
++                    int currentSize = mPosts.size();
++                    mPosts.addAll(mNewPosts);
++                    // Notify that items were inserted at the end
++                    notifyItemRangeInserted(currentSize, mNewPosts.size());
++                } else {
++                    // For initial load or refresh, replace the entire list
++                    mPosts.clear();
++                    mPosts.addAll(mAllPosts);
++                    notifyDataSetChanged();
++                }
+             }
+ 
+             if (mDataLoadedListener != null) {

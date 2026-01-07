@@ -1,0 +1,224 @@
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
+index a90f133eda..d134065d0f 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
+@@ -186,6 +186,9 @@ public class RecipientSelectView extends TokenCompleteTextView<Recipient> implem
+         } catch (NonAsciiEmailAddressException e) {
+             setError(getContext().getString(R.string.recipient_error_non_ascii));
+             return null;
++        } catch (InvalidEmailAddressException e) {
++            setError(getContext().getString(R.string.recipient_error_invalid_email));
++            return null;
+         }
+     }
+ 
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+index a14cb14bdb..61ec9cd61e 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+@@ -11,13 +11,14 @@ import org.apache.james.mime4j.util.CharsetUtil
+  */
+ internal class UserInputEmailAddressParser {
+ 
+-    @Throws(NonAsciiEmailAddressException::class)
++    @Throws(NonAsciiEmailAddressException::class, InvalidEmailAddressException::class)
+     fun parse(input: String): List<Address> {
+         return Address.parseUnencoded(input)
+             .mapNotNull { address ->
+                 when {
+                     address.isIncomplete() -> null
+                     address.isNonAsciiAddress() -> throw NonAsciiEmailAddressException(address.address)
++                    !address.isValidRfc5321Address() -> throw InvalidEmailAddressException(address.address)
+                     else -> Address.parse(address.toEncodedString()).firstOrNull()
+                 }
+             }
+@@ -26,6 +27,94 @@ internal class UserInputEmailAddressParser {
+     private fun Address.isIncomplete() = hostname.isNullOrBlank()
+ 
+     private fun Address.isNonAsciiAddress() = !CharsetUtil.isASCII(address)
++
++    /**
++     * Validates if an email address conforms to RFC 5321 specification.
++     * This includes checking for invalid characters and format issues.
++     */
++    private fun Address.isValidRfc5321Address(): Boolean {
++        val emailAddress = this.address ?: return false
++
++        // Check for basic format: must contain exactly one @ symbol
++        val atCount = emailAddress.count { it == '@' }
++        if (atCount != 1) return false
++
++        val parts = emailAddress.split('@')
++        if (parts.size != 2) return false
++
++        val localPart = parts[0]
++        val domainPart = parts[1]
++
++        // Both parts must not be empty
++        if (localPart.isEmpty() || domainPart.isEmpty()) return false
++
++        // Check for invalid trailing characters (like the reported '/' issue)
++        // Note: trailing spaces are handled by the existing parser, so we focus on clearly invalid chars
++        if (emailAddress.endsWith("/") || emailAddress.endsWith("\\")) {
++            return false
++        }
++
++        // Validate local part (before @)
++        if (!isValidLocalPart(localPart)) return false
++
++        // Validate domain part (after @)
++        if (!isValidDomainPart(domainPart)) return false
++
++        return true
++    }
++
++    /**
++     * Validates the local part of an email address (before the @)
++     */
++    private fun isValidLocalPart(localPart: String): Boolean {
++        if (localPart.isEmpty() || localPart.length > 64) return false
++
++        // Cannot start or end with a dot
++        if (localPart.startsWith(".") || localPart.endsWith(".")) return false
++
++        // Cannot have consecutive dots
++        if (localPart.contains("..")) return false
++
++        // Check for valid characters in local part
++        // RFC 5321 allows: A-Z a-z 0-9 ! # $ % & ' * + - / = ? ^ _ ` { | } ~ and .
++        val validLocalChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#\$%&'*+-/=?^_`{|}~."
++        return localPart.all { it in validLocalChars }
++    }
++
++    /**
++     * Validates the domain part of an email address (after the @)
++     */
++    private fun isValidDomainPart(domainPart: String): Boolean {
++        if (domainPart.isEmpty() || domainPart.length > 253) return false
++
++        // Cannot start or end with a hyphen or dot
++        if (domainPart.startsWith("-") || domainPart.endsWith("-") ||
++            domainPart.startsWith(".") || domainPart.endsWith(".")) return false
++
++        // Split by dots to check each label
++        val labels = domainPart.split(".")
++        if (labels.isEmpty()) return false
++
++        // Each label must be valid
++        return labels.all { label ->
++            isValidDomainLabel(label)
++        }
++    }
++
++    /**
++     * Validates a single label in the domain part
++     */
++    private fun isValidDomainLabel(label: String): Boolean {
++        if (label.isEmpty() || label.length > 63) return false
++
++        // Cannot start or end with hyphen
++        if (label.startsWith("-") || label.endsWith("-")) return false
++
++        // Must contain only letters, digits, and hyphens
++        return label.all { it.isLetterOrDigit() || it == '-' }
++    }
+ }
+ 
+ internal class NonAsciiEmailAddressException(message: String) : Exception(message)
++
++internal class InvalidEmailAddressException(message: String) : Exception(message)
+diff --git a/legacy/ui/legacy/src/main/res/values/strings.xml b/legacy/ui/legacy/src/main/res/values/strings.xml
+index a40685e598..292cd6a2e8 100644
+--- a/legacy/ui/legacy/src/main/res/values/strings.xml
++++ b/legacy/ui/legacy/src/main/res/values/strings.xml
+@@ -992,6 +992,7 @@
+ 
+     <string name="recipient_error_non_ascii">Special characters are currently not supported!</string>
+     <string name="recipient_error_parse_failed">Error parsing address!</string>
++    <string name="recipient_error_invalid_email">Invalid email address format!</string>
+     <string name="account_settings_crypto_hide_sign_only">Hide unencrypted signatures</string>
+     <string name="account_settings_crypto_hide_sign_only_on">Only encrypted signatures will be displayed</string>
+     <string name="account_settings_crypto_hide_sign_only_off">All signatures will be displayed</string>
+diff --git a/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserTest.kt b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserTest.kt
+index f1ecb2d605..a34fc055cc 100644
+--- a/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserTest.kt
++++ b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserTest.kt
+@@ -150,4 +150,78 @@ class UserInputEmailAddressParserTest {
+ 
+         assertThat(addresses).containsExactly(Address("user@domain.example", "Firstname \"Nickname\" LastName"))
+     }
++
++    @Test
++    fun `email address ending with forward slash should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("xxx@gmail.com/")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `email address ending with backslash should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user@domain.example\\")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++
++
++    @Test
++    fun `email address with consecutive dots in local part should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user..name@domain.example")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `email address starting with dot in local part should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse(".user@domain.example")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `email address ending with dot in local part should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user.@domain.example")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `email address with invalid characters in local part should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user<>@domain.example")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `email address starting with hyphen in domain should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user@-domain.example")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `email address ending with hyphen in domain should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user@domain-.example")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `valid email address with forward slash in local part should parse correctly`() {
++        // Forward slash is actually allowed in the local part according to RFC 5321
++        val addresses = parser.parse("user/name@domain.example")
++
++        assertThat(addresses).containsExactly(Address("user/name@domain.example"))
++    }
++
++    @Test
++    fun `valid email address with special characters in local part should parse correctly`() {
++        // These characters are allowed in local part
++        val addresses = parser.parse("user+test@domain.example")
++
++        assertThat(addresses).containsExactly(Address("user+test@domain.example"))
++    }
+ }

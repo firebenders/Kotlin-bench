@@ -1,0 +1,238 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+index bdddca08..cd0636d0 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+@@ -6,6 +6,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE_ANNOTATION_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIMARY_CONSTRUCTOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PROJECTION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT
+@@ -18,6 +19,7 @@ import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRu
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.children
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
+@@ -127,10 +129,12 @@ public class AnnotationRule :
+     ) {
+         require(node.elementType == ANNOTATION_ENTRY)
+ 
++        val isPrimaryConstructorAnnotation = node.treeParent.treeParent.elementType == PRIMARY_CONSTRUCTOR
+         if (node.isAnnotationEntryWithValueArgumentList() &&
+             node.treeParent.treeParent.elementType != VALUE_PARAMETER &&
+             node.treeParent.treeParent.elementType != VALUE_ARGUMENT &&
+-            node.isNotReceiverTargetAnnotation()
++            node.isNotReceiverTargetAnnotation() &&
++            !(codeStyle == CodeStyleValue.ktlint_official && isPrimaryConstructorAnnotation)
+         ) {
+             // Disallow:
+             //     @Foo class Bar
+@@ -140,6 +144,7 @@ public class AnnotationRule :
+             //         @Bar("bar") bar,
+             //         @Bar("bar") "42",
+             //     ) {}
++            // For PRIMARY_CONSTRUCTOR with ktlint_official, wrapping is enforced separately below
+             checkForAnnotationWithParameterToBePlacedOnSeparateLine(node, emit, autoCorrect)
+         }
+ 
+@@ -161,9 +166,57 @@ public class AnnotationRule :
+                 }
+             }
+ 
++            if (codeStyle == CodeStyleValue.ktlint_official &&
++                node.treeParent.elementType == MODIFIER_LIST &&
++                node.treeParent.treeParent.elementType == PRIMARY_CONSTRUCTOR
++            ) {
++                // In ktlint_official code style, annotations before constructor should be wrapped
++                // Code below is disallowed in ktlint_official:
++                //   class Foo @Inject constructor()
++                //   data class Bar @Bar1 @Bar2 constructor(val x: Int)
++                if (node.isFirstAnnotationEntry()) {
++                    // First annotation must be on a separate line after class name
++                    emit(
++                        node.startOffset,
++                        "Annotations before constructor should be on separate lines",
++                        true,
++                    )
++                    if (autoCorrect) {
++                        node
++                            .firstChildLeafOrSelf()
++                            .prevLeaf()
++                            .safeAs<LeafPsiElement>()
++                            ?.let {
++                                if (it.elementType == WHITE_SPACE) {
++                                    it.replaceWithText(getNewlineWithIndent(node.treeParent))
++                                } else {
++                                    it.rawInsertAfterMe(
++                                        PsiWhiteSpaceImpl(getNewlineWithIndent(node.treeParent)),
++                                    )
++                                }
++                            }
++                    }
++                }
++                if (node.isLastAnnotationEntry()) {
++                    // Constructor keyword must be on a separate line after the last annotation
++                    emit(
++                        node.findAnnotatedConstruct().startOffset,
++                        "Annotation(s) before constructor should be on a separate line",
++                        true,
++                    )
++                    if (autoCorrect) {
++                        node
++                            .lastChildLeafOrSelf()
++                            .nextCodeLeaf()
++                            ?.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                    }
++                }
++            }
++
+             if (node.treeParent.elementType != ANNOTATION &&
+                 node.treeParent.treeParent.elementType != VALUE_PARAMETER &&
+                 node.treeParent.treeParent.elementType != VALUE_ARGUMENT &&
++                !(codeStyle == CodeStyleValue.ktlint_official && isPrimaryConstructorAnnotation) &&
+                 node.isPrecededByOtherAnnotationEntryOnTheSameLine() &&
+                 node.isLastAnnotationEntry()
+             ) {
+@@ -172,6 +225,7 @@ public class AnnotationRule :
+                 // But following is allowed:
+                 //   @[Foo1 Foo2] fun foo() {}
+                 //   fun foo(@Bar1 @Bar2 bar) {}
++                // For PRIMARY_CONSTRUCTOR with ktlint_official, wrapping is enforced by the code above
+                 emit(
+                     node.findAnnotatedConstruct().startOffset,
+                     "Multiple annotations should not be placed on the same line as the annotated construct",
+@@ -193,36 +247,68 @@ public class AnnotationRule :
+             node.typeProjectionOrNull()
+                 ?.prevCodeLeaf()
+                 ?.let { startOfList ->
+-                    // Code below is disallowed
+-                    //   var foo: List<@Foo1 @Foo2 String>
++                    // For type projections, wrap annotations in these cases:
++                    //   1. Multiple annotations on the same type projection
++                    //   2. A single annotation with parameters
+                     // But following is allowed:
+-                    //   var foo: List<@[Foo1 Foo2] String>
+-                    //   fun foo(@Bar1 @Bar2 bar) {}
+-                    if (node.isFollowedByOtherAnnotationEntryOnTheSameLine() &&
+-                        node.isFirstAnnotationEntry()
+-                    ) {
+-                        emit(startOfList.startOffset, "Expected newline after '${startOfList.text}'", true)
+-                        if (autoCorrect) {
+-                            startOfList
+-                                .upsertWhitespaceAfterMe(
+-                                    getNewlineWithIndent(node.treeParent).plus(indentConfig.indent),
+-                                )
++                    //   var foo: List<@Foo String>  // single annotation without parameter
++                    //   var foo: List<@[Foo Bar] String>  // annotation array
++                    val shouldWrapTypeProjectionAnnotations =
++                        node.isFollowedByOtherAnnotationEntryOnTheSameLine() ||
++                            node.isPrecededByOtherAnnotationEntryOnTheSameLine() ||
++                            (node.isAnnotationEntryWithValueArgumentList() && !node.isFollowedByOtherAnnotationEntryOnTheSameLine() && !node.isPrecededByOtherAnnotationEntryOnTheSameLine())
++
++                    if (shouldWrapTypeProjectionAnnotations) {
++                        if (node.isFollowedByOtherAnnotationEntryOnTheSameLine() &&
++                            node.isFirstAnnotationEntry()
++                        ) {
++                            emit(startOfList.startOffset, "Expected newline after '${startOfList.text}'", true)
++                            if (autoCorrect) {
++                                startOfList
++                                    .upsertWhitespaceAfterMe(
++                                        getNewlineWithIndent(node.treeParent).plus(indentConfig.indent),
++                                    )
++                            }
+                         }
+-                    }
+-                    if (node.isPrecededByOtherAnnotationEntryOnTheSameLine() &&
+-                        node.isLastAnnotationEntry()
+-                    ) {
+-                        node
+-                            .findAnnotatedConstruct()
+-                            .treeParent
+-                            .lastChildLeafOrSelf()
+-                            .nextLeaf { it.isCodeLeaf() && it.elementType != ElementType.COMMA }
+-                            ?.let { codeLeaf ->
+-                                emit(codeLeaf.startOffset, "Expected newline before '${codeLeaf.text}'", true)
+-                                if (autoCorrect) {
+-                                    codeLeaf.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                        if (node.isPrecededByOtherAnnotationEntryOnTheSameLine() &&
++                            node.isLastAnnotationEntry()
++                        ) {
++                            node
++                                .findAnnotatedConstruct()
++                                .treeParent
++                                .lastChildLeafOrSelf()
++                                .nextLeaf { it.isCodeLeaf() && it.elementType != ElementType.COMMA }
++                                ?.let { codeLeaf ->
++                                    emit(codeLeaf.startOffset, "Expected newline before '${codeLeaf.text}'", true)
++                                    if (autoCorrect) {
++                                        codeLeaf.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                                    }
+                                 }
++                        }
++                        // Handle single annotation with parameter on type projection
++                        if (!node.isPrecededByOtherAnnotationEntryOnTheSameLine() &&
++                            !node.isFollowedByOtherAnnotationEntryOnTheSameLine() &&
++                            node.isAnnotationEntryWithValueArgumentList()
++                        ) {
++                            emit(startOfList.startOffset, "Expected newline after '${startOfList.text}'", true)
++                            if (autoCorrect) {
++                                startOfList
++                                    .upsertWhitespaceAfterMe(
++                                        getNewlineWithIndent(node.treeParent).plus(indentConfig.indent),
++                                    )
++                                node
++                                    .findAnnotatedConstruct()
++                                    .treeParent
++                                    .lastChildLeafOrSelf()
++                                    .nextLeaf { it.isCodeLeaf() && it.elementType != ElementType.COMMA }
++                                    ?.let { codeLeaf ->
++                                        emit(codeLeaf.startOffset, "Expected newline before '${codeLeaf.text}'", true)
++                                        if (autoCorrect) {
++                                            codeLeaf.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                                        }
++                                    }
+                             }
++                        }
+                     }
+                 }
+         }
+@@ -243,6 +329,26 @@ public class AnnotationRule :
+                     .upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
+             }
+         }
++
++        if (codeStyle == CodeStyleValue.ktlint_official &&
++            isPrimaryConstructorAnnotation &&
++            !node.isFirstAnnotationEntry() &&
++            !node.isLastAnnotationEntry()
++        ) {
++            // In ktlint_official code style, multiple annotations before constructor must each be on separate lines
++            // Code below is disallowed in ktlint_official:
++            //   class Foo @Bar1 @Bar2 constructor()
++            emit(
++                node.startOffset,
++                "Annotations before constructor should be on separate lines",
++                true,
++            )
++            if (autoCorrect) {
++                node
++                    .firstChildLeafOrSelf()
++                    .upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++            }
++        }
+     }
+ 
+     private fun ASTNode.typeProjectionOrNull() =
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

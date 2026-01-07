@@ -1,0 +1,125 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+index 28a6ebc7..fc47a9b0 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+@@ -1,5 +1,6 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATED_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
+@@ -542,11 +543,14 @@ public class FunctionSignatureRule :
+                 if (whiteSpaceBeforeFunctionBodyExpression.isWhiteSpaceWithNewline()) {
+                     val mergeWithFunctionSignature =
+                         if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression) {
+-                            functionBodyExpressionWrapping == default ||
+-                                (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||
+-                                node.isMultilineFunctionSignatureWithoutExplicitReturnType(
+-                                    lastNodeOfFunctionSignatureWithBodyExpression,
+-                                )
++                            // Don't merge with function signature if body expression is an annotated expression
++                            // to avoid violating the annotation rule
++                            functionBodyExpressionNodes.firstOrNull()?.elementType != ANNOTATED_EXPRESSION &&
++                                (functionBodyExpressionWrapping == default ||
++                                    (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||
++                                    node.isMultilineFunctionSignatureWithoutExplicitReturnType(
++                                        lastNodeOfFunctionSignatureWithBodyExpression,
++                                    ))
+                         } else {
+                             false
+                         }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt
+@@ -0,0 +1,80 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.EOL_CHAR
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.MAX_LINE_LENGTH_MARKER
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class FunctionSignatureRuleAnnotatedExpressionTest {
++    private val functionSignatureRuleAssertThat = assertThatRule { FunctionSignatureRule() }
++
++    @Test
++    fun `Given a function with an annotated expression body, do not merge it with the function signature`() {
++        val code =
++            """
++            private fun getErrorMessage(value: String): String =
++                @Suppress("DEPRECATION")
++                customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT_ERROR_MESSAGE_WITH_NO_REASON, value)
++            """.trimIndent()
++        functionSignatureRuleAssertThat(code)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a function with an annotated expression body on the same line, the annotation rule formats it`() {
++        val code =
++            """
++            private fun getErrorMessage(value: String): String = @Suppress("DEPRECATION") customMessage.takeUnless { it.isEmpty() }
++            """.trimIndent()
++        // The function signature rule should not attempt to merge because it's an annotated expression
++        // The annotation rule will handle the formatting
++        functionSignatureRuleAssertThat(code)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a function with multiple annotations in the expression body`() {
++        val code =
++            """
++            fun foo(): String =
++                @Suppress("DEPRECATION")
++                @JvmName("bar")
++                getSomeValue()
++            """.trimIndent()
++        functionSignatureRuleAssertThat(code)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a short function with annotated expression that fits on one line, still do not merge`() {
++        val code =
++            """
++            fun foo() =
++                @Suppress("TEST")
++                bar()
++            """.trimIndent()
++        functionSignatureRuleAssertThat(code)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a function with a non-annotated expression body, allow merging when it fits (with max line length)`() {
++        val code =
++            """
++            // $MAX_LINE_LENGTH_MARKER                  $EOL_CHAR
++            fun foo(): String =
++                "hello"
++            """.trimIndent()
++        val formattedCode =
++            """
++            // $MAX_LINE_LENGTH_MARKER                  $EOL_CHAR
++            fun foo(): String = "hello"
++            """.trimIndent()
++        // When max line length is set and the expression fits, it should merge
++        functionSignatureRuleAssertThat(code)
++            .setMaxLineLength()
++            .hasLintViolation(2, 20, "First line of body expression fits on same line as function signature")
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

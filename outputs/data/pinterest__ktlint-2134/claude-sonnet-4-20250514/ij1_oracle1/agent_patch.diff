@@ -1,0 +1,126 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 78898ab3..75217d1c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -18,6 +18,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ * Fix wrapping of function signature in case the opening brace of the function body block exceeds the maximum line length. Fix upsert of whitespace into composite nodes. `function-signature` [#2130](https://github.com/pinterest/ktlint/issues/2130)
+ * Fix spacing around colon in annotations `spacing-around-colon` ([#2093](https://github.com/pinterest/ktlint/issues/2093))
+ * Fix indent of IS_EXPRESSION, PREFIX_EXPRESSION and POSTFIX_EXPRESSION in case it contains a linebreak `indent` [#2094](https://github.com/pinterest/ktlint/issues/2094)
++* Fix endless loop in wrapping binary expression after elvis operator by preventing autocorrection after elvis operators in `binary-expression-wrapping`
+ 
+ ### Changed
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+index dbed1796..afb4e4b1 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+@@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.LAMBDA_ARGUMENT
+@@ -118,9 +119,12 @@ public class BinaryExpressionWrappingRule :
+                 binaryExpression.parent { it.elementType == LONG_STRING_TEMPLATE_ENTRY } == null
+             }?.takeIf { it.isOnLineExceedingMaxLineLength() }
+             ?.let { operationReference ->
+-                if (node.isCallExpressionFollowedByLambdaArgument() || cannotBeWrappedAtOperationReference(operationReference)) {
++                if (node.isCallExpressionFollowedByLambdaArgument() ||
++                    cannotBeWrappedAtOperationReference(operationReference) ||
++                    operationReference.isElvisOperator()) {
+                     // Wrapping after operation reference might not be the best place in case of a call expression or just won't work as
+-                    // the left hand side still does not fit on a single line
++                    // the left hand side still does not fit on a single line. Also, elvis operators should not be wrapped after
++                    // as they will be moved to the beginning of the next line by the chain-wrapping rule, causing infinite loops.
+                     emit(operationReference.startOffset, "Line is exceeding max line length", false)
+                 } else {
+                     operationReference
+@@ -158,6 +162,9 @@ public class BinaryExpressionWrappingRule :
+             }
+             ?: false
+ 
++    private fun ASTNode.isElvisOperator(): Boolean =
++        firstChildLeafOrSelf().elementType == ELVIS
++
+     private fun ASTNode.isOnLineExceedingMaxLineLength() = leavesOnLine().lengthWithoutNewlinePrefix() > maxLineLength
+ 
+     private fun Sequence<ASTNode>.lengthWithoutNewlinePrefix() =
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
+index c8e3a9f7..d625bd6a 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
+@@ -309,4 +309,64 @@ class BinaryExpressionWrappingRuleTest {
+             .addAdditionalRuleProvider { WrappingRule() }
+             .hasLintViolationWithoutAutoCorrect(3, 17, "Line is exceeding max line length")
+     }
++
++    @Test
++    fun `Given binary expression after elvis operator that exceeds max line length, should not autocorrect to avoid endless loop`() {
++        val code =
++            """
++            val foo =
++                bar
++                    ?:
++                    throw UnsupportedOperationException("xxxxxxxxxxx")
++            """.trimIndent()
++
++        // With max line length of 60, the line containing the throw statement would exceed the limit.
++                // The binary expression wrapping rule should detect this but should not attempt to autocorrect
++        // after the elvis operator to avoid infinite loops with the chain wrapping rule
++        binaryExpressionWrappingRuleAssertThat(code)
++            .hasLintViolationWithoutAutoCorrect(3, 9, "Line is exceeding max line length")
++    }
++
++    @Test
++    fun `Given a property with elvis operator and long expression matching original issue`() {
++        val code =
++            """
++            // $MAX_LINE_LENGTH_MARKER                           $EOL_CHAR
++            val foo =
++                bar
++                    ?:
++                    throw UnsupportedOperationException("xxxxxxxxxxx")
++            """.trimIndent()
++
++        // This test specifically addresses the endless loop issue from GitHub issue.
++        // The line with the throw statement exceeds the max line length marker (60 chars).
++        // Previously this would cause an endless loop because BinaryExpressionWrappingRule
++        // would wrap after ?:, but ChainWrappingRule would move ?: to beginning of next line.
++        binaryExpressionWrappingRuleAssertThat(code)
++            .addAdditionalRuleProvider { ChainWrappingRule() }
++            .setMaxLineLength()
++            .hasLintViolationWithoutAutoCorrect(3, 9, "Line is exceeding max line length")
++    }
++
++    @Test
++    fun `Given a regular binary expression (not elvis), wrapping should still work normally`() {
++        val code =
++            """
++            // $MAX_LINE_LENGTH_MARKER                         $EOL_CHAR
++            val bar =
++                leftHandSideExpression && rightHandSideExpression
++            """.trimIndent()
++        val formattedCode =
++            """
++            // $MAX_LINE_LENGTH_MARKER                         $EOL_CHAR
++            val bar =
++                leftHandSideExpression &&
++                    rightHandSideExpression
++            """.trimIndent()
++        // Ensure regular binary expressions still work correctly after the elvis fix
++        binaryExpressionWrappingRuleAssertThat(code)
++            .setMaxLineLength()
++            .hasLintViolation(3, 30, "Line is exceeding max line length. Break line after operator in binary expression")
++            .isFormattedAs(formattedCode)
++    }
+ }
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

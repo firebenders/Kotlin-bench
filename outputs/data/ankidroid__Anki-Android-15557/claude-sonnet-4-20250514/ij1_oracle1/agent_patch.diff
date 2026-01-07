@@ -1,0 +1,371 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 3fef2583bf..149e4dda8f 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.9.0'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -228,12 +227,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -248,12 +247,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -364,7 +357,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.5.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+index 9f1599a7eb..9fc8cab98a 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+@@ -2342,7 +2342,32 @@ abstract class AbstractFlashcardViewer :
+                 WebViewSignalParserUtils.SHOW_ANSWER -> {
+                     // display answer when showAnswer() called from card.js
+                     if (!Companion.displayAnswer) {
+-                        displayCardAnswer()
++                        // Fix for issue: Answer comparison not shown when "Type answer into the card" is enabled
++                        // When using input tag for type answer, we need to capture the current input value 
++                        // from the WebView before displaying the answer, otherwise the comparison won't show
++                        // the user's typed input.
++                        if (typeAnswer?.useInputTag == true && typeAnswer?.validForEditText() == true) {
++                            view.evaluateJavascript(
++                                "var input = document.getElementById('typeans'); input ? input.value : '';"
++                            ) { result ->
++                                if (result != null && result != "null") {
++                                    // Remove quotes from the JSON string result
++                                    val cleanResult = result.trim('"')
++                                    // Decode any URL encoding that might be present
++                                    try {
++                                        val decodedInput = java.net.URLDecoder.decode(cleanResult, "UTF-8")
++                                        typeAnswer?.input = decodedInput
++                                    } catch (e: Exception) {
++                                        // If decoding fails, use the raw result
++                                        typeAnswer?.input = cleanResult
++                                    }
++                                }
++                                // Now display the answer with the captured input
++                                displayCardAnswer()
++                            }
++                        } else {
++                            displayCardAnswer()
++                        }
+                     }
+                     return true
+                 }
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/cardviewer/TypeAnswerTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/cardviewer/TypeAnswerTest.kt
+index 86940d541c..acc2dd4cee 100644
+--- a/AnkiDroid/src/test/java/com/ichi2/anki/cardviewer/TypeAnswerTest.kt
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/cardviewer/TypeAnswerTest.kt
+@@ -249,10 +249,122 @@ $!"""
+         assertEquals("test, test, test2", contentForCloze(cloze2, 1))
+     }
+ 
++    @Test
++    fun testTypeAnsAnswerFilterWithInputTagCorrect() {
++        // Test the behavior when useInputTag is true (Type answer into the card is enabled)
++        @Language("HTML")
++        val buf = """<style>.card {
++ font-family: arial;
++ font-size: 20px;
++ text-align: center;
++ color: black;
++ background-color: white;
++}
++</style>Type in hello
++[[type:Back]]
++
++<hr id=answer>
++
++hello"""
++
++        @Language("HTML")
++        val expectedOutput = """<style>.card {
++ font-family: arial;
++ font-size: 20px;
++ text-align: center;
++ color: black;
++ background-color: white;
++}
++</style>Type in hello
++<code id=typeans><span class=typeGood>hello</span></code>
++
++<hr id=answer>
++
++hello"""
++        assertEquals(expectedOutput, typeAnsAnswerFilterWithInputTag(buf, "hello", "hello"))
++    }
++
++    @Test 
++    fun testTypeAnsAnswerFilterWithInputTagIncorrect() {
++        // Test the behavior when useInputTag is true and answer is incorrect
++        @Language("HTML")
++        val buf = """<style>.card {
++ font-family: arial;
++ font-size: 20px;
++ text-align: center;
++ color: black;
++ background-color: white;
++}
++</style>Type in hello
++[[type:Back]]
++
++<hr id=answer>
++
++hello"""
++
++        @Language("HTML")
++        val expectedOutput = """<style>.card {
++ font-family: arial;
++ font-size: 20px;
++ text-align: center;
++ color: black;
++ background-color: white;
++}
++</style>Type in hello
++<code id=typeans><span class=typeBad>hello</span><br><span id=typearrow>&darr;</span><br><span class=typeMissed>world</span></code>
++
++<hr id=answer>
++
++hello"""
++        assertEquals(expectedOutput, typeAnsAnswerFilterWithInputTag(buf, "hello", "world"))
++    }
++
++    @Test
++    fun testTypeAnsAnswerFilterWithInputTagEmpty() {
++        // Test the behavior when useInputTag is true but user typed nothing
++        @Language("HTML")
++        val buf = """<style>.card {
++ font-family: arial;
++ font-size: 20px;
++ text-align: center;
++ color: black;
++ background-color: white;
++}
++</style>Type in hello
++[[type:Back]]
++
++<hr id=answer>
++
++hello"""
++
++        @Language("HTML")
++        val expectedOutput = """<style>.card {
++ font-family: arial;
++ font-size: 20px;
++ text-align: center;
++ color: black;
++ background-color: white;
++}
++</style>Type in hello
++<code id=typeans>hello</code>
++
++<hr id=answer>
++
++hello"""
++        assertEquals(expectedOutput, typeAnsAnswerFilterWithInputTag(buf, "", "hello"))
++    }
++
+     private fun typeAnsAnswerFilter(answer: String, correctAnswer: String, userAnswer: String): String =
+         TypeAnswer(
+             doNotUseCodeFormatting = false,
+             useInputTag = false,
+             autoFocus = false
+         ).filterAnswer(answer, correctAnswer, userAnswer)
++
++    private fun typeAnsAnswerFilterWithInputTag(answer: String, correctAnswer: String, userAnswer: String): String =
++        TypeAnswer(
++            doNotUseCodeFormatting = false,
++            useInputTag = true,
++            autoFocus = false
++        ).filterAnswer(answer, correctAnswer, userAnswer)
+ }
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index df05afef76..4d2ca9684e 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {
+
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/AbstractFlashcardViewerTypeAnswerIntegrationTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/AbstractFlashcardViewerTypeAnswerIntegrationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/AbstractFlashcardViewerTypeAnswerIntegrationTest.kt
+@@ -0,0 +1,118 @@
++/*
++ *  Copyright (c) 2024 David Allison <davidallisongithub@gmail.com>
++ *
++ *  This program is free software; you can redistribute it and/or modify it under
++ *  the terms of the GNU General Public License as published by the Free Software
++ *  Foundation; either version 3 of the License, or (at your option) any later
++ *  version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT ANY
++ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
++ *  PARTICULAR PURPOSE. See the GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along with
++ *  this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++package com.ichi2.anki
++
++import androidx.test.ext.junit.runners.AndroidJUnit4
++import com.ichi2.anki.cardviewer.TypeAnswer
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import org.junit.runner.RunWith
++
++@RunWith(AndroidJUnit4::class)
++class AbstractFlashcardViewerTypeAnswerIntegrationTest : RobolectricTest() {
++
++    @Test
++    fun testTypeAnswerInputCaptureWithInputTagEnabled() {
++        // Test that verifies the fix for the issue where answer comparison
++        // is not shown when "Type answer into the card" is enabled
++        
++        // Create TypeAnswer instance with useInputTag = true (Type answer into card enabled)
++        val typeAnswer = TypeAnswer(
++            useInputTag = true,
++            doNotUseCodeFormatting = false,
++            autoFocus = false
++        )
++        
++        // Simulate user typing "hello" as their answer
++        typeAnswer.input = "hello"
++        
++        // The card answer template that contains [[type:field]]
++        val answerTemplate = """
++            <div>
++                Question: What is the greeting?
++                [[type:Answer]]
++                <hr id="answer">
++                The correct answer is: hello
++            </div>
++        """.trimIndent()
++        
++        // Filter the answer with the user's input
++        val filteredAnswer = typeAnswer.filterAnswer(answerTemplate, "hello", "hello")
++        
++        // Verify that the answer comparison is shown (not just the correct answer)
++        assertTrue("Answer should contain comparison HTML", filteredAnswer.contains("<code id=typeans>"))
++        assertTrue("Answer should show user's input was correct", filteredAnswer.contains("typeGood"))
++    }
++    
++    @Test
++    fun testTypeAnswerInputCaptureWithIncorrectAnswer() {
++        // Test with an incorrect answer
++        val typeAnswer = TypeAnswer(
++            useInputTag = true,
++            doNotUseCodeFormatting = false,
++            autoFocus = false
++        )
++        
++        // Simulate user typing "hi" when the correct answer is "hello"
++        typeAnswer.input = "hi"
++        
++        val answerTemplate = """
++            <div>
++                Question: What is the greeting?
++                [[type:Answer]]
++                <hr id="answer">
++                The correct answer is: hello
++            </div>
++        """.trimIndent()
++        
++        val filteredAnswer = typeAnswer.filterAnswer(answerTemplate, "hi", "hello")
++        
++        // Verify that the answer comparison shows both user input and correct answer
++        assertTrue("Answer should contain comparison HTML", filteredAnswer.contains("<code id=typeans>"))
++        assertTrue("Answer should show user's input was incorrect", filteredAnswer.contains("typeBad"))
++        assertTrue("Answer should show the correct answer", filteredAnswer.contains("typeMissed"))
++    }
++    
++    @Test
++    fun testTypeAnswerInputCaptureWithEmptyInput() {
++        // Test when user didn't type anything
++        val typeAnswer = TypeAnswer(
++            useInputTag = true,
++            doNotUseCodeFormatting = false,
++            autoFocus = false
++        )
++        
++        // Simulate empty user input
++        typeAnswer.input = ""
++        
++        val answerTemplate = """
++            <div>
++                Question: What is the greeting?
++                [[type:Answer]]
++                <hr id="answer">
++                The correct answer is: hello
++            </div>
++        """.trimIndent()
++        
++        val filteredAnswer = typeAnswer.filterAnswer(answerTemplate, "", "hello")
++        
++        // Verify that only the correct answer is shown when no input was provided
++        assertTrue("Answer should contain the correct answer", filteredAnswer.contains("hello"))
++        assertTrue("Answer should contain type answer HTML", filteredAnswer.contains("<code id=typeans>"))
++    }
++}

@@ -1,163 +1,107 @@
-diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 5a4038fb..d4522b2a 100644
---- a/CHANGELOG.md
-+++ b/CHANGELOG.md
-@@ -14,6 +14,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
- * Fix wrapping of nested function literals `wrapping` ([#2106](https://github.com/pinterest/ktlint/issues/2106))
- * Do not indent class body for classes having a long super type list in code style `ktlint_official` as it is inconsistent compared to other class bodies `indent` [#2115](https://github.com/pinterest/ktlint/issues/2115) 
- * Fix spacing around colon in annotations `spacing-around-colon` ([#2093](https://github.com/pinterest/ktlint/issues/2093))
-+* Fix insertion of whitespace at wrong position in AST when inserting whitespace before a node that is the first child of its parent, or after a node that is the last child of its parent. This could cause rules like `curly-spacing`, `function-start-of-body-spacing`, and `function-signature` to report the same violation multiple times even after formatting.
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+index 596533b3..a3791ba1 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+@@ -48,6 +48,8 @@ import org.ec4j.core.model.PropertyType.PropertyValueParser.EnumValueParser
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+ import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafElement
+ import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.PsiWhiteSpaceImpl
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.TreeElement
+ import org.jetbrains.kotlin.utils.addToStdlib.ifTrue
  
- ### Changed
- 
-diff --git a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
-index 201e7dac..7f273c61 100644
---- a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
-+++ b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
-@@ -236,13 +236,19 @@ public fun ASTNode.upsertWhitespaceBeforeMe(text: String) {
-         if (this.elementType == WHITE_SPACE) {
-             return replaceWhitespaceWith(text)
-         }
--        val previous = treePrev ?: prevLeaf()
--        if (previous != null && previous.elementType == WHITE_SPACE) {
--            previous.replaceWhitespaceWith(text)
--        } else {
--            PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
--                (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
-+        val previous = treePrev
-+        if (previous != null) {
-+            if (previous.elementType == WHITE_SPACE) {
-+                previous.replaceWhitespaceWith(text)
-+            } else {
-+                PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
-+                    (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
-+                }
+ public class FunctionSignatureRule :
+@@ -641,15 +643,31 @@ public class FunctionSignatureRule :
+                 if (whiteSpaceBeforeFunctionBodyExpression?.text != " ") {
+                     emit(functionBodyBlock.first().startOffset, "Expected a single space before body block", true)
+                     if (autoCorrect) {
+-                        functionBodyBlock
+-                            .first()
+-                            .prevLeaf(true)
+-                            ?.upsertWhitespaceAfterMe(" ")
++                        // Insert whitespace before BLOCK at the FUN level (not inside BLOCK)
++                        node
++                            .findChildByType(BLOCK)
++                            ?.upsertWhitespaceBeforeMeAtSameLevel(" ")
+                     }
+                 }
              }
+     }
+ 
++    /**
++     * Insert or update whitespace before [this] node at the same level (as a sibling of [this]).
++     * This is different from [upsertWhitespaceBeforeMe] which may insert whitespace at a different
++     * level in the AST if the node is the first child of its parent.
++     */
++    private fun ASTNode.upsertWhitespaceBeforeMeAtSameLevel(text: String) {
++        val prevSibling = treePrev
++        if (prevSibling != null && prevSibling.elementType == WHITE_SPACE) {
++            // Replace existing whitespace sibling
++            (prevSibling.psi as LeafElement).rawReplaceWithText(text)
 +        } else {
-+            // The node is the first leaf element inside its parent. Delegate to prevLeaf which is outside the current
-+            // parent to insert the whitespace at the correct position in the AST.
-+            prevLeaf()?.upsertWhitespaceAfterMe(text)
-         }
-     } else {
-         val prevLeaf =
-@@ -270,12 +276,30 @@ public fun ASTNode.upsertWhitespaceAfterMe(text: String) {
-         if (this.elementType == WHITE_SPACE) {
-             return replaceWhitespaceWith(text)
-         }
--        val next = treeNext ?: nextLeaf()
--        if (next != null && next.elementType == WHITE_SPACE) {
--            next.replaceWhitespaceWith(text)
-+        val next = treeNext
-+        if (next != null) {
-+            if (next.elementType == WHITE_SPACE) {
-+                next.replaceWhitespaceWith(text)
-+            } else {
-+                PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
-+                    (psi as LeafElement).rawInsertAfterMe(psiWhiteSpace)
-+                }
-+            }
-         } else {
--            PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
--                (psi as LeafElement).rawInsertAfterMe(psiWhiteSpace)
-+            // The node is the last leaf element inside its parent. Find the correct position to insert the whitespace
-+            // by going up the tree until an ancestor with a treeNext is found.
-+            var ancestor: ASTNode? = treeParent
-+            while (ancestor != null && ancestor.treeNext == null) {
-+                ancestor = ancestor.treeParent
-+            }
-+            if (ancestor != null) {
-+                val ancestorNext = ancestor.treeNext!!
-+                if (ancestorNext.elementType == WHITE_SPACE) {
-+                    ancestorNext.replaceWhitespaceWith(text)
-+                } else {
-+                    // Insert whitespace before ancestorNext at the ancestor's parent level
-+                    ancestor.treeParent?.addChild(PsiWhiteSpaceImpl(text), ancestorNext)
-+                }
-             }
-         }
-     } else {
-diff --git a/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtensionTest.kt b/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtensionTest.kt
-index 314059d4..24ac4c5f 100644
---- a/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtensionTest.kt
-+++ b/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtensionTest.kt
-@@ -2,11 +2,13 @@ package com.pinterest.ktlint.rule.engine.core.api
++            // Insert new whitespace as a sibling of this node (at the same level)
++            (treeParent as TreeElement).addChild(PsiWhiteSpaceImpl(text), this)
++        }
++    }
++
+     private fun ASTNode.getFunctionBody(splitNode: ASTNode?): List<ASTNode> =
+         this
+             .collectLeavesRecursively()
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionStartOfBodySpacingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionStartOfBodySpacingRule.kt
+index 4e845c8a..9cc20534 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionStartOfBodySpacingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionStartOfBodySpacingRule.kt
+@@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
  
- import com.pinterest.ktlint.rule.engine.api.Code
- import com.pinterest.ktlint.rule.engine.api.KtLintRuleEngine
-+import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
- import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS
- import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS_BODY
- import com.pinterest.ktlint.rule.engine.core.api.ElementType.ENUM_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType
  import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
- import com.pinterest.ktlint.rule.engine.core.api.ElementType.IDENTIFIER
-+import com.pinterest.ktlint.rule.engine.core.api.ElementType.LBRACE
- import com.pinterest.ktlint.rule.engine.core.api.ElementType.LPAR
- import com.pinterest.ktlint.rule.engine.core.api.ElementType.RPAR
- import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER
-@@ -420,6 +422,31 @@ class ASTNodeExtensionTest {
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+@@ -9,6 +10,9 @@ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceBeforeMe
+ import com.pinterest.ktlint.ruleset.standard.StandardRule
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafElement
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.PsiWhiteSpaceImpl
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.TreeElement
  
-             assertThat(actual).isEqualTo(formattedCode)
-         }
-+
-+        @Test
-+        fun `Given a node (LBRACE) which is the first leaf inside a parent (BLOCK) and upsert a whitespace before the node (LBRACE) then create a new whitespace element before the parent (BLOCK)`() {
-+            val code =
-+                """
-+                fun foo(){
-+                }
-+                """.trimIndent()
-+            val formattedCode =
-+                """
-+                fun foo() {
-+                }
-+                """.trimIndent()
-+
-+            val actual =
-+                code
-+                    .transformAst {
-+                        findChildByType(FUN)
-+                            ?.findChildByType(BLOCK)
-+                            ?.findChildByType(LBRACE)
-+                            ?.upsertWhitespaceBeforeMe(" ")
-+                    }.text
-+
-+            assertThat(actual).isEqualTo(formattedCode)
-+        }
+ /**
+  * Lints and formats the spacing after the fun keyword
+@@ -111,15 +115,28 @@ public class FunctionStartOfBodySpacingRule : StandardRule("function-start-of-bo
+                         if (whiteSpaceBeforeExpressionBlock?.text != " ") {
+                             emit(block.startOffset, "Expected a single white space before start of function body", true)
+                             if (autoCorrect) {
+-                                block
+-                                    .firstChildNode
+-                                    .prevLeaf(true)
+-                                    ?.upsertWhitespaceAfterMe(" ")
++                                block.upsertWhitespaceBeforeMeAtSameLevel(" ")
+                             }
+                         }
+                     }
+             }
      }
- 
-     @Nested
-@@ -518,6 +545,31 @@ class ASTNodeExtensionTest {
- 
-             assertThat(actual).isEqualTo(formattedCode)
-         }
 +
-+        @Test
-+        fun `Given a node (RPAR) which is the last leaf inside a parent (VALUE_PARAMETER_LIST) and upsert a whitespace after the node (RPAR) then create a new whitespace element after the parent (VALUE_PARAMETER_LIST)`() {
-+            val code =
-+                """
-+                fun foo(){
-+                }
-+                """.trimIndent()
-+            val formattedCode =
-+                """
-+                fun foo() {
-+                }
-+                """.trimIndent()
-+
-+            val actual =
-+                code
-+                    .transformAst {
-+                        findChildByType(FUN)
-+                            ?.findChildByType(VALUE_PARAMETER_LIST)
-+                            ?.findChildByType(RPAR)
-+                            ?.upsertWhitespaceAfterMe(" ")
-+                    }.text
-+
-+            assertThat(actual).isEqualTo(formattedCode)
++    /**
++     * Insert or update whitespace before [this] node at the same level (as a sibling of [this]).
++     * This is different from [upsertWhitespaceBeforeMe] which may insert whitespace at a different
++     * level in the AST if the node is the first child of its parent.
++     */
++    private fun ASTNode.upsertWhitespaceBeforeMeAtSameLevel(text: String) {
++        val prevSibling = treePrev
++        if (prevSibling != null && prevSibling.elementType == WHITE_SPACE) {
++            // Replace existing whitespace sibling
++            (prevSibling.psi as LeafElement).rawReplaceWithText(text)
++        } else {
++            // Insert new whitespace as a sibling of this node (at the same level)
++            (treeParent as TreeElement).addChild(PsiWhiteSpaceImpl(text), this)
 +        }
-     }
++    }
+ }
  
-     @Test
+ public val FUNCTION_START_OF_BODY_SPACING_RULE_ID: RuleId = FunctionStartOfBodySpacingRule().ruleId
 
 diff --git a/local.properties b/local.properties
 new file mode 100644

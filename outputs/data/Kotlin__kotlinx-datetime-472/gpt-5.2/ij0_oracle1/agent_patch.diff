@@ -1,0 +1,132 @@
+diff --git a/core/common/src/format/LocalDateFormat.kt b/core/common/src/format/LocalDateFormat.kt
+index 0104f8b..a60d6dd 100644
+--- a/core/common/src/format/LocalDateFormat.kt
++++ b/core/common/src/format/LocalDateFormat.kt
+@@ -208,7 +208,13 @@ private object DateFields {
+     val year = GenericFieldSpec(PropertyAccessor(DateFieldContainer::year))
+     val month = UnsignedFieldSpec(PropertyAccessor(DateFieldContainer::monthNumber), minValue = 1, maxValue = 12)
+     val dayOfMonth = UnsignedFieldSpec(PropertyAccessor(DateFieldContainer::dayOfMonth), minValue = 1, maxValue = 31)
+-    val isoDayOfWeek = UnsignedFieldSpec(PropertyAccessor(DateFieldContainer::isoDayOfWeek), minValue = 1, maxValue = 7)
++    val isoDayOfWeek = UnsignedFieldSpec(
++        PropertyAccessor(DateFieldContainer::isoDayOfWeek)
++            // exposed as `dayOfWeek(...)` in the public formatting DSL
++            .withName(DateTimeFormatBuilder.WithDate::dayOfWeek.name),
++        minValue = 1,
++        maxValue = 7
++    )
+     val dayOfYear = UnsignedFieldSpec(PropertyAccessor(DateFieldContainer::dayOfYear), minValue = 1, maxValue = 366)
+ }
+ 
+diff --git a/core/common/src/format/UtcOffsetFormat.kt b/core/common/src/format/UtcOffsetFormat.kt
+index 1310626..b0b4721 100644
+--- a/core/common/src/format/UtcOffsetFormat.kt
++++ b/core/common/src/format/UtcOffsetFormat.kt
+@@ -127,26 +127,34 @@ internal fun DateTimeFormatBuilder.WithUtcOffset.isoOffset(
+ 
+ private object OffsetFields {
+     private val sign = object : FieldSign<UtcOffsetFieldContainer> {
++        // This field participates in parsing/formatting of a signed offset, but the exposed name should be
++        // consistent with the public DateTimeComponents API.
+         override val isNegative = PropertyAccessor(UtcOffsetFieldContainer::isNegative)
++            .withName(DateTimeComponents::offsetIsNegative.name)
++
+         override fun isZero(obj: UtcOffsetFieldContainer): Boolean =
+             (obj.totalHoursAbs ?: 0) == 0 && (obj.minutesOfHour ?: 0) == 0 && (obj.secondsOfMinute ?: 0) == 0
+     }
++
+     val totalHoursAbs = UnsignedFieldSpec(
+-        PropertyAccessor(UtcOffsetFieldContainer::totalHoursAbs),
++        PropertyAccessor(UtcOffsetFieldContainer::totalHoursAbs)
++            .withName(DateTimeFormatBuilder.WithUtcOffset::offsetHours.name),
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 18,
+         sign = sign,
+     )
+     val minutesOfHour = UnsignedFieldSpec(
+-        PropertyAccessor(UtcOffsetFieldContainer::minutesOfHour),
++        PropertyAccessor(UtcOffsetFieldContainer::minutesOfHour)
++            .withName(DateTimeFormatBuilder.WithUtcOffset::offsetMinutesOfHour.name),
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 59,
+         sign = sign,
+     )
+     val secondsOfMinute = UnsignedFieldSpec(
+-        PropertyAccessor(UtcOffsetFieldContainer::secondsOfMinute),
++        PropertyAccessor(UtcOffsetFieldContainer::secondsOfMinute)
++            .withName(DateTimeFormatBuilder.WithUtcOffset::offsetSecondsOfMinute.name),
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 59,
+diff --git a/core/common/src/internal/format/FieldSpec.kt b/core/common/src/internal/format/FieldSpec.kt
+index cbb2d76..c4753b2 100644
+--- a/core/common/src/internal/format/FieldSpec.kt
++++ b/core/common/src/internal/format/FieldSpec.kt
+@@ -27,6 +27,28 @@ internal interface Accessor<in Object, Field>: AssignableField<Object, Field> {
+         getter(container) ?: throw IllegalStateException("Field $name is not set")
+ }
+ 
++/**
++ * An [Accessor] wrapper that overrides the exposed [name].
++ *
++ * This is useful when the underlying property name is an internal implementation detail (for example,
++ * `totalHoursAbs`), but end users see a different name in the formatting DSL (for example, `offsetHours`).
++ */
++internal class RenamedAccessor<Object, Field>(
++    private val delegate: Accessor<Object, Field>,
++    private val renamed: String,
++) : Accessor<Object, Field> {
++    override val name: String get() = renamed
++
++    override fun trySetWithoutReassigning(container: Object, newValue: Field): Field? =
++        delegate.trySetWithoutReassigning(container, newValue)
++
++    override fun getter(container: Object): Field? = delegate.getter(container)
++}
++
++internal fun <Object, Field> Accessor<Object, Field>.withName(name: String): Accessor<Object, Field> =
++    if (this.name == name) this else RenamedAccessor(this, name)
++
++
+ /**
+  * An implementation of [Accessor] for a mutable property of an object.
+  */
+
+diff --git a/core/common/test/format/FormattingMissingFieldMessageTest.kt b/core/common/test/format/FormattingMissingFieldMessageTest.kt
+new file mode 100644
+--- /dev/null
++++ b/core/common/test/format/FormattingMissingFieldMessageTest.kt
+@@ -0,0 +1,32 @@
++/*
++ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
++ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
++ */
++
++package kotlinx.datetime.test.format
++
++import kotlinx.datetime.format.*
++import kotlin.test.Test
++import kotlin.test.assertFailsWith
++import kotlin.test.assertFalse
++import kotlin.test.assertNotNull
++import kotlin.test.assertTrue
++
++class FormattingMissingFieldMessageTest {
++
++    @Test
++    fun testUtcOffsetFieldNamesInFormattingErrors() {
++        val format = DateTimeComponents.Format {
++            offsetHours()
++        }
++
++        val e = assertFailsWith<IllegalStateException> {
++            format.format { /* no fields set */ }
++        }
++
++        val message = assertNotNull(e.message)
++        assertTrue(message.contains("offsetHours"), "Unexpected message: '$message'")
++        assertFalse(message.contains("totalHoursAbs"), "Unexpected message: '$message'")
++    }
++}
++

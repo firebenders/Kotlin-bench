@@ -1,0 +1,102 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 65465d1e..2530dbab 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -94,6 +94,7 @@ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktl
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.column
+ import com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf
+ import com.pinterest.ktlint.rule.engine.core.api.indent
+ import com.pinterest.ktlint.rule.engine.core.api.isPartOfComment
+@@ -469,13 +470,30 @@ public class IndentationRule :
+             //                     paramC ->
+             //         ClassB(paramA, paramB, paramC)
+             //     }
+-            parent(CALL_EXPRESSION)
+-                ?.let { callExpression ->
+-                    val textBeforeFirstParameter =
+-                        callExpression.findChildByType(REFERENCE_EXPRESSION)?.text +
+-                            " { "
+-                    " ".repeat(textBeforeFirstParameter.length)
++            //
++            // In case of a trailing lambda, the call expression (REFERENCE_EXPRESSION) might not be on the same line as
++            // the opening brace (e.g. "foo(\n ...\n) { a,\n b ->"). In those cases, align subsequent parameters with the
++            // first parameter based on its position on the line containing the opening brace.
++            parent(FUNCTION_LITERAL)
++                ?.let { functionLiteral ->
++                    val lbraceIndent = functionLiteral.findChildByType(LBRACE)?.indent(false).orEmpty()
++                    val firstParameter =
++                        functionLiteral
++                            .findChildByType(VALUE_PARAMETER_LIST)
++                            ?.findChildByType(VALUE_PARAMETER)
++                    firstParameter
++                        ?.let {
++                            val additionalIndent = (it.column - 1 - lbraceIndent.length).coerceAtLeast(0)
++                            " ".repeat(additionalIndent)
++                        }
+                 }
++                ?: parent(CALL_EXPRESSION)
++                    ?.let { callExpression ->
++                        val textBeforeFirstParameter =
++                            callExpression.findChildByType(REFERENCE_EXPRESSION)?.text +
++                                " { "
++                        " ".repeat(textBeforeFirstParameter.length)
++                    }
+                 ?: indentConfig.indent.repeat(2)
+         }
+ 
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleLambdaParameterIndentationTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleLambdaParameterIndentationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleLambdaParameterIndentationTest.kt
+@@ -0,0 +1,39 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.intellij_idea
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class IndentationRuleLambdaParameterIndentationTest {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Given a trailing lambda with parameters on separate lines then align subsequent parameters with the first parameter`() {
++        val code =
++            """
++            fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
++              c(a, b)
++            }
++
++            class Foo {
++              fun foo() {
++                combine(
++                  Any(),
++                  Any()
++                ) { a,
++                    b ->
++                  TODO()
++                }
++              }
++            }
++            """.trimIndent()
++
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to intellij_idea)
++            .withEditorConfigOverride(INDENT_SIZE_PROPERTY to 2)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

@@ -1,0 +1,221 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ea4b034e..a879787a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -9,6 +9,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ ### Removed
+ 
+ ### Fixed
++* Force array syntax annotations `@[...]` onto separate lines. ([#1765](https://github.com/pinterest/ktlint/issues/1765))
+ * Do not enable the experimental rules by default when `.editorconfig` properties `disabled_rules` or `ktlint_disabled_rules` are set. ([#1771](https://github.com/pinterest/ktlint/issues/1771))
+ * A function signature not having any parameters which exceeds the `max-line-length` should be ignored by rule `function-signature` ([#1773](https://github.com/pinterest/ktlint/issues/1773))
+ * 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+index 7fdfdd88..dd6f4595 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+@@ -26,6 +26,7 @@ import org.jetbrains.kotlin.com.intellij.psi.PsiWhiteSpace
+ import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
+ import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.PsiWhiteSpaceImpl
+ import org.jetbrains.kotlin.descriptors.annotations.AnnotationUseSiteTarget
++import org.jetbrains.kotlin.psi.KtAnnotation
+ import org.jetbrains.kotlin.psi.KtAnnotationEntry
+ import org.jetbrains.kotlin.psi.psiUtil.leaves
+ import org.jetbrains.kotlin.psi.psiUtil.siblings
+@@ -49,11 +50,41 @@ public class AnnotationRule : Rule("annotation") {
+             FILE_ANNOTATION_LIST -> {
+                 visitFileAnnotationList(node, emit, autoCorrect)
+             }
++            ANNOTATION ->
++                visitAnnotation(node, emit, autoCorrect)
+             ANNOTATION_ENTRY ->
+                 visitAnnotationEntry(node, emit, autoCorrect)
+         }
+     }
+ 
++    private fun visitAnnotation(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        require(node.elementType == ANNOTATION)
++
++        if (node.treeParent.treeParent.elementType != VALUE_PARAMETER &&
++            node.treeParent.treeParent.elementType != VALUE_ARGUMENT &&
++            !node.isPartOf(TYPE_ARGUMENT_LIST) &&
++            node.isNotReceiverTargetAnnotation()
++        ) {
++            if (node.isOnSameLineAsAnnotatedConstruct()) {
++                emit(
++                    node.startOffset,
++                    "Annotation must be placed on separate line",
++                    true,
++                )
++                if (autoCorrect) {
++                    node
++                        .lastChildLeafOrSelf()
++                        .nextLeaf()
++                        ?.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++                }
++            }
++        }
++    }
++
+     private fun visitAnnotationEntry(
+         node: ASTNode,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+@@ -61,7 +92,7 @@ public class AnnotationRule : Rule("annotation") {
+     ) {
+         require(node.elementType == ANNOTATION_ENTRY)
+ 
+-        if (node.isAnnotationEntryWithValueArgumentList() &&
++        if (node.isAnnotationWithValueArgumentList() &&
+             node.treeParent.treeParent.elementType != VALUE_PARAMETER && // fun fn(@Ann("blah") a: String)
+             node.treeParent.treeParent.elementType != VALUE_ARGUMENT && // fn(@Ann("blah") "42")
+             !node.isPartOf(TYPE_ARGUMENT_LIST) && // val property: Map<@Ann("blah") String, Int>
+@@ -70,14 +101,14 @@ public class AnnotationRule : Rule("annotation") {
+             checkForAnnotationWithParameterToBePlacedOnSeparateLine(node, emit, autoCorrect)
+         }
+ 
+-        if ((node.isFollowedByOtherAnnotationEntry() && node.isOnSameLineAsNextAnnotationEntry()) ||
+-            (node.isPrecededByOtherAnnotationEntry() && node.isOnSameLineAsAnnotatedConstruct())
++        if ((node.isFollowedByOtherAnnotation() && node.isOnSameLineAsNextAnnotation()) ||
++            (node.isPrecededByOtherAnnotation() && node.isOnSameLineAsAnnotatedConstruct())
+         ) {
+             checkForAnnotationToBePlacedOnSeparateLine(node, emit, autoCorrect)
+         }
+ 
+         if (node.treeParent.elementType != ANNOTATION &&
+-            node.isPrecededByOtherAnnotationEntry() &&
++            node.isPrecededByOtherAnnotation() &&
+             node.isOnSameLineAsAnnotatedConstruct()
+         ) {
+             checkForMultipleAnnotationsOnSameLineAsAnnotatedConstruct(node, emit, autoCorrect)
+@@ -89,7 +120,7 @@ public class AnnotationRule : Rule("annotation") {
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+         autoCorrect: Boolean,
+     ) {
+-        if (node.isPrecededByOtherAnnotationEntry() && node.isOnSameLineAsPreviousAnnotationEntry()) {
++        if (node.isPrecededByOtherAnnotation() && node.isOnSameLineAsPreviousAnnotation()) {
+             emit(
+                 node.startOffset,
+                 "Annotation with parameter(s) should be placed on a separate line prior to the annotated construct",
+@@ -102,7 +133,7 @@ public class AnnotationRule : Rule("annotation") {
+             }
+         }
+ 
+-        if (node.isOnSameLineAsNextAnnotationEntryOrAnnotatedConstruct()) {
++        if (node.isOnSameLineAsNextAnnotationOrAnnotatedConstruct()) {
+             emit(
+                 node.startOffset,
+                 "Annotation with parameter(s) should be placed on a separate line prior to the annotated construct",
+@@ -135,11 +166,11 @@ public class AnnotationRule : Rule("annotation") {
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+         autoCorrect: Boolean,
+     ) {
+-        if (node.isLastAnnotationEntry()) {
++        if (node.isLastAnnotation()) {
+             val noAnnotationWithParameters =
+                 node
+                     .siblings(forward = false)
+-                    .none { it.isAnnotationEntryWithValueArgumentList() }
++                    .none { it.isAnnotationWithValueArgumentList() }
+             if (noAnnotationWithParameters) {
+                 emit(
+                     node.treeParent.startOffset,
+@@ -164,7 +195,7 @@ public class AnnotationRule : Rule("annotation") {
+         val isFollowedWithAnnotationHavingValueArgumentList =
+             node
+                 .siblings(forward = true)
+-                .any { it.isAnnotationEntryWithValueArgumentList() }
++                .any { it.isAnnotationWithValueArgumentList() }
+         val isPrecededWithAnnotationOnOtherLine =
+             node
+                 .siblings(forward = false)
+@@ -189,37 +220,51 @@ public class AnnotationRule : Rule("annotation") {
+ 
+     private fun ASTNode.getAnnotationUseSiteTarget() =
+         psi
+-            .safeAs<KtAnnotationEntry>()
+-            ?.useSiteTarget
++            .let {
++                when (it) {
++                    is KtAnnotationEntry -> it.useSiteTarget
++                    is KtAnnotation -> it.useSiteTarget
++                    else -> null
++                }
++            }
+             ?.getAnnotationUseSiteTarget()
+ 
+-    private fun ASTNode.isAnnotationEntryWithValueArgumentList() =
+-        getAnnotationEntryValueArgumentList() != null
++    private fun ASTNode.isAnnotation() =
++        elementType == ANNOTATION || elementType == ANNOTATION_ENTRY
++
++    private fun ASTNode.isAnnotationWithValueArgumentList(): Boolean =
++        if (elementType == ANNOTATION_ENTRY) {
++            getAnnotationEntryValueArgumentList() != null
++        } else if (elementType == ANNOTATION) {
++            children().any { it.isAnnotationWithValueArgumentList() }
++        } else {
++            false
++        }
+ 
+     private fun ASTNode.getAnnotationEntryValueArgumentList() =
+         takeIf { it.elementType == ANNOTATION_ENTRY }
+             ?.findChildByType(VALUE_ARGUMENT_LIST)
+ 
+-    private fun ASTNode.isLastAnnotationEntry() =
++    private fun ASTNode.isLastAnnotation() =
+         treeParent
+             .children()
+-            .lastOrNull { it.elementType == ANNOTATION_ENTRY }
++            .lastOrNull { it.isAnnotation() }
+             .let { it == this }
+ 
+-    private fun ASTNode.isPrecededByOtherAnnotationEntry() =
+-        siblings(forward = false).any { it.elementType == ANNOTATION_ENTRY }
++    private fun ASTNode.isPrecededByOtherAnnotation() =
++        siblings(forward = false).any { it.isAnnotation() }
+ 
+-    private fun ASTNode.isOnSameLineAsPreviousAnnotationEntry() =
++    private fun ASTNode.isOnSameLineAsPreviousAnnotation() =
+         siblings(forward = false)
+-            .takeWhile { it.elementType != ANNOTATION_ENTRY }
++            .takeWhile { !it.isAnnotation() }
+             .none { it.isWhiteSpaceWithNewline() }
+ 
+-    private fun ASTNode.isFollowedByOtherAnnotationEntry() =
+-        siblings(forward = true).any { it.elementType == ANNOTATION_ENTRY }
++    private fun ASTNode.isFollowedByOtherAnnotation() =
++        siblings(forward = true).any { it.isAnnotation() }
+ 
+-    private fun ASTNode.isOnSameLineAsNextAnnotationEntry() =
++    private fun ASTNode.isOnSameLineAsNextAnnotation() =
+         siblings(forward = true)
+-            .takeWhile { it.elementType != ANNOTATION_ENTRY }
++            .takeWhile { !it.isAnnotation() }
+             .none { it.isWhiteSpaceWithNewline() }
+ 
+     private fun ASTNode.isOnSameLineAsAnnotatedConstruct() =
+@@ -228,9 +273,9 @@ public class AnnotationRule : Rule("annotation") {
+             .takeWhile { it.isWhiteSpace() || it.isPartOfComment() }
+             .none { it.isWhiteSpaceWithNewline() }
+ 
+-    private fun ASTNode.isOnSameLineAsNextAnnotationEntryOrAnnotatedConstruct() =
+-        if (isFollowedByOtherAnnotationEntry()) {
+-            isOnSameLineAsNextAnnotationEntry()
++    private fun ASTNode.isOnSameLineAsNextAnnotationOrAnnotatedConstruct() =
++        if (isFollowedByOtherAnnotation()) {
++            isOnSameLineAsNextAnnotation()
+         } else {
+             isOnSameLineAsAnnotatedConstruct()
+         }
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

@@ -1,0 +1,185 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
+index 33f6a6e4..90389515 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
+@@ -1,6 +1,8 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.DOT_QUALIFIED_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELSE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELSE_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.IF
+@@ -57,12 +59,47 @@ public class MultiLineIfElseRule :
+                 return
+             }
+ 
+-            if (!node.treePrev.textContains('\n')) {
+-                if (node.firstChildNode.elementType == IF) {
+-                    // Allow single line for:
+-                    // else if (...)
++            // Check if this is an else if (either directly or within a continuation expression)
++            val ifNode = when (node.firstChildNode.elementType) {
++                IF -> node.firstChildNode
++                BINARY_EXPRESSION, DOT_QUALIFIED_EXPRESSION -> {
++                    // When there's a continuation operator like ?: or .plus() or .uppercase(),
++                    // the IF might be the first child of the continuation expression
++                    node.firstChildNode.firstChildNode?.takeIf { it.elementType == IF }
++                }
++                else -> null
++            }
++
++            if (ifNode != null) {
++                // Allow else if when it already has proper blocks in its branches
++                var thenNode: ASTNode? = null
++                var elseNode: ASTNode? = null
++
++                // Find THEN and ELSE children manually
++                var child = ifNode.firstChildNode
++                while (child != null) {
++                    when (child.elementType) {
++                        THEN -> thenNode = child
++                        ELSE -> elseNode = child
++                    }
++                    child = child.treeNext
++                }
++
++                val thenHasBlock = thenNode?.firstChildNode?.elementType == BLOCK
++                val elseHasBlockOrIf = elseNode?.firstChildNode?.elementType.let { it == BLOCK || it == IF }
++
++                if (thenHasBlock && (elseNode == null || elseHasBlockOrIf)) {
++                    // The else if already has proper formatting with blocks, allow it
++                    return
++                }
++
++                // Otherwise check if it's a single line else if
++                if (!node.treePrev.textContains('\n')) {
+                     return
+                 }
++            }
++
++            if (!node.treePrev.textContains('\n')) {
+                 if (!node.treeParent.textContains('\n')) {
+                     // Allow single line if statements as long as they are really simple (e.g. do not contain newlines)
+                     //    if (...) <statement> // no else statement
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleElseIfContinuationTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleElseIfContinuationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleElseIfContinuationTest.kt
+@@ -0,0 +1,106 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class MultiLineIfElseRuleElseIfContinuationTest {
++    private val multiLineIfElseRuleAssertThat = assertThatRule { MultiLineIfElseRule() }
++
++    @Test
++    fun `Issue - Given a multiline if-else-if with continuation operator - should not wrap else if in braces`() {
++        val code =
++            """
++            fun test(showFilter: Boolean, activeTabIndex: Int): Int {
++                val x = if (showFilter) {
++                    1
++                } else if (activeTabIndex == 0) {
++                    2
++                } else {
++                    null
++                } ?: 0
++                return x
++            }
++            """.trimIndent()
++        multiLineIfElseRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue - Given a multiline if-else-if with plus continuation - should not wrap else if in braces`() {
++        val code =
++            """
++            fun test(bar1: Boolean, bar2: Boolean): String {
++                val foo = if (bar1) {
++                    "bar1"
++                } else if (bar2) {
++                    "bar2"
++                } else {
++                    "bar3"
++                }.plus("foo")
++                return foo
++            }
++            """.trimIndent()
++        multiLineIfElseRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue - Given a multiline if-else-if-else with dot operator continuation - should not wrap else if in braces`() {
++        val code =
++            """
++            fun test(a: Boolean, b: Boolean): String {
++                return if (a) {
++                    "a"
++                } else if (b) {
++                    "b"
++                } else {
++                    "c"
++                }.uppercase()
++            }
++            """.trimIndent()
++        multiLineIfElseRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue - Given multiple else-if branches with continuation - should not wrap any else if in braces`() {
++        val code =
++            """
++            fun test(a: Boolean, b: Boolean, c: Boolean): Int {
++                val result = if (a) {
++                    1
++                } else if (b) {
++                    2
++                } else if (c) {
++                    3
++                } else {
++                    4
++                } + 10
++                return result
++            }
++            """.trimIndent()
++        multiLineIfElseRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue - Given a nested else-if with continuation - should not wrap else if in braces`() {
++        val code =
++            """
++            fun test(a: Boolean, b: Boolean, c: Boolean): String? {
++                val result = if (a) {
++                    if (b) {
++                        "ab"
++                    } else if (c) {
++                        "ac"
++                    } else {
++                        "a"
++                    }
++                } else if (b) {
++                    "b"
++                } else {
++                    null
++                } ?: "default"
++                return result
++            }
++            """.trimIndent()
++        multiLineIfElseRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

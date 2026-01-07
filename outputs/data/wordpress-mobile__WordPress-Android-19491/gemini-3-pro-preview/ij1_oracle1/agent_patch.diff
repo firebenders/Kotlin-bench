@@ -1,0 +1,278 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/models/usecases/PaginateCommentsUseCase.kt b/WordPress/src/main/java/org/wordpress/android/models/usecases/PaginateCommentsUseCase.kt
+index d85f4f2df13..d9f9ae4471d 100644
+--- a/WordPress/src/main/java/org/wordpress/android/models/usecases/PaginateCommentsUseCase.kt
++++ b/WordPress/src/main/java/org/wordpress/android/models/usecases/PaginateCommentsUseCase.kt
+@@ -58,7 +58,13 @@ class PaginateCommentsUseCase @Inject constructor(
+                                     orderByDateAscending = false,
+                                     limit = parameters.offset,
+                                     statuses = parameters.commentFilter.toCommentCacheStatuses().toTypedArray()
+-                                )
++                                ).let { comments ->
++                                    if (parameters.postId != 0L) {
++                                        comments.filter { it.remotePostId == parameters.postId }
++                                    } else {
++                                        comments
++                                    }
++                                }
+                             } else {
+                                 listOf()
+                             }
+@@ -77,7 +83,8 @@ class PaginateCommentsUseCase @Inject constructor(
+                                 number = parameters.number,
+                                 offset = parameters.offset,
+                                 networkStatusFilter = parameters.commentFilter.toCommentStatus(),
+-                                cacheStatuses = parameters.commentFilter.toCommentCacheStatuses()
++                                cacheStatuses = parameters.commentFilter.toCommentCacheStatuses(),
++                                remotePostId = parameters.postId
+                             )
+                         }
+ 
+@@ -139,7 +146,8 @@ class PaginateCommentsUseCase @Inject constructor(
+             val site: SiteModel,
+             val number: Int,
+             val offset: Int,
+-            val commentFilter: CommentFilter
++            val commentFilter: CommentFilter,
++            val postId: Long = 0
+         ) : Parameters()
+ 
+         data class ReloadFromCacheParameters(
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListFragment.kt b/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListFragment.kt
+index d47ac2ea200..e0dbaa7e017 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListFragment.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListFragment.kt
+@@ -62,6 +62,7 @@ class UnifiedCommentListFragment : Fragment(R.layout.unified_comment_list_fragme
+     private lateinit var swipeToRefreshHelper: SwipeToRefreshHelper
+ 
+     private lateinit var commentListFilter: CommentFilter
++    private var postId: Long = 0
+ 
+     var confirmationDialog: AlertDialog? = null
+     var currentSnackbar: Snackbar? = null
+@@ -78,6 +79,7 @@ class UnifiedCommentListFragment : Fragment(R.layout.unified_comment_list_fragme
+         )[UnifiedCommentActivityViewModel::class.java]
+         arguments?.let {
+             commentListFilter = requireNotNull(it.getSerializableCompat<CommentFilter>(KEY_COMMENT_LIST_FILTER))
++            postId = it.getLong(KEY_POST_ID, 0)
+         }
+     }
+ 
+@@ -160,7 +162,7 @@ class UnifiedCommentListFragment : Fragment(R.layout.unified_comment_list_fragme
+             }
+         }
+ 
+-        viewModel.start(commentListFilter)
++        viewModel.start(commentListFilter, postId)
+     }
+ 
+     private fun showCommentDetails(commentId: Long, commentStatus: CommentStatus) {
+@@ -259,11 +261,13 @@ class UnifiedCommentListFragment : Fragment(R.layout.unified_comment_list_fragme
+ 
+     companion object {
+         private const val KEY_COMMENT_LIST_FILTER = "KEY_COMMENT_LIST_FILTER"
++        private const val KEY_POST_ID = "KEY_POST_ID"
+         private const val MAX_INDEX_FOR_VISIBLE_ITEM_TO_KEEP_SCROLL_POSITION = 4
+ 
+-        fun newInstance(filter: CommentFilter) = UnifiedCommentListFragment().apply {
++        fun newInstance(filter: CommentFilter, postId: Long) = UnifiedCommentListFragment().apply {
+             arguments = Bundle().apply {
+                 putSerializable(KEY_COMMENT_LIST_FILTER, filter)
++                putLong(KEY_POST_ID, postId)
+             }
+         }
+     }
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListPagerAdapter.kt b/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListPagerAdapter.kt
+index 2a2337b0253..4caea3d4e1b 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListPagerAdapter.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListPagerAdapter.kt
+@@ -7,7 +7,8 @@ import java.lang.ref.WeakReference
+ 
+ class UnifiedCommentListPagerAdapter(
+     private val pages: List<CommentFilter>,
+-    fragmentActivity: FragmentActivity
++    fragmentActivity: FragmentActivity,
++    private val postId: Long
+ ) : FragmentStateAdapter(fragmentActivity) {
+     private val listFragments = mutableMapOf<Int, WeakReference<UnifiedCommentListFragment>>()
+ 
+@@ -18,7 +19,7 @@ class UnifiedCommentListPagerAdapter(
+     override fun getItemCount(): Int = pages.size
+ 
+     override fun createFragment(position: Int): Fragment {
+-        val fragment = UnifiedCommentListFragment.newInstance(pages[position])
++        val fragment = UnifiedCommentListFragment.newInstance(pages[position], postId)
+         listFragments[position] = WeakReference(fragment)
+         return fragment
+     }
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListViewModel.kt
+index 16f059d4666..c7db0821b05 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentListViewModel.kt
+@@ -72,6 +72,7 @@ class UnifiedCommentListViewModel @Inject constructor(
+ ) : ScopedViewModel(mainDispatcher) {
+     private var isStarted = false
+     private lateinit var commentFilter: CommentFilter
++    private var postId: Long = 0
+ 
+     private val _commentsUpdateListener = localCommentCacheUpdateHandler.subscribe()
+ 
+@@ -115,11 +116,12 @@ class UnifiedCommentListViewModel @Inject constructor(
+         )
+     }
+ 
+-    fun start(commentListFilter: CommentFilter) {
++    fun start(commentListFilter: CommentFilter, postId: Long) {
+         if (isStarted) return
+         isStarted = true
+ 
+         commentFilter = commentListFilter
++        this.postId = postId
+ 
+         listenToLocalCacheUpdateRequests()
+         listenToSnackBarRequests()
+@@ -133,7 +135,8 @@ class UnifiedCommentListViewModel @Inject constructor(
+                     site = selectedSiteRepository.getSelectedSite()!!,
+                     number = if (commentFilter == UNREPLIED) UNREPLIED_COMMENT_PAGE_SIZE else COMMENT_PAGE_SIZE,
+                     offset = 0,
+-                    commentFilter = commentFilter
++                    commentFilter = commentFilter,
++                    postId = postId
+                 )
+             )
+         }
+@@ -150,7 +153,8 @@ class UnifiedCommentListViewModel @Inject constructor(
+                         COMMENT_PAGE_SIZE
+                     },
+                     offset = offset,
+-                    commentFilter = commentFilter
++                    commentFilter = commentFilter,
++                    postId = postId
+                 )
+             )
+         }
+@@ -170,7 +174,8 @@ class UnifiedCommentListViewModel @Inject constructor(
+                                     COMMENT_PAGE_SIZE
+                                 },
+                                 offset = 0,
+-                                commentFilter = commentFilter
++                                commentFilter = commentFilter,
++                                postId = postId
+                             ),
+                             hasMore = uiState.value.commentData.hasMore
+                         )
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentsActivity.kt b/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentsActivity.kt
+index 468adecc10b..8e58f6cb790 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentsActivity.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/comments/unified/UnifiedCommentsActivity.kt
+@@ -41,6 +41,7 @@ class UnifiedCommentsActivity : LocaleAwareActivity() {
+     private val commentListFilters = listOf(ALL, PENDING, UNREPLIED, APPROVED, SPAM, TRASHED)
+ 
+     private var disabledTabsOpacity: Float = 0F
++    private var postId: Long = 0
+ 
+     private lateinit var pagerAdapter: UnifiedCommentListPagerAdapter
+ 
+@@ -60,6 +61,8 @@ class UnifiedCommentsActivity : LocaleAwareActivity() {
+             finish()
+         }
+ 
++        postId = intent.getLongExtra(EXTRA_POST_ID, 0)
++
+         binding = UnifiedCommentActivityBinding.inflate(layoutInflater).apply {
+             setContentView(root)
+             setupActionBar()
+@@ -73,7 +76,7 @@ class UnifiedCommentsActivity : LocaleAwareActivity() {
+     private fun UnifiedCommentActivityBinding.setupContent() {
+         viewPager.offscreenPageLimit = VIEW_PAGER_OFFSCREEN_PAGE_LIMIT
+ 
+-        pagerAdapter = UnifiedCommentListPagerAdapter(commentListFilters, this@UnifiedCommentsActivity)
++        pagerAdapter = UnifiedCommentListPagerAdapter(commentListFilters, this@UnifiedCommentsActivity, postId)
+         viewPager.adapter = pagerAdapter
+ 
+         viewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+@@ -126,5 +129,6 @@ class UnifiedCommentsActivity : LocaleAwareActivity() {
+ 
+     companion object {
+         private const val VIEW_PAGER_OFFSCREEN_PAGE_LIMIT = 1
++        const val EXTRA_POST_ID = "EXTRA_POST_ID"
+     }
+ }
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt
+index 79cfcf757fa..fa1b936d9d8 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt
+@@ -134,7 +134,7 @@ class PostActionHandler(
+             BUTTON_PROMOTE_WITH_BLAZE -> {
+                 triggerPostListAction.invoke(PostListAction.ShowPromoteWithBlaze(post))
+             }
+-            BUTTON_COMMENTS -> {} // todo: implement
++            BUTTON_COMMENTS -> triggerPostListAction.invoke(PostListAction.ViewComments(site, post))
+         }
+     }
+ 
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListAction.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListAction.kt
+index 7c3f089ccef..e18a97f2172 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListAction.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListAction.kt
+@@ -1,7 +1,9 @@
+ package org.wordpress.android.ui.posts
+ 
+ import android.content.ClipData
++import android.content.Intent
+ import androidx.fragment.app.FragmentActivity
++import org.wordpress.android.WordPress
+ import org.wordpress.android.fluxc.model.PostModel
+ import org.wordpress.android.fluxc.model.SiteModel
+ import org.wordpress.android.push.NativeNotificationsUtils
+@@ -17,6 +19,7 @@ import org.wordpress.android.ui.stories.intro.StoriesIntroDialogFragment
+ import org.wordpress.android.ui.uploads.UploadService
+ import org.wordpress.android.util.AppLog
+ import org.wordpress.android.util.extensions.clipboardManager
++import org.wordpress.android.ui.comments.unified.UnifiedCommentsActivity
+ import org.wordpress.android.viewmodel.helpers.ToastMessageHolder
+ 
+ sealed class PostListAction {
+@@ -52,6 +55,7 @@ sealed class PostListAction {
+ 
+     class ViewStats(val site: SiteModel, val post: PostModel) : PostListAction()
+     class ViewPost(val site: SiteModel, val post: PostModel) : PostListAction()
++    class ViewComments(val site: SiteModel, val post: PostModel) : PostListAction()
+     class DismissPendingNotification(val pushId: Int) : PostListAction()
+ 
+     class ShowPromoteWithBlaze(val post: PostModel) : PostListAction()
+@@ -108,6 +112,12 @@ fun handlePostListAction(
+         is PostListAction.ViewPost -> {
+             ActivityLauncher.browsePostOrPage(activity, action.site, action.post)
+         }
++        is PostListAction.ViewComments -> {
++            val intent = Intent(activity, UnifiedCommentsActivity::class.java)
++            intent.putExtra(WordPress.SITE, action.site)
++            intent.putExtra(UnifiedCommentsActivity.EXTRA_POST_ID, action.post.remotePostId)
++            activity.startActivity(intent)
++        }
+         is PostListAction.DismissPendingNotification -> {
+             NativeNotificationsUtils.dismissNotification(action.pushId, activity)
+         }
+diff --git a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+index 915d884477a..6146649237e 100644
+--- a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
++++ b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+@@ -414,6 +414,7 @@ class PostListItemUiStateHelper @Inject constructor(
+                 !isLocalDraft &&
+                 !isLocallyChanged &&
+                 shouldShowStatsInJetpackRemovalPhase
++        val canShowComments = postStatus == PUBLISHED && !isLocalDraft
+         val canShowCopy = postStatus == PUBLISHED || postStatus == DRAFT
+         val canShowCopyUrlButton = !isLocalDraft && postStatus != TRASHED
+         val canShowViewButton = !canRetryUpload && postStatus != TRASHED
+@@ -443,6 +444,10 @@ class PostListItemUiStateHelper @Inject constructor(
+             buttonTypes.add(BUTTON_STATS)
+         }
+ 
++        if (canShowComments) {
++            buttonTypes.add(BUTTON_COMMENTS)
++        }
++
+         if (canShowCopy) {
+             buttonTypes.add(BUTTON_COPY)
+         }

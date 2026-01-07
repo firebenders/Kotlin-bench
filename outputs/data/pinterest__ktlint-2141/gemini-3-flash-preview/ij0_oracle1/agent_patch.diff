@@ -1,0 +1,133 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+index 79f1e477..eb53ae3b 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+@@ -1,5 +1,6 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS_BODY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONST_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE
+@@ -11,6 +12,8 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OVERRIDE_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIVATE_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY_ACCESSOR
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.REFERENCE_EXPRESSION
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VAL_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.Rule
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+@@ -51,12 +54,18 @@ public class PropertyNamingRule :
+                     property.isBackingProperty() -> {
+                         visitBackingProperty(identifier, emit)
+                     }
+-                    property.hasConstModifier() ||
+-                        property.isTopLevelValue() ||
+-                        property.isObjectValue() -> {
++                    property.hasConstModifier() -> {
+                         visitConstProperty(identifier, emit)
+                     }
+-                    else -> {
++                    property.isTopLevelValue() ||
++                        property.isObjectValue() -> {
++                        if (property.isMutableCollection()) {
++                            visitNonConstProperty(identifier, emit)
++                        } else {
++                            visitConstProperty(identifier, emit)
++                        }
++                    }
++else -> {
+                         visitNonConstProperty(identifier, emit)
+                     }
+                 }
+@@ -145,10 +154,24 @@ public class PropertyNamingRule :
+             .mapNotNull { it.findChildByType(IDENTIFIER) }
+             .any { it.text == identifier }
+ 
++    private fun ASTNode.isMutableCollection(): Boolean =
++        findChildByType(TYPE_REFERENCE)?.matches(MUTABLE_COLLECTION_TYPE_REGEXP) ?: false ||
++            children().any { it.elementType == CALL_EXPRESSION && it.isMutableCollectionFactory() }
++
++    private fun ASTNode.matches(regExp: Regex): Boolean =
++        text.matches(regExp)
++
++    private fun ASTNode.isMutableCollectionFactory(): Boolean =
++        findChildByType(REFERENCE_EXPRESSION)?.matches(MUTABLE_COLLECTION_FACTORY_REGEXP) ?: false
++
+     private companion object {
+         val LOWER_CAMEL_CASE_REGEXP = "[a-z][a-zA-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
+         val SCREAMING_SNAKE_CASE_REGEXP = "[A-Z][_A-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
+         val BACKING_PROPERTY_LOWER_CAMEL_CASE_REGEXP = "_[a-z][a-zA-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
++        val MUTABLE_COLLECTION_TYPE_REGEXP =
++            Regex(".*(MutableIterable|MutableIterator|MutableList|MutableSet|MutableMap|MutableCollection|ArrayList|HashMap|HashSet|LinkedHashMap|LinkedHashSet|TreeMap|TreeSet).*")
++val MUTABLE_COLLECTION_FACTORY_REGEXP =
++            Regex("mutableListOf|mutableMapOf|mutableSetOf|arrayListOf|hashMapOf|hashSetOf|linkedHashMapOf|linkedHashSetOf")
+         const val SERIAL_VERSION_UID_PROPERTY_NAME = "serialVersionUID"
+     }
+ }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt
+@@ -0,0 +1,51 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat
++import org.junit.jupiter.api.Test
++
++class PropertyNamingRuleMutableCollectionTest {
++    private val propertyNamingRuleAssertThat =
++        KtLintAssertThat.assertThatRule { PropertyNamingRule() }
++
++    @Test
++    fun `Given an object with a mutable collection property then do not emit`() {
++        val code =
++            """
++            object Foo {
++                val someMap: MutableMap<String, String> = mutableMapOf()
++                val someList: MutableList<String> = mutableListOf()
++                val someSet: MutableSet<String> = mutableSetOf()
++                val someIterable: MutableIterable<String> = mutableListOf()
++                val someCollection: MutableCollection<String> = mutableListOf()
++                val someMapWithoutType = mutableMapOf<String, String>()
++                val someListWithoutType = mutableListOf<String>()
++                val someSetWithoutType = mutableSetOf<String>()
++                val someNullableMap: MutableMap<String, String>? = null
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a companion object with a mutable collection property then do not emit`() {
++        val code =
++            """
++            class Foo {
++                companion object {
++                    val someMap: MutableMap<String, String> = mutableMapOf()
++                }
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a top level mutable collection property then do not emit`() {
++        val code =
++            """
++            val someMap: MutableMap<String, String> = mutableMapOf()
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

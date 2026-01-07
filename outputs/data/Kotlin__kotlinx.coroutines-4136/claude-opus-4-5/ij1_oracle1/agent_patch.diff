@@ -1,0 +1,155 @@
+diff --git a/kotlinx-coroutines-core/common/src/EventLoop.common.kt b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+index 6bfcbf0cb..51602ea60 100644
+--- a/kotlinx-coroutines-core/common/src/EventLoop.common.kt
++++ b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+@@ -256,6 +256,29 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+         // unconfined events take priority
+         if (processUnconfinedEvent()) return 0
+         // queue all delayed tasks that are due to be executed
++        enqueueDelayedTasks()
++        // then process one event from queue
++        val task = dequeue()
++        if (task != null) {
++            platformAutoreleasePool { task.run() }
++            return 0
++        }
++        return nextTime
++    }
++
++    final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
++
++    @InternalCoroutinesApi
++    override fun dispatchYield(context: CoroutineContext, block: Runnable) {
++        // Yield should give priority to delayed tasks that are already due
++        // Move all delayed tasks that are due to the main queue first
++        enqueueDelayedTasks()
++        // Then enqueue the yield task after those tasks
++        enqueue(block)
++    }
++
++    // Moves all delayed tasks that are due to the main queue
++    private fun enqueueDelayedTasks() {
+         val delayed = _delayed.value
+         if (delayed != null && !delayed.isEmpty) {
+             val now = nanoTime()
+@@ -271,17 +294,8 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+                 } ?: break // quit loop when nothing more to remove or enqueueImpl returns false on "isComplete"
+             }
+         }
+-        // then process one event from queue
+-        val task = dequeue()
+-        if (task != null) {
+-            platformAutoreleasePool { task.run() }
+-            return 0
+-        }
+-        return nextTime
+     }
+ 
+-    final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
+-
+     open fun enqueue(task: Runnable) {
+         if (enqueueImpl(task)) {
+             // todo: we should unpark only when this delayed task became first in the queue
+
+diff --git a/kotlinx-coroutines-core/common/test/YieldWithDelayTest.kt b/kotlinx-coroutines-core/common/test/YieldWithDelayTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/YieldWithDelayTest.kt
+@@ -0,0 +1,97 @@
++package kotlinx.coroutines
++
++import kotlinx.coroutines.testing.*
++import kotlin.test.*
++
++/**
++ * Test for https://github.com/Kotlin/kotlinx.coroutines/issues/xxxx
++ * yield() should give priority to delayed tasks that have already expired.
++ */
++class YieldWithDelayTest : TestBase() {
++
++    /**
++     * Tests that yield() gives priority to a coroutine that was launched with UNDISPATCHED
++     * and whose delay has already expired.
++     *
++     * The sequence should be:
++     * 1. launch starts immediately (UNDISPATCHED)
++     * 2. delay(1) suspends the launched coroutine
++     * 3. Thread.sleep(100) passes enough time for the delay to expire
++     * 4. yield() should give priority to the delayed task that is now ready
++     * 5. "first" should print before "second"
++     */
++    @Test
++    fun testYieldGivesPriorityToExpiredDelay() = runTest {
++        val result = mutableListOf<String>()
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1)
++            result.add("first")
++        }
++        
++        // Wait long enough for the delay to expire
++        // Using delay with a longer time instead of Thread.sleep for platform compatibility
++        delay(100)
++        
++        yield()
++        result.add("second")
++        
++        // Let any remaining tasks complete
++        yield()
++        
++        assertEquals(listOf("first", "second"), result, 
++            "yield() should give priority to the coroutine whose delay has expired")
++    }
++
++    /**
++     * Similar test but with multiple delayed coroutines
++     */
++    @Test
++    fun testYieldGivesPriorityToMultipleExpiredDelays() = runTest {
++        val result = mutableListOf<String>()
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1)
++            result.add("first")
++        }
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(2)
++            result.add("second")
++        }
++        
++        // Wait long enough for both delays to expire
++        delay(100)
++        
++        yield()
++        result.add("third")
++        
++        // Let any remaining tasks complete
++        yield()
++        yield()
++        
++        assertEquals(listOf("first", "second", "third"), result,
++            "yield() should give priority to coroutines whose delays have expired")
++    }
++
++    /**
++     * Test that a non-expired delay is NOT given priority over yield
++     */
++    @Test
++    fun testYieldDoesNotWaitForUnexpiredDelay() = runTest {
++        val result = mutableListOf<String>()
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(10000) // Very long delay that won't expire during test
++            result.add("delayed")
++        }
++        
++        yield()
++        result.add("immediate")
++        
++        // The delayed coroutine should not have run yet
++        assertEquals(listOf("immediate"), result,
++            "yield() should not wait for unexpired delays")
++    }
++}
++

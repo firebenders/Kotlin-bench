@@ -1,0 +1,94 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt
+index 9c79f4b6a21..f75ed687010 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt
+@@ -10,8 +10,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+ import kotlinx.coroutines.flow.debounce
+ import kotlinx.coroutines.flow.filter
+-import kotlinx.coroutines.flow.launchIn
+-import kotlinx.coroutines.flow.onEach
++import kotlinx.coroutines.flow.collectLatest
++import kotlinx.coroutines.launch
+ import org.wordpress.android.analytics.AnalyticsTracker
+ import org.wordpress.android.modules.UI_THREAD
+ import org.wordpress.android.ui.domains.management.newdomainsearch.domainsfetcher.NewDomainsSearchRepository
+@@ -40,11 +40,14 @@ class NewDomainSearchViewModel @Inject constructor(
+ 
+     init {
+         analyticsTracker.track(AnalyticsTracker.Stat.DOMAIN_MANAGEMENT_SEARCH_FOR_A_DOMAIN_SCREEN_SHOWN)
+-        debouncedQuery
+-            .filter { it.isNotBlank() }
+-            .debounce(SEARCH_QUERY_DELAY_MS)
+-            .onEach(::fetchDomains)
+-            .launchIn(viewModelScope)
++        viewModelScope.launch {
++            debouncedQuery
++                .filter { it.isNotBlank() }
++                .debounce(SEARCH_QUERY_DELAY_MS)
++                .collectLatest { query ->
++                    fetchDomains(query)
++                }
++        }
+     }
+ 
+     private suspend fun fetchDomains(query: String) {
+
+diff --git a/SOLUTION_SUMMARY.md b/SOLUTION_SUMMARY.md
+new file mode 100644
+--- /dev/null
++++ b/SOLUTION_SUMMARY.md
+@@ -0,0 +1,53 @@
++# Solution Summary: Cancel Stale Domain Search Requests
++
++## Problem
++When searching for a new domain in the domain management flow, multiple search requests could be in flight simultaneously. If a slower request completed after a faster one, stale results would overwrite the most recent search results in the UI.
++
++## Root Cause
++The original implementation used `onEach(::fetchDomains).launchIn(viewModelScope)` pattern, which:
++- Launched independent coroutines for each search query
++- Allowed multiple `fetchDomains` calls to run in parallel
++- Did not cancel previous requests when new ones started
++- Resulted in race conditions where any request could update the UI regardless of order
++
++## Solution
++Changed the flow collection pattern from `onEach` + `launchIn` to `collectLatest`:
++
++```kotlin
++// Before:
++debouncedQuery
++    .filter { it.isNotBlank() }
++    .debounce(SEARCH_QUERY_DELAY_MS)
++    .onEach(::fetchDomains)
++    .launchIn(viewModelScope)
++
++// After:
++viewModelScope.launch {
++    debouncedQuery
++        .filter { it.isNotBlank() }
++        .debounce(SEARCH_QUERY_DELAY_MS)
++        .collectLatest { query ->
++            fetchDomains(query)
++        }
++}
++```
++
++## How It Works
++The `collectLatest` operator:
++1. Automatically cancels the previous collector block when a new value is emitted
++2. Ensures that when a new search query arrives, any in-flight `fetchDomains` coroutine is cancelled
++3. Guarantees only the most recent search request can complete and update the UI
++
++## Benefits
++- ✅ Prevents stale search results from overwriting fresh data
++- ✅ Maintains the existing debounce delay (250ms)
++- ✅ Minimal code changes (only modified the flow collection pattern)
++- ✅ No changes to public API or existing functionality
++- ✅ Properly handles cancellation at the coroutine level
++
++## Files Modified
++- `WordPress/src/main/java/org/wordpress/android/ui/domains/management/newdomainsearch/NewDomainSearchViewModel.kt`
++
++## Impact
++Users will now always see results matching their most recent search query, eliminating the confusing UX where old results could appear after typing new queries.
++

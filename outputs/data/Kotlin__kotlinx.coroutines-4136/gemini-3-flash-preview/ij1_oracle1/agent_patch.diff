@@ -1,0 +1,83 @@
+diff --git a/kotlinx-coroutines-core/common/src/EventLoop.common.kt b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+index 6bfcbf0cb..4bdc92be8 100644
+--- a/kotlinx-coroutines-core/common/src/EventLoop.common.kt
++++ b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+@@ -256,9 +256,19 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+         // unconfined events take priority
+         if (processUnconfinedEvent()) return 0
+         // queue all delayed tasks that are due to be executed
++        moveDelayedTasksToQueue(nanoTime())
++        // then process one event from queue
++        val task = dequeue()
++        if (task != null) {
++            platformAutoreleasePool { task.run() }
++            return 0
++        }
++        return nextTime
++    }
++
++    private fun moveDelayedTasksToQueue(now: Long) {
+         val delayed = _delayed.value
+         if (delayed != null && !delayed.isEmpty) {
+-            val now = nanoTime()
+             while (true) {
+                 // make sure that moving from delayed to queue removes from delayed only after it is added to queue
+                 // to make sure that 'isEmpty' and `nextTime` that check both of them
+@@ -271,13 +281,11 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+                 } ?: break // quit loop when nothing more to remove or enqueueImpl returns false on "isComplete"
+             }
+         }
+-        // then process one event from queue
+-        val task = dequeue()
+-        if (task != null) {
+-            platformAutoreleasePool { task.run() }
+-            return 0
+-        }
+-        return nextTime
++    }
++
++    override fun dispatchYield(context: CoroutineContext, block: Runnable) {
++        moveDelayedTasksToQueue(nanoTime())
++        enqueue(block)
+     }
+ 
+     final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
+
+diff --git a/kotlinx-coroutines-core/jvm/test/YieldEventLoopTest.kt b/kotlinx-coroutines-core/jvm/test/YieldEventLoopTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/YieldEventLoopTest.kt
+@@ -0,0 +1,33 @@
++package kotlinx.coroutines
++
++import kotlinx.coroutines.testing.*
++import org.junit.Test
++import kotlin.test.*
++
++class YieldEventLoopTest : TestBase() {
++    @Test
++    fun testYieldToDelayedTask() = runBlocking {
++        var firstRan = false
++        launch {
++            delay(1)
++            firstRan = true
++        }
++        yield() // let launch run and reach delay
++        Thread.sleep(100) // wait for delay to expire
++        yield() // this yield should now yield to the expired delayed task
++        assertTrue(firstRan, "Yield should have resumed the delayed coroutine")
++    }
++
++    @Test
++    fun testYieldToDelayedTaskUndispatched() = runBlocking {
++        var firstRan = false
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1)
++            firstRan = true
++        }
++        Thread.sleep(100) // wait for delay to expire
++        yield()
++        assertTrue(firstRan, "Yield should have resumed the delayed coroutine")
++    }
++}
++

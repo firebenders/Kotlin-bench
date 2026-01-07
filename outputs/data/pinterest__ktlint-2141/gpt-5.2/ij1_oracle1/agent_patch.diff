@@ -1,0 +1,181 @@
+diff --git a/documentation/snapshot/docs/rules/experimental.md b/documentation/snapshot/docs/rules/experimental.md
+index 5e574268..5a59c31e 100644
+--- a/documentation/snapshot/docs/rules/experimental.md
++++ b/documentation/snapshot/docs/rules/experimental.md
+@@ -684,7 +684,7 @@ Enforce naming of property.
+     ```
+ 
+ !!! note
+-    Top level `val` properties and `const val` properties have to be written in screaming snake notation. Local `val` and `const val` are written in lower camel case.
++    Top level `val` properties, `val` properties in objects (including companion objects) and `const val` properties have to be written in screaming snake notation unless they are mutable collections (e.g. `MutableMap`, `MutableList`, `mutableMapOf`, ...). Local `val` and `const val` are written in lower camel case.
+ 
+ This rule can also be suppressed with the IntelliJ IDEA inspection suppression `PropertyName`.
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+index 79f1e477..14cdf9a3 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+@@ -11,6 +11,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OVERRIDE_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIVATE_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY_ACCESSOR
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VAL_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.Rule
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+@@ -51,9 +52,10 @@ public class PropertyNamingRule :
+                     property.isBackingProperty() -> {
+                         visitBackingProperty(identifier, emit)
+                     }
+-                    property.hasConstModifier() ||
+-                        property.isTopLevelValue() ||
+-                        property.isObjectValue() -> {
++                    property.hasConstModifier() -> {
++                        visitConstProperty(identifier, emit)
++                    }
++                    (property.isTopLevelValue() || property.isObjectValue()) && !property.isMutableCollectionProperty() -> {
+                         visitConstProperty(identifier, emit)
+                     }
+                     else -> {
+@@ -129,6 +131,27 @@ public class PropertyNamingRule :
+             containsValKeyword() &&
+             !hasModifier(OVERRIDE_KEYWORD)
+ 
++    private fun ASTNode.isMutableCollectionProperty(): Boolean {
++        if (!containsValKeyword()) {
++            return false
++        }
++
++        val typeReference =
++            findChildByType(TYPE_REFERENCE)
++                ?.text
++                ?.substringBefore("<")
++                ?.substringAfterLast('.')
++                ?.trim()
++                ?.removeSuffix("?")
++
++        if (typeReference != null && typeReference in MUTABLE_COLLECTION_TYPE_NAMES) {
++            return true
++        }
++
++        // When no explicit type is present, fall back to a heuristic based on common mutable collection factory methods and constructors.
++        return MUTABLE_COLLECTION_INITIALIZER_REGEX.containsMatchIn(text)
++    }
++
+     private fun ASTNode.isBackingProperty() =
+         takeIf { hasModifier(PRIVATE_KEYWORD) }
+             ?.findChildByType(IDENTIFIER)
+@@ -149,6 +172,54 @@ public class PropertyNamingRule :
+         val LOWER_CAMEL_CASE_REGEXP = "[a-z][a-zA-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
+         val SCREAMING_SNAKE_CASE_REGEXP = "[A-Z][_A-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
+         val BACKING_PROPERTY_LOWER_CAMEL_CASE_REGEXP = "_[a-z][a-zA-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
++
++        val MUTABLE_COLLECTION_TYPE_NAMES =
++            setOf(
++                "Array",
++                "BooleanArray",
++                "ByteArray",
++                "CharArray",
++                "DoubleArray",
++                "FloatArray",
++                "IntArray",
++                "LongArray",
++                "ShortArray",
++                "MutableCollection",
++                "MutableIterable",
++                "MutableIterator",
++                "MutableList",
++                "MutableMap",
++                "MutableSet",
++            )
++
++        val MUTABLE_COLLECTION_INITIALIZER_REGEX =
++            Regex(
++                "\\b(" +
++                    listOf(
++                        // Kotlin collection factory methods
++                        "mutableListOf",
++                        "mutableSetOf",
++                        "mutableMapOf",
++                        "arrayListOf",
++                        "hashMapOf",
++                        "linkedMapOf",
++                        "linkedSetOf",
++                        "sortedMapOf",
++                        "sortedSetOf",
++                        // Common mutable collection constructors
++                        "ArrayList",
++                        "HashMap",
++                        "LinkedHashMap",
++                        "TreeMap",
++                        "ConcurrentHashMap",
++                        "HashSet",
++                        "LinkedHashSet",
++                        "TreeSet",
++                        "LinkedList",
++                    ).joinToString("|") +
++                    ")\\b",
++            )
++
+         const val SERIAL_VERSION_UID_PROPERTY_NAME = "serialVersionUID"
+     }
+ }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleMutableCollectionTest.kt
+@@ -0,0 +1,45 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat
++import org.junit.jupiter.api.Test
++
++class PropertyNamingRuleMutableCollectionTest {
++    private val propertyNamingRuleAssertThat =
++        KtLintAssertThat.assertThatRule { PropertyNamingRule() }
++
++    @Test
++    fun `Given an object val property with a mutable collection type then do not require screaming snake case`() {
++        val code =
++            """
++            val foo = object : FooBar {
++                val someMap: MutableMap<String, String> = mutableMapOf()
++            }
++            """.trimIndent()
++
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given an object val property with a mutable collection type in screaming snake case then do emit`() {
++        val code =
++            """
++            val foo = object : FooBar {
++                val SOME_MAP: MutableMap<String, String> = mutableMapOf()
++            }
++            """.trimIndent()
++
++        propertyNamingRuleAssertThat(code)
++            .hasLintViolationWithoutAutoCorrect(2, 9, "Property name should start with a lowercase letter and use camel case")
++    }
++
++    @Test
++    fun `Given a top level val property with a mutable collection initializer then do not require screaming snake case`() {
++        val code =
++            """
++            val someList = mutableListOf(1, 2, 3)
++            """.trimIndent()
++
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

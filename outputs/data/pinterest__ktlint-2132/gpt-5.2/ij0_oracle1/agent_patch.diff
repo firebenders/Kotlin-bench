@@ -1,0 +1,270 @@
+diff --git a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+index 201e7dac..87668cb5 100644
+--- a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
++++ b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+@@ -236,13 +236,42 @@ public fun ASTNode.upsertWhitespaceBeforeMe(text: String) {
+         if (this.elementType == WHITE_SPACE) {
+             return replaceWhitespaceWith(text)
+         }
+-        val previous = treePrev ?: prevLeaf()
+-        if (previous != null && previous.elementType == WHITE_SPACE) {
+-            previous.replaceWhitespaceWith(text)
+-        } else {
+-            PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
+-                (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
++
++        val prevSibling = treePrev
++        if (prevSibling != null) {
++            if (prevSibling.elementType == WHITE_SPACE) {
++                prevSibling.replaceWhitespaceWith(text)
++            } else {
++                PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
++                    (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
++                }
++            }
++            return
++        }
++
++        // The leaf is the first child of its direct parent. Insert the whitespace before the subtree that contains this leaf instead of
++        // inside that subtree. This prevents the whitespace from ending up at an unexpected location in the AST.
++        val insertionPoint = insertionPointBeforeSubtreeContainingMe()
++        if (insertionPoint == null) {
++            // Fallback to the original behavior
++            val previous = prevLeaf(includeEmpty = true)
++            if (previous != null && previous.elementType == WHITE_SPACE) {
++                previous.replaceWhitespaceWith(text)
++            } else {
++                PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
++                    (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
++                }
+             }
++            return
++        }
++
++        val previousLeaf = prevLeaf(includeEmpty = true)
++        val existingWhitespace = previousLeaf?.takeIf { it.elementType == WHITE_SPACE }
++        if (existingWhitespace != null) {
++            existingWhitespace.replaceWhitespaceWith(text)
++            insertionPoint.relocateIfNeeded(existingWhitespace)
++        } else {
++            insertionPoint.parent.addChild(PsiWhiteSpaceImpl(text), insertionPoint.anchorBefore)
+         }
+     } else {
+         val prevLeaf =
+@@ -260,6 +289,49 @@ private fun ASTNode.replaceWhitespaceWith(text: String) {
+     }
+ }
+ 
++private data class InsertionPoint(
++    val parent: ASTNode,
++    val anchorBefore: ASTNode?,
++) {
++    /**
++     * Moves [node] to this insertion point when it is not already located there.
++     */
++    fun relocateIfNeeded(node: ASTNode) {
++        if (node.treeParent != parent || node.treeNext != anchorBefore) {
++            node.treeParent.removeChild(node)
++            parent.addChild(node, anchorBefore)
++        }
++    }
++}
++
++/**
++ * Finds the insertion point *before* the subtree containing this node.
++ *
++ * The direct parent of a leaf does not always represent the correct place to insert whitespace. For example: inserting
++ * whitespace between two sibling composite nodes should insert that whitespace as a direct child of their common
++ * parent, rather than as a child of either composite.
++ */
++private fun ASTNode.insertionPointBeforeSubtreeContainingMe(): InsertionPoint? {
++    var n: ASTNode = this
++    while (n.treePrev == null && n.treeParent != null) {
++        n = n.treeParent
++    }
++    val parent = n.treeParent ?: return null
++    return InsertionPoint(parent = parent, anchorBefore = n)
++}
++
++/**
++ * Finds the insertion point *after* the subtree containing this node.
++ */
++private fun ASTNode.insertionPointAfterSubtreeContainingMe(): InsertionPoint? {
++    var n: ASTNode = this
++    while (n.treeNext == null && n.treeParent != null) {
++        n = n.treeParent
++    }
++    val parent = n.treeParent ?: return null
++    return InsertionPoint(parent = parent, anchorBefore = n.treeNext)
++}
++
+ /**
+  * Updates or inserts a new whitespace element with [text] after the given node. If the node itself is a whitespace
+  * then its contents is replaced with [text]. If the node is a (nested) composite element, the whitespace element is
+@@ -270,13 +342,42 @@ public fun ASTNode.upsertWhitespaceAfterMe(text: String) {
+         if (this.elementType == WHITE_SPACE) {
+             return replaceWhitespaceWith(text)
+         }
+-        val next = treeNext ?: nextLeaf()
+-        if (next != null && next.elementType == WHITE_SPACE) {
+-            next.replaceWhitespaceWith(text)
+-        } else {
+-            PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
+-                (psi as LeafElement).rawInsertAfterMe(psiWhiteSpace)
++
++        val nextSibling = treeNext
++        if (nextSibling != null) {
++            if (nextSibling.elementType == WHITE_SPACE) {
++                nextSibling.replaceWhitespaceWith(text)
++            } else {
++                PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
++                    (psi as LeafElement).rawInsertAfterMe(psiWhiteSpace)
++                }
++            }
++            return
++        }
++
++        // The leaf is the last child of its direct parent. Insert the whitespace after the subtree that contains this leaf instead of
++        // inside that subtree. This prevents the whitespace from ending up at an unexpected location in the AST.
++        val insertionPoint = insertionPointAfterSubtreeContainingMe()
++        if (insertionPoint == null) {
++            // Fallback to the original behavior
++            val next = nextLeaf(includeEmpty = true)
++            if (next != null && next.elementType == WHITE_SPACE) {
++                next.replaceWhitespaceWith(text)
++            } else {
++                PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
++                    (psi as LeafElement).rawInsertAfterMe(psiWhiteSpace)
++                }
+             }
++            return
++        }
++
++        val nextLeaf = nextLeaf(includeEmpty = true)
++        val existingWhitespace = nextLeaf?.takeIf { it.elementType == WHITE_SPACE }
++        if (existingWhitespace != null) {
++            existingWhitespace.replaceWhitespaceWith(text)
++            insertionPoint.relocateIfNeeded(existingWhitespace)
++        } else {
++            insertionPoint.parent.addChild(PsiWhiteSpaceImpl(text), insertionPoint.anchorBefore)
+         }
+     } else {
+         lastChildLeafOrSelf().upsertWhitespaceAfterMe(text)
+
+diff --git a/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtensionWhitespaceInsertionTest.kt b/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtensionWhitespaceInsertionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtensionWhitespaceInsertionTest.kt
+@@ -0,0 +1,104 @@
++package com.pinterest.ktlint.rule.engine.core.api
++
++import com.pinterest.ktlint.rule.engine.api.Code
++import com.pinterest.ktlint.rule.engine.api.KtLintRuleEngine
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.LBRACE
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.RPAR
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER_LIST
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
++import org.assertj.core.api.Assertions.assertThat
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.lang.FileASTNode
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.PsiWhiteSpaceImpl
++import org.junit.jupiter.api.Test
++
++class ASTNodeExtensionWhitespaceInsertionTest {
++    @Test
++    fun `Given a function without whitespace before body then upsertWhitespaceAfterMe inserts the whitespace as sibling before the block`() {
++        val code = "fun foo(){}"
++        val root = transformCodeToAST(code)
++        val funNode = root.findChildByType(FUN)!!
++        val block = funNode.findChildByType(BLOCK)!!
++        val valueParameterList = funNode.findChildByType(VALUE_PARAMETER_LIST)!!
++        val rpar = valueParameterList.findChildByType(RPAR)!!
++
++        rpar.upsertWhitespaceAfterMe(" ")
++
++        val whitespaceBeforeBlock = block.prevLeaf(includeEmpty = true)
++        assertThat(whitespaceBeforeBlock?.elementType).isEqualTo(WHITE_SPACE)
++        assertThat(whitespaceBeforeBlock?.text).isEqualTo(" ")
++        assertThat(block.firstChildNode.elementType).isEqualTo(LBRACE)
++        assertThat(root.text).isEqualTo("fun foo() {}")
++    }
++
++    @Test
++    fun `Given a function without whitespace before body then upsertWhitespaceBeforeMe on lbrace inserts the whitespace as sibling before the block`() {
++        val code = "fun foo(){}"
++        val root = transformCodeToAST(code)
++        val funNode = root.findChildByType(FUN)!!
++        val block = funNode.findChildByType(BLOCK)!!
++        val lbrace = block.firstChildNode
++
++        lbrace.upsertWhitespaceBeforeMe(" ")
++
++        val whitespaceBeforeBlock = block.prevLeaf(includeEmpty = true)
++        assertThat(whitespaceBeforeBlock?.elementType).isEqualTo(WHITE_SPACE)
++        assertThat(whitespaceBeforeBlock?.text).isEqualTo(" ")
++        assertThat(block.firstChildNode.elementType).isEqualTo(LBRACE)
++        assertThat(root.text).isEqualTo("fun foo() {}")
++    }
++
++    @Test
++    fun `Given whitespace inserted inside a block before lbrace then upsertWhitespaceAfterMe relocates it to the parent of the block`() {
++        val code = "fun foo(){}"
++        val root = transformCodeToAST(code)
++        val funNode = root.findChildByType(FUN)!!
++        val block = funNode.findChildByType(BLOCK)!!
++        val valueParameterList = funNode.findChildByType(VALUE_PARAMETER_LIST)!!
++        val rpar = valueParameterList.findChildByType(RPAR)!!
++        val lbrace = block.firstChildNode
++
++        // Simulate old behaviour: whitespace added as first child of the block (before '{')
++        block.addChild(PsiWhiteSpaceImpl(" "), lbrace)
++
++        // Sanity check: the block is still not preceded by whitespace
++        assertThat(block.prevLeaf(includeEmpty = true)?.elementType).isNotEqualTo(WHITE_SPACE)
++        assertThat(block.firstChildNode.elementType).isEqualTo(WHITE_SPACE)
++
++        rpar.upsertWhitespaceAfterMe(" ")
++
++        val whitespaceBeforeBlock = block.prevLeaf(includeEmpty = true)
++        assertThat(whitespaceBeforeBlock?.elementType).isEqualTo(WHITE_SPACE)
++        assertThat(whitespaceBeforeBlock?.text).isEqualTo(" ")
++        assertThat(block.firstChildNode.elementType).isEqualTo(LBRACE)
++        assertThat(root.text).isEqualTo("fun foo() {}")
++    }
++
++    private fun transformCodeToAST(code: String): FileASTNode =
++        KtLintRuleEngine(
++            ruleProviders =
++                setOf(
++                    RuleProvider { DummyRule() },
++                ),
++        ).transformToAst(
++            Code.fromSnippet(code),
++        )
++
++    /**
++     * A dummy rule for testing.
++     */
++    private class DummyRule : Rule(
++        ruleId = RuleId("test:dummy-rule"),
++        about = About(),
++    ) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++        }
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

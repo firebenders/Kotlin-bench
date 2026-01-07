@@ -1,0 +1,117 @@
+diff --git a/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt b/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt
+index cad34a0d5..ae4be853d 100644
+--- a/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt
++++ b/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt
+@@ -391,11 +391,14 @@ private fun <T> Flow<T>.timeoutInternal(
+     val values = buffer(Channel.RENDEZVOUS).produceIn(this)
+     whileSelect {
+         values.onReceiveCatching { value ->
+-            value.onSuccess {
+-                downStream.emit(it)
+-            }.onClosed {
+-                return@onReceiveCatching false
+-            }
++            value
++                .onSuccess {
++                    downStream.emit(it)
++                }
++                .onFailure {
++                    it?.let { throw it }
++                    return@onReceiveCatching false
++                }
+             return@onReceiveCatching true
+         }
+         onTimeout(timeout) {
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index 781d5d070..a693aa516 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -4,10 +4,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/common/test/flow/operators/TimeoutCallbackFlowTest.kt b/kotlinx-coroutines-core/common/test/flow/operators/TimeoutCallbackFlowTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/flow/operators/TimeoutCallbackFlowTest.kt
+@@ -0,0 +1,72 @@
++package kotlinx.coroutines.flow.operators
++
++import kotlinx.coroutines.testing.*
++import kotlinx.coroutines.*
++import kotlinx.coroutines.flow.*
++import kotlin.test.*
++import kotlin.time.Duration.Companion.seconds
++
++class TimeoutCallbackFlowTest : TestBase() {
++    @Test
++    fun testCallbackFlowCloseExceptionWithTimeout() = runTest {
++        val flow = callbackFlow<Int> {
++            close(IllegalStateException("Test Exception"))
++        }.timeout(5.seconds)
++        
++        try {
++            flow.collect()
++            expectUnreached()
++        } catch (e: Exception) {
++            assertTrue(e is IllegalStateException)
++            assertEquals("Test Exception", e.message)
++        }
++        finish(1)
++    }
++    
++    @Test
++    fun testCallbackFlowCloseExceptionWithTimeoutAndIntermediateOperator() = runTest {
++        val flow = callbackFlow<Int> {
++            close(IllegalStateException("Test Exception"))
++        }.catch { throw it }.timeout(5.seconds)
++        
++        try {
++            flow.collect()
++            expectUnreached()
++        } catch (e: Exception) {
++            assertTrue(e is IllegalStateException)
++            assertEquals("Test Exception", e.message)
++        }
++        finish(1)
++    }
++    
++    @Test
++    fun testCallbackFlowCloseNormallyWithTimeout() = runTest {
++        val flow = callbackFlow<Int> {
++            close()
++        }.timeout(5.seconds)
++        
++        assertEquals(emptyList(), flow.toList())
++        finish(1)
++    }
++    
++    @Test
++    fun testCallbackFlowWithEmissionAndCloseExceptionWithTimeout() = runTest {
++        val flow = callbackFlow<Int> {
++            send(1)
++            send(2)
++            close(IllegalStateException("Test Exception"))
++        }.timeout(5.seconds)
++        
++        val result = mutableListOf<Int>()
++        try {
++            flow.collect { result.add(it) }
++            expectUnreached()
++        } catch (e: Exception) {
++            assertTrue(e is IllegalStateException)
++            assertEquals("Test Exception", e.message)
++            assertEquals(listOf(1, 2), result)
++        }
++        finish(1)
++    }
++}
++

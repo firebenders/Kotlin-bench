@@ -1,0 +1,119 @@
+diff --git a/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt b/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt
+index cad34a0d5..2a701c0c1 100644
+--- a/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt
++++ b/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt
+@@ -394,6 +394,7 @@ private fun <T> Flow<T>.timeoutInternal(
+             value.onSuccess {
+                 downStream.emit(it)
+             }.onClosed {
++                it?.let { throw it }
+                 return@onReceiveCatching false
+             }
+             return@onReceiveCatching true
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index 781d5d070..a693aa516 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -4,10 +4,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/common/test/flow/operators/TimeoutCallbackFlowTest.kt b/kotlinx-coroutines-core/common/test/flow/operators/TimeoutCallbackFlowTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/flow/operators/TimeoutCallbackFlowTest.kt
+@@ -0,0 +1,86 @@
++package kotlinx.coroutines.flow.operators
++
++import kotlinx.coroutines.testing.*
++import kotlinx.coroutines.*
++import kotlinx.coroutines.channels.*
++import kotlinx.coroutines.flow.*
++import kotlin.test.*
++import kotlin.time.Duration.Companion.seconds
++
++/**
++ * Test for verifying that exceptions passed to `close()` in callbackFlow are properly
++ * propagated when chained with `timeout` operator directly.
++ * 
++ * This tests the fix for the issue where callbackFlow closed with an exception
++ * would not propagate that exception when combined directly with timeout.
++ */
++class TimeoutCallbackFlowTest : TestBase() {
++    
++    @Test
++    fun testCallbackFlowCloseWithExceptionAndTimeout() = runTest {
++        val flow = callbackFlow<Int> {
++            close(IllegalStateException("Test Exception"))
++        }.timeout(5.seconds)
++        
++        val exception = assertFailsWith<IllegalStateException> {
++            flow.collect()
++        }
++        assertEquals("Test Exception", exception.message)
++    }
++    
++    @Test
++    fun testChannelFlowCloseWithExceptionAndTimeout() = runTest {
++        val flow = channelFlow<Int> {
++            close(IllegalStateException("Test Exception"))
++        }.timeout(5.seconds)
++        
++        val exception = assertFailsWith<IllegalStateException> {
++            flow.collect()
++        }
++        assertEquals("Test Exception", exception.message)
++    }
++    
++    @Test
++    fun testCallbackFlowCloseWithExceptionAndTimeoutWithCatch() = runTest {
++        // Verify that adding catch in between also works (this was the workaround)
++        val flow = callbackFlow<Int> {
++            close(IllegalStateException("Test Exception"))
++        }.catch { throw it }.timeout(5.seconds)
++        
++        val exception = assertFailsWith<IllegalStateException> {
++            flow.collect()
++        }
++        assertEquals("Test Exception", exception.message)
++    }
++    
++    @Test
++    fun testCallbackFlowCloseNormallyWithTimeout() = runTest {
++        // When closing normally (without exception), should complete normally
++        val result = mutableListOf<Int>()
++        val flow = callbackFlow {
++            send(1)
++            send(2)
++            close()
++            awaitClose()
++        }.timeout(5.seconds)
++        
++        flow.collect { result.add(it) }
++        assertEquals(listOf(1, 2), result)
++    }
++    
++    @Test
++    fun testCallbackFlowEmitThenCloseWithExceptionAndTimeout() = runTest {
++        val result = mutableListOf<Int>()
++        val flow = callbackFlow {
++            send(1)
++            close(IllegalStateException("Test Exception after emit"))
++        }.timeout(5.seconds)
++        
++        val exception = assertFailsWith<IllegalStateException> {
++            flow.collect { result.add(it) }
++        }
++        assertEquals("Test Exception after emit", exception.message)
++        assertEquals(listOf(1), result)
++    }
++}
++

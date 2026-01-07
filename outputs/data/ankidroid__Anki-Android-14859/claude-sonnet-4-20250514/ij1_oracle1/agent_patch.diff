@@ -1,0 +1,320 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index c7bb17d62d..e9e3f2b8b6 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.6'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -226,12 +225,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -246,12 +245,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -361,7 +354,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+index 8f8b62c9a3..dcca0a592d 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+@@ -259,13 +259,13 @@ open class CardBrowser :
+         if (which != mOrder) {
+             mOrder = which
+             mOrderAsc = false
+-            which.save(getColUnsafe.config, baseContext.sharedPrefs())
+-            getColUnsafe.config.set("sortBackwards", mOrderAsc)
++            which.save(getColUnsafe.config, baseContext.sharedPrefs(), cardsOrNotes)
++            saveSortBackwards(mOrderAsc)
+             searchCards()
+         } else if (which != SortType.NO_SORTING) {
+             // if the same element is selected again, reverse the order
+             mOrderAsc = !mOrderAsc
+-            getColUnsafe.config.set("sortBackwards", mOrderAsc)
++            saveSortBackwards(mOrderAsc)
+             mCards.reverse()
+             updateList()
+         }
+@@ -466,8 +466,8 @@ open class CardBrowser :
+         registerExternalStorageListener()
+         val preferences = baseContext.sharedPrefs()
+ 
+-        mOrder = SortType.fromCol(col.config, preferences)
+-        mOrderAsc = col.config.get("sortBackwards") ?: false
++        mOrder = SortType.fromCol(col.config, preferences, cardsOrNotes)
++        mOrderAsc = col.config.get(SortType.getSortBackwardsKey(cardsOrNotes)) ?: false
+         mCards.reset()
+         // Create a spinner for column 1
+         val cardsColumn1Spinner = findViewById<Spinner>(R.id.browser_column1_spinner)
+@@ -1196,11 +1196,35 @@ open class CardBrowser :
+ 
+     fun switchCardOrNote(newCardsMode: CardsOrNotes) {
+         launchCatchingTask {
+-            withCol { newCardsMode.saveToCollection(this) }
++            withCol { 
++                // Save current sort order for the current mode before switching
++                mOrder.save(this.config, baseContext.sharedPrefs(), cardsOrNotes)
++                saveSortBackwardsForMode(mOrderAsc, cardsOrNotes)
++                
++                // Save the new mode
++                newCardsMode.saveToCollection(this) 
++                
++                // Load sort order for the new mode
++                mOrder = SortType.fromCol(this.config, baseContext.sharedPrefs(), newCardsMode)
++                mOrderAsc = this.config.get(SortType.getSortBackwardsKey(newCardsMode)) ?: false
++                
++                // Update global sortBackwards for backend compatibility
++                this.config.set("sortBackwards", mOrderAsc)
++            }
+             cardsOrNotes = newCardsMode
+             searchCards()
+         }
+     }
++    
++    private fun saveSortBackwards(orderAsc: Boolean) {
++        getColUnsafe.config.set(SortType.getSortBackwardsKey(cardsOrNotes), orderAsc)
++        getColUnsafe.config.set("sortBackwards", orderAsc)
++    }
++    
++    private fun saveSortBackwardsForMode(orderAsc: Boolean, mode: CardsOrNotes) {
++        getColUnsafe.config.set(SortType.getSortBackwardsKey(mode), orderAsc)
++        getColUnsafe.config.set("sortBackwards", orderAsc)
++    }
+ 
+     fun onTruncate(newTruncateValue: Boolean) {
+         val sharedPrefs = this.sharedPrefs()
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt b/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
+index cc42c2f540..3961a0af37 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
+@@ -47,31 +47,76 @@ enum class SortType(val ankiSortType: String?, val cardBrowserLabelIndex: Int) {
+     REVIEWS("cardReps", 8),
+     LAPSES("cardLapses", 9);
+ 
+-    fun save(config: Config, preferences: SharedPreferences) {
++    fun save(config: Config, preferences: SharedPreferences, cardsOrNotes: CardsOrNotes) {
+         // in the case of 'no sorting', we still need a sort type.
+         // The inverse is handled in `fromCol`
+-        config.set("sortType", this.ankiSortType ?: SORT_FIELD.ankiSortType)
++        val sortKey = Companion.getSortTypeKey(cardsOrNotes)
++        val noSortingKey = Companion.getNoSortingKey(cardsOrNotes)
++        val sortValue = this.ankiSortType ?: SORT_FIELD.ankiSortType
++        
++        // Save mode-specific configuration
++        config.set(sortKey, sortValue)
++        preferences.edit {
++            putBoolean(noSortingKey, this@SortType == NO_SORTING)
++        }
++        
++        // Also save to the global keys for backend compatibility
++        config.set("sortType", sortValue)
+         preferences.edit {
+             putBoolean("cardBrowserNoSorting", this@SortType == NO_SORTING)
+         }
+     }
++    
++    fun save(config: Config, preferences: SharedPreferences) {
++        // Legacy method for backward compatibility - default to CARDS mode
++        save(config, preferences, CardsOrNotes.CARDS)
++    }
+ 
+     /** Converts the [SortType] to a [SortOrder] */
+     fun toSortOrder(): SortOrder =
+         if (this == NO_SORTING) SortOrder.NoOrdering() else SortOrder.UseCollectionOrdering()
+ 
+     companion object {
+-        fun fromCol(config: Config, preferences: SharedPreferences): SortType {
+-            val colOrder = config.get<String>("sortType")
++        fun fromCol(config: Config, preferences: SharedPreferences, cardsOrNotes: CardsOrNotes): SortType {
++            val sortKey = getSortTypeKey(cardsOrNotes)
++            val noSortingKey = getNoSortingKey(cardsOrNotes)
++            
++            val colOrder = config.get<String>(sortKey)
+             val type = entries.firstOrNull { it.ankiSortType == colOrder } ?: NO_SORTING
+-            if (type == SORT_FIELD && preferences.getBoolean("cardBrowserNoSorting", false)) {
++            if (type == SORT_FIELD && preferences.getBoolean(noSortingKey, false)) {
+                 return NO_SORTING
+             }
+             return type
+         }
++        
++        fun fromCol(config: Config, preferences: SharedPreferences): SortType {
++            // Legacy method for backward compatibility - default to CARDS mode
++            return fromCol(config, preferences, CardsOrNotes.CARDS)
++        }
+ 
+         fun fromCardBrowserLabelIndex(index: Int): SortType {
+             return entries.firstOrNull { it.cardBrowserLabelIndex == index } ?: NO_SORTING
+         }
++        
++        private fun getSortTypeKey(cardsOrNotes: CardsOrNotes): String {
++            return when (cardsOrNotes) {
++                CardsOrNotes.CARDS -> "sortType"
++                CardsOrNotes.NOTES -> "sortTypeNotes"
++            }
++        }
++        
++        private fun getNoSortingKey(cardsOrNotes: CardsOrNotes): String {
++            return when (cardsOrNotes) {
++                CardsOrNotes.CARDS -> "cardBrowserNoSorting"
++                CardsOrNotes.NOTES -> "cardBrowserNoSortingNotes"
++            }
++        }
++        
++        fun getSortBackwardsKey(cardsOrNotes: CardsOrNotes): String {
++            return when (cardsOrNotes) {
++                CardsOrNotes.CARDS -> "sortBackwards"
++                CardsOrNotes.NOTES -> "sortBackwardsNotes"
++            }
++        }
+     }
+ }
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserTest.kt
+index 735a1237f3..b55e1937ce 100644
+--- a/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserTest.kt
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserTest.kt
+@@ -755,6 +755,78 @@ class CardBrowserTest : RobolectricTest() {
+         }
+     }
+ 
++    @Test
++    fun sortOrderIsPreservedWhenSwitchingBetweenCardsAndNotes() {
++        // This test verifies the fix for: [BUG]: display order bug for notes
++        // GitHub issue: Notes mode should preserve separate sort order from cards mode
++        
++        val browser = browserWithMultipleNotes
++        
++        // Set initial sort order for cards mode
++        browser.changeCardOrder(SortType.EASE)
++        val initialCardsSort = browser.mOrder
++        val initialCardsAsc = browser.mOrderAsc
++        
++        // Switch to notes mode
++        browser.switchCardOrNote(NOTES)
++        
++        // Change sort order for notes mode
++        browser.changeCardOrder(SortType.CREATED_TIME)
++        val notesSort = browser.mOrder
++        val notesAsc = browser.mOrderAsc
++        
++        // Switch back to cards mode
++        browser.switchCardOrNote(CARDS)
++        
++        // Verify that cards mode preserved its original sort order
++        assertThat("Cards mode should preserve EASE sort", browser.mOrder, equalTo(initialCardsSort))
++        assertThat("Cards mode should preserve sort direction", browser.mOrderAsc, equalTo(initialCardsAsc))
++        
++        // Switch back to notes mode
++        browser.switchCardOrNote(NOTES)
++        
++        // Verify that notes mode preserved its sort order  
++        assertThat("Notes mode should preserve CREATED_TIME sort", browser.mOrder, equalTo(notesSort))
++        assertThat("Notes mode should preserve sort direction", browser.mOrderAsc, equalTo(notesAsc))
++        
++        // Verify config keys are mode-specific
++        val config = col.config
++        assertThat("Cards sort type should be saved", config.get<String>("sortType"), equalTo("cardEase"))
++        assertThat("Notes sort type should be saved", config.get<String>("sortTypeNotes"), equalTo("noteCrt"))
++    }
++
++    @Test  
++    fun notesModeDoesNotAlwaysDefaultToCreatedTime() {
++        // This test addresses the specific bug: "When you select 'notes', it automatically 
++        // sets the display order to 'by created time' oldest to newest"
++        
++        val browser = browserWithMultipleNotes
++        
++        // Start in cards mode with a non-created-time sort
++        browser.changeCardOrder(SortType.SORT_FIELD)
++        assertThat("Cards should be sorted by field", browser.mOrder, equalTo(SortType.SORT_FIELD))
++        
++        // Switch to notes mode - it should use the default SORT_FIELD, not CREATED_TIME
++        browser.switchCardOrNote(NOTES)
++        assertThat("Notes mode should not automatically default to CREATED_TIME", 
++                   browser.mOrder, not(equalTo(SortType.CREATED_TIME)))
++        assertThat("Notes mode should use reasonable default", 
++                   browser.mOrder, equalTo(SortType.SORT_FIELD))
++        
++        // Change to a different sort order in notes mode
++        browser.changeCardOrder(SortType.DUE_TIME) 
++        assertThat("Notes mode sort should change", browser.mOrder, equalTo(SortType.DUE_TIME))
++        
++        // Switch back to cards mode and then to notes again
++        browser.switchCardOrNote(CARDS)
++        browser.switchCardOrNote(NOTES)
++        
++        // Notes mode should remember DUE_TIME, not reset to CREATED_TIME
++        assertThat("Notes mode should remember DUE_TIME sort", browser.mOrder, equalTo(SortType.DUE_TIME))
++        assertThat("Notes mode should not reset to CREATED_TIME", 
++                   browser.mOrder, not(equalTo(SortType.CREATED_TIME)))
++    }
++
+     private fun assertUndoDoesNotContain(browser: CardBrowser, @StringRes resId: Int) {
+         val shadowActivity = shadowOf(browser)
+         val item = shadowActivity.optionsMenu.findItem(R.id.action_undo)
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

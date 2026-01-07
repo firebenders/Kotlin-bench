@@ -1,0 +1,182 @@
+diff --git a/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt b/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
+index e00c1fdd6..ed30d9cad 100644
+--- a/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
++++ b/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
+@@ -219,9 +219,16 @@ internal suspend fun <T, V> withContextUndispatched(
+     block: suspend (V) -> T
+ ): T =
+     suspendCoroutineUninterceptedOrReturn { uCont ->
+-        withCoroutineContext(newContext, countOrElement) {
+-            block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))
++        val result = try {
++            withCoroutineContext(newContext, countOrElement) {
++                block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))
++            }
++        } catch (e: Throwable) {
++            val reportException = if (e is DispatchException) e.cause else e
++            uCont.resumeWithException(reportException)
++            return@suspendCoroutineUninterceptedOrReturn COROUTINE_SUSPENDED
+         }
++        result
+     }
+ 
+ // Continuation that links the caller with uCont with walkable CoroutineStackFrame
+
+diff --git a/kotlinx-coroutines-core/common/test/flow/operators/FlowOnDispatcherExceptionTest.kt b/kotlinx-coroutines-core/common/test/flow/operators/FlowOnDispatcherExceptionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/flow/operators/FlowOnDispatcherExceptionTest.kt
+@@ -0,0 +1,116 @@
++package kotlinx.coroutines.flow
++
++import kotlinx.coroutines.testing.*
++import kotlinx.coroutines.*
++import kotlin.coroutines.*
++import kotlin.test.*
++
++/**
++ * Test for handling dispatcher exceptions in flowOn.
++ * This test verifies that when a dispatcher throws an exception,
++ * the flow collection properly propagates the exception instead of hanging.
++ * 
++ * Related to: https://github.com/JetBrains/compose-multiplatform/issues/4835
++ */
++class FlowOnDispatcherExceptionTest : TestBase() {
++
++    /**
++     * A dispatcher that throws an exception when isDispatchNeeded is called.
++     * This simulates the behavior of Dispatchers.Main.immediate when the Main dispatcher
++     * is not available in the classpath.
++     */
++    private class FailingDispatcher(
++        private val exceptionMessage: String = "Test dispatcher exception"
++    ) : CoroutineDispatcher() {
++        override fun dispatch(context: CoroutineContext, block: Runnable) {
++            throw IllegalStateException(exceptionMessage)
++        }
++
++        override fun isDispatchNeeded(context: CoroutineContext): Boolean {
++            throw IllegalStateException(exceptionMessage)
++        }
++    }
++
++    @Test
++    fun testFlowOnWithFailingDispatcher() = runTest {
++        val failingDispatcher = FailingDispatcher("Dispatcher not available")
++        
++        val exception = assertFailsWith<IllegalStateException> {
++            flowOf(1, 2, 3)
++                .flowOn(failingDispatcher)
++                .collect {
++                    println("collect: $it")
++                }
++        }
++        
++        assertEquals("Dispatcher not available", exception.message)
++    }
++
++    @Test
++    fun testFlowOnWithFailingDispatcherInChain() = runTest {
++        val failingDispatcher = FailingDispatcher("Dispatcher not available")
++        
++        val exception = assertFailsWith<IllegalStateException> {
++            flowOf(1, 2, 3)
++                .map { it * 2 }
++                .flowOn(failingDispatcher)
++                .map { it + 1 }
++                .collect {
++                    println("collect: $it")
++                }
++        }
++        
++        assertEquals("Dispatcher not available", exception.message)
++    }
++
++    @Test
++    fun testFlowOnWithFailingDispatcherAndBuffer() = runTest {
++        val failingDispatcher = FailingDispatcher("Dispatcher not available")
++        
++        val exception = assertFailsWith<IllegalStateException> {
++            flowOf(1, 2, 3)
++                .buffer()
++                .flowOn(failingDispatcher)
++                .collect {
++                    println("collect: $it")
++                }
++        }
++        
++        assertEquals("Dispatcher not available", exception.message)
++    }
++
++    @Test
++    fun testMultipleFlowOnWithFailingDispatcher() = runTest {
++        val failingDispatcher = FailingDispatcher("Dispatcher not available")
++        
++        val exception = assertFailsWith<IllegalStateException> {
++            flowOf(1, 2, 3)
++                .flowOn(Dispatchers.Default)  // This works
++                .map { it * 2 }
++                .flowOn(failingDispatcher)  // This fails
++                .collect {
++                    println("collect: $it")
++                }
++        }
++        
++        assertEquals("Dispatcher not available", exception.message)
++    }
++
++    @Test
++    fun testFlowOnWithDispatchException() = runTest {
++        // Test that the dispatcher exception is properly unwrapped
++        val failingDispatcher = FailingDispatcher("Test exception")
++        
++        try {
++            flowOf(1, 2, 3)
++                .flowOn(failingDispatcher)
++                .collect()
++            fail("Expected exception")
++        } catch (e: Exception) {
++            // The exception should be the original exception, not wrapped in DispatchException
++            assertTrue(e is IllegalStateException)
++            assertEquals("Test exception", e.message)
++        }
++    }
++}
++
+
+diff --git a/test-dispatcher-exception.kt b/test-dispatcher-exception.kt
+new file mode 100644
+--- /dev/null
++++ b/test-dispatcher-exception.kt
+@@ -0,0 +1,31 @@
++import kotlinx.coroutines.*
++import kotlinx.coroutines.flow.*
++import kotlin.coroutines.*
++
++class FailingDispatcher : CoroutineDispatcher() {
++    override fun dispatch(context: CoroutineContext, block: Runnable) {
++        throw IllegalStateException("Dispatcher not available")
++    }
++
++    override fun isDispatchNeeded(context: CoroutineContext): Boolean {
++        throw IllegalStateException("Dispatcher not available")
++    }
++}
++
++fun main() = runBlocking {
++    println("Testing flowOn with failing dispatcher...")
++    
++    try {
++        flowOf(1, 2, 3)
++            .flowOn(FailingDispatcher())
++            .collect {
++                println("collect: $it")
++            }
++        println("ERROR: No exception was thrown!")
++    } catch (e: Exception) {
++        println("SUCCESS: Exception was caught: ${e.message}")
++    }
++    
++    println("Test completed.")
++}
++

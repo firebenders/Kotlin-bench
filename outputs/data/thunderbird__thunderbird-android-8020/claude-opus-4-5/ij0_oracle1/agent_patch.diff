@@ -1,0 +1,134 @@
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
+index a90f133eda..8d1a5b9119 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
+@@ -186,6 +186,9 @@ public class RecipientSelectView extends TokenCompleteTextView<Recipient> implem
+         } catch (NonAsciiEmailAddressException e) {
+             setError(getContext().getString(R.string.recipient_error_non_ascii));
+             return null;
++        } catch (InvalidEmailAddressException e) {
++            setError(getContext().getString(R.string.recipient_error_parse_failed));
++            return null;
+         }
+     }
+ 
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+index a14cb14bdb..9867d7002f 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+@@ -11,13 +11,14 @@ import org.apache.james.mime4j.util.CharsetUtil
+  */
+ internal class UserInputEmailAddressParser {
+ 
+-    @Throws(NonAsciiEmailAddressException::class)
++    @Throws(NonAsciiEmailAddressException::class, InvalidEmailAddressException::class)
+     fun parse(input: String): List<Address> {
+         return Address.parseUnencoded(input)
+             .mapNotNull { address ->
+                 when {
+                     address.isIncomplete() -> null
+                     address.isNonAsciiAddress() -> throw NonAsciiEmailAddressException(address.address)
++                    address.hasInvalidHostname() -> throw InvalidEmailAddressException(address.address)
+                     else -> Address.parse(address.toEncodedString()).firstOrNull()
+                 }
+             }
+@@ -26,6 +27,23 @@ internal class UserInputEmailAddressParser {
+     private fun Address.isIncomplete() = hostname.isNullOrBlank()
+ 
+     private fun Address.isNonAsciiAddress() = !CharsetUtil.isASCII(address)
++
++    /**
++     * Checks if the hostname part of the address contains invalid characters.
++     * According to RFC 5321, the domain part must be a valid hostname consisting
++     * of alphanumeric characters, hyphens, and dots.
++     */
++    private fun Address.hasInvalidHostname(): Boolean {
++        val hostname = hostname ?: return false
++        return !VALID_HOSTNAME_PATTERN.matches(hostname)
++    }
++
++    companion object {
++        // Hostname pattern: alphanumeric characters, hyphens, and dots only
++        // Each label must start and end with alphanumeric character
++        private val VALID_HOSTNAME_PATTERN = Regex("^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$")
++    }
+ }
+ 
+ internal class NonAsciiEmailAddressException(message: String) : Exception(message)
++internal class InvalidEmailAddressException(message: String) : Exception(message)
+
+diff --git a/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidAddressTest.kt b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidAddressTest.kt
+new file mode 100644
+--- /dev/null
++++ b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidAddressTest.kt
+@@ -0,0 +1,70 @@
++package com.fsck.k9.view
++
++import assertk.assertFailure
++import assertk.assertThat
++import assertk.assertions.containsExactly
++import assertk.assertions.isEmpty
++import assertk.assertions.isInstanceOf
++import com.fsck.k9.mail.Address
++import kotlin.test.Test
++
++/**
++ * Tests for validation of invalid email addresses in UserInputEmailAddressParser.
++ * These tests specifically verify the fix for the issue where email addresses
++ * with invalid hostnames (e.g., containing '/') were not being properly validated.
++ */
++class UserInputEmailAddressParserInvalidAddressTest {
++    private val parser = UserInputEmailAddressParser()
++
++    @Test
++    fun `email address with trailing slash should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user@gmail.com/")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `email address with slash in hostname should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user@domain.com/path")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `email address with underscore in hostname should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user@domain_test.com")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `valid email address should be parsed correctly`() {
++        val addresses = parser.parse("user@domain.example")
++        assertThat(addresses).containsExactly(Address("user@domain.example"))
++    }
++
++    @Test
++    fun `email address with hyphen in hostname should be parsed correctly`() {
++        val addresses = parser.parse("user@my-domain.com")
++        assertThat(addresses).containsExactly(Address("user@my-domain.com"))
++    }
++
++    @Test
++    fun `email address with numbers in hostname should be parsed correctly`() {
++        val addresses = parser.parse("user@domain123.com")
++        assertThat(addresses).containsExactly(Address("user@domain123.com"))
++    }
++
++    @Test
++    fun `email address with multiple subdomains should be parsed correctly`() {
++        val addresses = parser.parse("user@sub.domain.example.org")
++        assertThat(addresses).containsExactly(Address("user@sub.domain.example.org"))
++    }
++
++    @Test
++    fun `email address with single character labels should be parsed correctly`() {
++        val addresses = parser.parse("user@a.b.c")
++        assertThat(addresses).containsExactly(Address("user@a.b.c"))
++    }
++}
++

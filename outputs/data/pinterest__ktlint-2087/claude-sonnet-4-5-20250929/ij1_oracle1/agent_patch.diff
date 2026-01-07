@@ -1,0 +1,336 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 26e4a6c2..42296b5a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -44,6 +44,7 @@ At this point in time, it is not yet decided what the next steps will be. Ktlint
+ 
+ ### Changed
+ 
++* The `format` function now automatically reruns the formatting process until no more auto-correctable errors are found, with a maximum of 3 runs to prevent infinite loops. This ensures that complex rule execution dependencies are resolved without requiring multiple manual format invocations.
+ * Fix Java interoperability issues with `RuleId` and `RuleSetId` classes. Those classes were defined as value classes in `0.49.0` and `0.49.1`. Although the classes were marked with `@JvmInline` it seems that it is not possible to uses those classes from Java base API Consumers like Spotless. The classes have now been replaced with data classes ([#2041](https://github.com/pinterest/ktlint/issues/2041))
+ * Update dependency `info.picocli:picocli` to v4.7.4
+ * Update dependency `org.junit.jupiter:junit-jupiter` to v5.9.3
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+index eec63c77..a67a8faf 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+@@ -133,44 +133,83 @@ public class KtLintRuleEngine(
+         LOGGER.debug { "Starting with formatting file '${code.fileNameOrStdin()}'" }
+ 
+         val hasUTF8BOM = code.content.startsWith(UTF8_BOM)
+-        val ruleExecutionContext = createRuleExecutionContext(this, code)
++        var currentCode = code
++        var ruleExecutionContext = createRuleExecutionContext(this, currentCode)
+ 
+         var tripped = false
+         var mutated = false
+         val errors = mutableSetOf<Pair<LintError, Boolean>>()
+-        val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+-        visitorProvider
+-            .visitor()
+-            .invoke { rule ->
+-                ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
+-                    tripped = true
+-                    if (canBeAutoCorrected) {
+-                        mutated = true
+-                        /**
+-                         * Rebuild the suppression locator after each change in the AST as the offsets of the
+-                         * suppression hints might have changed.
+-                         */
+-                        ruleExecutionContext.rebuildSuppressionLocator()
+-                    }
+-                    val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+-                    errors.add(
+-                        Pair(
+-                            LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
+-                            // It is assumed that a rule that emits that an error can be autocorrected, also
+-                            // does correct the error.
+-                            canBeAutoCorrected,
+-                        ),
+-                    )
+-                    // In trace mode report the violation immediately. The order in which violations are actually found might be different
+-                    // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
+-                    // violations are being solved.
+-                    LOGGER.trace {
+-                        "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
+-                            canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
++
++        // Repeat format step until no more errors are found which can be auto-corrected.
++        // To prevent infinite reruns, limit to 3 reruns maximum.
++        var formatRun = 0
++        val maxFormatRuns = 3
++        var mutatedInPreviousRun = false
++
++        do {
++            if (formatRun > 0) {
++                LOGGER.debug { "Rerunning format for file '${code.fileNameOrStdin()}' (run ${formatRun + 1})" }
++                // Get the current formatted content and recreate the execution context
++                val formattedContent = ruleExecutionContext
++                    .rootNode
++                    .text
++                    .replace("\n", ruleExecutionContext.determineLineSeparator(code.content))
++                // Create a new Code object with the formatted content while preserving file path information
++                currentCode = Code.fromSnippet(formattedContent, currentCode.script)
++                ruleExecutionContext = createRuleExecutionContext(this, currentCode)
++            }
++
++            var mutatedInCurrentRun = false
++            val isLastFormatRun = formatRun == maxFormatRuns - 1
++            val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
++
++            // On the last possible run, or if the previous run didn't mutate, collect errors for reporting
++            val shouldCollectErrors = isLastFormatRun || !mutatedInPreviousRun
++
++            visitorProvider
++                .visitor()
++                .invoke { rule ->
++                    ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
++                        tripped = true
++                        if (canBeAutoCorrected) {
++                            mutated = true
++                            mutatedInCurrentRun = true
++                            /**
++                             * Rebuild the suppression locator after each change in the AST as the offsets of the
++                             * suppression hints might have changed.
++                             */
++                            ruleExecutionContext.rebuildSuppressionLocator()
++                        }
++                        if (shouldCollectErrors) {
++                            val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
++                            errors.add(
++                                Pair(
++                                    LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
++                                    // It is assumed that a rule that emits that an error can be autocorrected, also
++                                    // does correct the error.
++                                    canBeAutoCorrected,
++                                ),
++                            )
++                        }
++                        // In trace mode report the violation immediately. The order in which violations are actually found might be different
++                        // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
++                        // violations are being solved.
++                        LOGGER.trace {
++                            val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
++                            "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
++                                canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
++                        }
+                     }
+                 }
+-            }
++
++            mutatedInPreviousRun = mutatedInCurrentRun
++            formatRun++
++
++            // Continue looping if mutations were made and we haven't exceeded the max runs
++        } while (mutatedInPreviousRun && formatRun < maxFormatRuns)
++
+         if (tripped) {
++            val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+             visitorProvider
+                 .visitor()
+                 .invoke { rule ->
+
+diff --git a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/ReformatTest.kt b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/ReformatTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/ReformatTest.kt
+@@ -0,0 +1,191 @@
++package com.pinterest.ktlint.rule.engine.api
++
++import com.pinterest.ktlint.rule.engine.core.api.ElementType
++import com.pinterest.ktlint.rule.engine.core.api.Rule
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import org.assertj.core.api.Assertions.assertThat
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests to verify that the format function reruns until no more auto-correctable errors are found,
++ * with a maximum of 3 reruns to prevent infinite loops.
++ */
++class ReformatTest {
++    @Test
++    fun `Given code with no violations, format should not modify it`() {
++        val ktLintRuleEngine =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider { TestRule() },
++                    ),
++            )
++
++        val code =
++            Code.fromSnippet(
++                """
++                fun foo() {}
++                """.trimIndent(),
++            )
++
++        val formatted = ktLintRuleEngine.format(code)
++
++        assertThat(formatted).isEqualTo(
++            """
++            fun foo() {}
++            """.trimIndent(),
++        )
++    }
++
++    @Test
++    fun `Given a code that requires multiple format passes due to rule execution order`() {
++        // This test verifies that formatting reruns when rules create situations that
++        // require another pass. The ReplaceXWithYRule will replace 'XXX' with 'YYY',
++        // then the ReplaceYWithZRule will replace 'YYY' with 'ZZZ' in the next pass.
++        val ktLintRuleEngine =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider { ReplaceXWithYRule() },
++                        RuleProvider { ReplaceYWithZRule() },
++                    ),
++            )
++
++        val code =
++            Code.fromSnippet(
++                """
++                // XXX
++                fun foo() {}
++                """.trimIndent(),
++            )
++
++        val formatted = ktLintRuleEngine.format(code)
++
++        // After multiple passes, XXX -> YYY -> ZZZ
++        assertThat(formatted).isEqualTo(
++            """
++            // ZZZ
++            fun foo() {}
++            """.trimIndent(),
++        )
++    }
++
++    @Test
++    fun `Given code that would cause infinite rewrites, limit to 3 reruns`() {
++        // This test ensures the maximum of 3 reruns prevents infinite loops
++        var formatRunCount = 0
++        val ktLintRuleEngine =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider { CountingRule { formatRunCount++ } },
++                    ),
++            )
++
++        val code =
++            Code.fromSnippet(
++                """
++                // INFINITE
++                fun foo() {}
++                """.trimIndent(),
++            )
++
++        val formatted = ktLintRuleEngine.format(code)
++
++        // Should run exactly 3 times (initial + 2 reruns = 3 total, but we limited to max 3 runs)
++        // The CountingRule will attempt to fix infinitely, but we stop at 3 runs
++        assertThat(formatRunCount).isEqualTo(3)
++        // The comment should have been appended with 'X' three times
++        assertThat(formatted).contains("// INFINITEXXX")
++    }
++
++    /**
++     * A test rule that does nothing - used to verify no-change scenarios
++     */
++    private class TestRule :
++        Rule(
++            ruleId = RuleId("test:test-rule"),
++            about = About(),
++        ) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++            // No-op
++        }
++    }
++
++    /**
++     * A rule that replaces XXX with YYY in comments
++     */
++    private class ReplaceXWithYRule :
++        Rule(
++            ruleId = RuleId("test:replace-x-with-y"),
++            about = About(),
++        ) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++            if (node.elementType == ElementType.EOL_COMMENT && node.text.contains("XXX")) {
++                emit(node.startOffset, "Found XXX, should be YYY", true)
++                if (autoCorrect) {
++                    (node as LeafPsiElement).rawReplaceWithText(node.text.replace("XXX", "YYY"))
++                }
++            }
++        }
++    }
++
++    /**
++     * A rule that replaces YYY with ZZZ in comments
++     */
++    private class ReplaceYWithZRule :
++        Rule(
++            ruleId = RuleId("test:replace-y-with-z"),
++            about = About(),
++        ) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++            if (node.elementType == ElementType.EOL_COMMENT && node.text.contains("YYY")) {
++                emit(node.startOffset, "Found YYY, should be ZZZ", true)
++                if (autoCorrect) {
++                    (node as LeafPsiElement).rawReplaceWithText(node.text.replace("YYY", "ZZZ"))
++                }
++            }
++        }
++    }
++
++    /**
++     * A rule that always makes changes to test the maximum rerun limit
++     */
++    private class CountingRule(val onFormat: () -> Unit) :
++        Rule(
++            ruleId = RuleId("test:counting-rule"),
++            about = About(),
++        ) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++            // Only modify INFINITE markers in comments and keep adding more characters
++            if (node.elementType == ElementType.EOL_COMMENT && node.text.contains("INFINITE")) {
++                emit(node.startOffset, "Always autocorrect", true)
++                if (autoCorrect) {
++                    onFormat()
++                    // Keep modifying the comment to trigger more reruns
++                    (node as LeafPsiElement).rawReplaceWithText(node.text + "X")
++                }
++            }
++        }
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

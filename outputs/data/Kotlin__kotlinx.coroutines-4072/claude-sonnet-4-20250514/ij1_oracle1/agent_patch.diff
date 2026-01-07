@@ -1,0 +1,109 @@
+diff --git a/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt b/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt
+index cad34a0d5..96965e77a 100644
+--- a/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt
++++ b/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt
+@@ -393,7 +393,8 @@ private fun <T> Flow<T>.timeoutInternal(
+         values.onReceiveCatching { value ->
+             value.onSuccess {
+                 downStream.emit(it)
+-            }.onClosed {
++            }.onFailure {
++                it?.let { throw it }
+                 return@onReceiveCatching false
+             }
+             return@onReceiveCatching true
+diff --git a/kotlinx-coroutines-core/common/test/flow/operators/TimeoutTest.kt b/kotlinx-coroutines-core/common/test/flow/operators/TimeoutTest.kt
+index a2ca101ef..8f96e664b 100644
+--- a/kotlinx-coroutines-core/common/test/flow/operators/TimeoutTest.kt
++++ b/kotlinx-coroutines-core/common/test/flow/operators/TimeoutTest.kt
+@@ -245,4 +245,23 @@ class TimeoutTest : TestBase() {
+             finish(2)
+         })
+     }
++
++    @Test
++    fun testCallbackFlowTimeoutException() = runTest {
++        val expectedException = IllegalStateException("Test Exception")
++        
++        // Test that callbackFlow with timeout propagates close exceptions
++        var caughtException: Throwable? = null
++        try {
++            val flow = callbackFlow<Int> {
++                close(expectedException)
++            }.timeout(5.seconds)
++            
++            flow.collect()
++        } catch (e: Exception) {
++            caughtException = e
++        }
++        
++        assertSame(expectedException, caughtException)
++    }
+ }
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index 781d5d070..a693aa516 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -4,10 +4,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+diff --git a/kotlinx-coroutines-core/jvm/test/flow/CallbackFlowTest.kt b/kotlinx-coroutines-core/jvm/test/flow/CallbackFlowTest.kt
+index f59bc1b2c..bb7c0b079 100644
+--- a/kotlinx-coroutines-core/jvm/test/flow/CallbackFlowTest.kt
++++ b/kotlinx-coroutines-core/jvm/test/flow/CallbackFlowTest.kt
+@@ -7,6 +7,7 @@ import kotlinx.coroutines.testing.flow.*
+ import org.junit.Test
+ import kotlin.concurrent.*
+ import kotlin.test.*
++import kotlin.time.Duration.Companion.seconds
+ 
+ class CallbackFlowTest : TestBase() {
+ 
+@@ -116,6 +117,39 @@ class CallbackFlowTest : TestBase() {
+         }
+     }
+ 
++    @Test
++    fun testCallbackFlowTimeoutException() = runTest {
++        val expectedException = IllegalStateException("Test Exception")
++        
++        // Test 1: callbackFlow with timeout should propagate exceptions
++        var caughtException: Throwable? = null
++        try {
++            val flow = callbackFlow<Int> {
++                close(expectedException)
++            }.timeout(5.seconds)
++            
++            flow.collect()
++        } catch (e: Exception) {
++            caughtException = e
++        }
++        
++        assertSame(expectedException, caughtException)
++        
++        // Test 2: verify the fix works with intermediate operators too
++        caughtException = null
++        try {
++            val flow = callbackFlow<Int> {
++                close(expectedException)
++            }.onEach { /* no-op */ }.timeout(5.seconds)
++            
++            flow.collect()
++        } catch (e: Exception) {
++            caughtException = e
++        }
++        
++        assertSame(expectedException, caughtException)
++    }
++
+     private fun Flow<Int>.merge(other: Flow<Int>): Flow<Int> = channelFlow {
+         launch {
+             collect { send(it) }

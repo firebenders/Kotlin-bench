@@ -1,0 +1,173 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
+index 167cc132..f679f613 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
+@@ -45,6 +45,7 @@ import com.pinterest.ktlint.core.ast.ElementType.WHITE_SPACE
+ import com.pinterest.ktlint.core.ast.children
+ import com.pinterest.ktlint.core.ast.firstChildLeafOrSelf
+ import com.pinterest.ktlint.core.ast.isPartOfComment
++import com.pinterest.ktlint.core.ast.isPartOfString
+ import com.pinterest.ktlint.core.ast.isWhiteSpace
+ import com.pinterest.ktlint.core.ast.isWhiteSpaceWithNewline
+ import com.pinterest.ktlint.core.ast.isWhiteSpaceWithoutNewline
+@@ -131,6 +132,10 @@ public class WrappingRule :
+         if (startOfBlock?.elementType != LBRACE) {
+             return
+         }
++        if (startOfBlock.isPartOfString()) {
++            // Skip wrapping logic for blocks inside string templates
++            return
++        }
+         val blockIsPrecededByWhitespaceContainingNewline = startOfBlock.nextLeaf().isWhiteSpaceWithNewline()
+         val endOfBlock = node.lastChildLeafOrSelf().nextLeaf { !it.isPartOfComment() && !it.isWhiteSpace() }
+         val blockIsFollowedByWhitespaceContainingNewline = endOfBlock?.prevLeaf().isWhiteSpaceWithNewline()
+@@ -572,6 +577,10 @@ public class WrappingRule :
+             if (startOfBlock?.elementType != LBRACE) {
+                 return
+             }
++            if (startOfBlock.isPartOfString()) {
++                // Skip wrapping logic for blocks inside string templates
++                return
++            }
+             val blockIsPrecededByWhitespaceContainingNewline = startOfBlock.nextLeaf().isWhiteSpaceWithNewline()
+             val endOfBlock = node.lastChildLeafOrSelf().nextLeaf { !it.isPartOfComment() && !it.isWhiteSpace() }
+             val blockIsFollowedByWhitespaceContainingNewline = endOfBlock?.prevLeaf().isWhiteSpaceWithNewline()
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleIssueTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleIssueTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleIssueTest.kt
+@@ -0,0 +1,125 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.MULTILINE_STRING_QUOTE
++import org.junit.jupiter.api.Test
++
++/**
++ * Test for raw string false positive with let blocks.
++ * Issue: When using `let` blocks inside raw strings with lines longer than max_line_length,
++ * the wrapping rule incorrectly reports "Missing newline after {".
++ */
++internal class WrappingRuleIssueTest {
++    private val wrappingRuleAssertThat = assertThatRule { WrappingRule() }
++
++    @Test
++    fun `Given a raw string with let block inside and line exceeds max line length, should not report wrapping violation`() {
++        val code =
++            """
++            package test
++
++            class QueryGenerator {
++                fun getQueryString(query: QueryRequest): String {
++                    val q = $MULTILINE_STRING_QUOTE
++                        SELECT *
++                        FROM table_name_long_enough_so_max_line_length_is_met_and_wrapping_rule_is_violated_and_generates_an_error
++                        WHERE 1 = 1
++                        ${'$'}{query.gameId?.let { "AND id = ?" } ?: ""}
++                    $MULTILINE_STRING_QUOTE
++                    return q
++                }
++            }
++
++            data class QueryRequest(
++                val gameId: String?,
++            )
++            """.trimIndent()
++        // This should not produce any lint violations
++        wrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 160)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a raw string with let block inside and short lines, should not report wrapping violation`() {
++        val code =
++            """
++            package test
++
++            class QueryGenerator {
++                fun getQueryString(query: QueryRequest): String {
++                    val q = $MULTILINE_STRING_QUOTE
++                        SELECT *
++                        FROM table
++                        WHERE 1 = 1
++                        ${'$'}{query.gameId?.let { "AND id = ?" } ?: ""}
++                    $MULTILINE_STRING_QUOTE
++                    return q
++                }
++            }
++
++            data class QueryRequest(
++                val gameId: String?,
++            )
++            """.trimIndent()
++        // This should not produce any lint violations
++        wrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 160)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a raw string with nested blocks inside, should not report wrapping violation`() {
++        val code =
++            """
++            package test
++
++            class QueryGenerator {
++                fun getQueryString(query: QueryRequest): String {
++                    val q = $MULTILINE_STRING_QUOTE
++                        SELECT *
++                        FROM table_name_long_enough_so_max_line_length_is_met_and_wrapping_rule_is_violated_and_generates_an_error
++                        WHERE 1 = 1
++                        ${'$'}{query.gameId?.let { id -> query.name?.let { name -> "AND id = ${'$'}id AND name = ${'$'}name" } ?: "AND id = ${'$'}id" } ?: ""}
++                    $MULTILINE_STRING_QUOTE
++                    return q
++                }
++            }
++
++            data class QueryRequest(
++                val gameId: String?,
++                val name: String?,
++            )
++            """.trimIndent()
++        // This should not produce any lint violations
++        wrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 160)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a regular string with let block inside, should not report wrapping violation`() {
++        val code =
++            """
++            package test
++
++            class QueryGenerator {
++                fun getQueryString(query: QueryRequest): String {
++                    val q = "SELECT * FROM table_name_long_enough_so_max_line_length_is_met_and_wrapping_rule_is_violated WHERE 1 = 1 ${'$'}{query.gameId?.let { "AND id = ?" } ?: ""}"
++                    return q
++                }
++            }
++
++            data class QueryRequest(
++                val gameId: String?,
++            )
++            """.trimIndent()
++        // This should not produce any lint violations
++        wrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 160)
++            .hasNoLintViolations()
++    }
++
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

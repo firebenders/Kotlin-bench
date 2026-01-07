@@ -1,0 +1,268 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 5daff4f4c4..13018a52f2 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.9.0'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -228,12 +227,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -248,12 +247,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -366,7 +359,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.5.1'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/ViewerResourceHandler.kt b/AnkiDroid/src/main/java/com/ichi2/anki/ViewerResourceHandler.kt
+index 378802bc6d..168e84e265 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/ViewerResourceHandler.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/ViewerResourceHandler.kt
+@@ -38,11 +38,21 @@ class ViewerResourceHandler(context: Context, private val authority: String) {
+ 
+     fun shouldInterceptRequest(request: WebResourceRequest): WebResourceResponse? {
+         val url = request.url
+-        val path = url.path
++        val urlPath = url.path
+ 
+-        if (request.method != "GET" || path == null || url.authority != authority) {
++        if (request.method != "GET" || urlPath == null || url.authority != authority) {
+             return null
+         }
++
++        // Handle legacy filenames with unencoded # characters
++        // When # is not encoded in HTML (e.g., <img src="file#name.jpg">),
++        // the URL parser treats everything after # as a fragment, not part of the path
++        val path = if (url.fragment != null) {
++            "$urlPath#${url.fragment}"
++        } else {
++            urlPath
++        }
++
+         if (path == "/favicon.ico") {
+             return WebResourceResponse(null, null, ByteArrayInputStream(ByteArray(0)))
+         }
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index df05afef76..4d2ca9684e 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {
+
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/ViewerResourceHandlerTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/ViewerResourceHandlerTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/ViewerResourceHandlerTest.kt
+@@ -0,0 +1,152 @@
++/*
++ * Copyright (c) 2025 Ankitects Pty Ltd <https://apps.ankiweb.net>
++ *
++ * This program is free software; you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License as published by the Free Software
++ * Foundation; either version 3 of the License, or (at your option) any later
++ * version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT ANY
++ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
++ * PARTICULAR PURPOSE. See the GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++package com.ichi2.anki
++
++import android.content.Context
++import android.net.Uri
++import android.webkit.WebResourceRequest
++import androidx.test.core.app.ApplicationProvider
++import androidx.test.ext.junit.runners.AndroidJUnit4
++import com.ichi2.testutils.JvmTest
++import org.hamcrest.MatcherAssert.assertThat
++import org.hamcrest.Matchers.notNullValue
++import org.hamcrest.Matchers.nullValue
++import org.junit.Before
++import org.junit.Test
++import org.junit.runner.RunWith
++import java.io.File
++
++@RunWith(AndroidJUnit4::class)
++class ViewerResourceHandlerTest : JvmTest() {
++    private lateinit var mediaDir: File
++    private lateinit var handler: ViewerResourceHandler
++    private val authority = "127.0.0.1:40001"
++
++    @Before
++    override fun setUp() {
++        super.setUp()
++        val context = ApplicationProvider.getApplicationContext<Context>()
++        mediaDir = CollectionHelper.getMediaDirectory(context)
++        mediaDir.mkdirs()
++        handler = ViewerResourceHandler(context, authority)
++    }
++
++    @Test
++    fun testNormalFilename() {
++        // Create a test file with a normal filename
++        val testFile = File(mediaDir, "normal_image.jpg")
++        testFile.createNewFile()
++        testFile.writeText("test content")
++
++        try {
++            val request = createMockRequest("http://$authority/normal_image.jpg")
++            val response = handler.shouldInterceptRequest(request)
++            assertThat("Normal filename should be found", response, notNullValue())
++        } finally {
++            testFile.delete()
++        }
++    }
++
++    @Test
++    fun testFilenameWithHashInFragment() {
++        // Create a test file with # in the filename
++        val testFile = File(mediaDir, "image#test.jpg")
++        testFile.createNewFile()
++        testFile.writeText("test content")
++
++        try {
++            // When HTML contains <img src="image#test.jpg">, the URL parser treats
++            // everything after # as a fragment, so we simulate that here
++            val request = createMockRequest("http://$authority/image#test.jpg")
++            val response = handler.shouldInterceptRequest(request)
++            assertThat("Filename with # should be found", response, notNullValue())
++        } finally {
++            testFile.delete()
++        }
++    }
++
++    @Test
++    fun testFilenameWithEncodedHash() {
++        // Create a test file with # in the filename
++        val testFile = File(mediaDir, "image#test.jpg")
++        testFile.createNewFile()
++        testFile.writeText("test content")
++
++        try {
++            // When properly encoded in HTML as <img src="image%23test.jpg">,
++            // the URL path will contain the decoded #
++            val request = createMockRequest("http://$authority/image%23test.jpg")
++            val response = handler.shouldInterceptRequest(request)
++            assertThat("Filename with encoded # should be found", response, notNullValue())
++        } finally {
++            testFile.delete()
++        }
++    }
++
++    @Test
++    fun testNonExistentFile() {
++        val request = createMockRequest("http://$authority/nonexistent.jpg")
++        val response = handler.shouldInterceptRequest(request)
++        assertThat("Non-existent file should return null", response, nullValue())
++    }
++
++    @Test
++    fun testWrongAuthority() {
++        val testFile = File(mediaDir, "test.jpg")
++        testFile.createNewFile()
++        testFile.writeText("test content")
++
++        try {
++            val request = createMockRequest("http://wrong.authority:1234/test.jpg")
++            val response = handler.shouldInterceptRequest(request)
++            assertThat("Wrong authority should return null", response, nullValue())
++        } finally {
++            testFile.delete()
++        }
++    }
++
++    @Test
++    fun testFilenameWithMultipleHashes() {
++        // Create a test file with multiple # characters
++        // Note: URLs can only have one fragment, so "file#name#2.jpg" will be parsed as
++        // path="/file" and fragment="name#2.jpg"
++        val testFile = File(mediaDir, "file#name#2.jpg")
++        testFile.createNewFile()
++        testFile.writeText("test content")
++
++        try {
++            val request = createMockRequest("http://$authority/file#name#2.jpg")
++            val response = handler.shouldInterceptRequest(request)
++            assertThat("Filename with multiple # should be found", response, notNullValue())
++        } finally {
++            testFile.delete()
++        }
++    }
++
++    private fun createMockRequest(urlString: String): WebResourceRequest {
++        return object : WebResourceRequest {
++            private val uri = Uri.parse(urlString)
++
++            override fun getUrl(): Uri = uri
++            override fun isForMainFrame(): Boolean = false
++            override fun isRedirect(): Boolean = false
++            override fun hasGesture(): Boolean = false
++            override fun getMethod(): String = "GET"
++            override fun getRequestHeaders(): MutableMap<String, String> = mutableMapOf()
++        }
++    }
++}
++

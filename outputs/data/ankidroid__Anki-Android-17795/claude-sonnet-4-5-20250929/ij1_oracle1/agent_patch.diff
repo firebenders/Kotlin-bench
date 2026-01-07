@@ -1,0 +1,510 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 95757cc736..814e950843 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -238,12 +238,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+diff --git a/AnkiDroid/src/main/assets/scripts/js-api.js b/AnkiDroid/src/main/assets/scripts/js-api.js
+index a33010525f..4418035b48 100644
+--- a/AnkiDroid/src/main/assets/scripts/js-api.js
++++ b/AnkiDroid/src/main/assets/scripts/js-api.js
+@@ -72,6 +72,8 @@ const jsApiList = {
+     ankiSttStart: "sttStart",
+     ankiSttStop: "sttStop",
+     ankiAddTagToNote: "addTagToNote",
++    ankiSetNoteTags: "setNoteTags",
++    ankiGetTagsFromNote: "getTagsFromNote",
+ };
+ 
+ class AnkiDroidJS {
+@@ -125,6 +127,22 @@ Object.keys(jsApiList).forEach(method => {
+         };
+         return;
+     }
++    if (method === "ankiSetNoteTags") {
++        AnkiDroidJS.prototype[method] = async function (noteId, tags) {
++            const endpoint = jsApiList[method];
++            const data = JSON.stringify({ noteId, tags });
++            return await this.handleRequest(endpoint, data);
++        };
++        return;
++    }
++    if (method === "ankiGetTagsFromNote") {
++        AnkiDroidJS.prototype[method] = async function (noteId) {
++            const endpoint = jsApiList[method];
++            const data = JSON.stringify({ noteId });
++            return await this.handleRequest(endpoint, data);
++        };
++        return;
++    }
+     if (method === "ankiTtsSpeak") {
+         AnkiDroidJS.prototype[method] = async function (text, queueMode = 0) {
+             const endpoint = jsApiList[method];
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
+index f4ec2dc7d0..274f097a5e 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
+@@ -47,12 +47,14 @@ import com.ichi2.libanki.Collection
+ import com.ichi2.libanki.Decks
+ import com.ichi2.libanki.SortOrder
+ import com.ichi2.utils.NetworkUtils
++import com.ichi2.utils.stringIterable
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ import kotlinx.serialization.builtins.ListSerializer
+ import kotlinx.serialization.builtins.serializer
+ import kotlinx.serialization.json.Json
++import org.json.JSONArray
+ import org.json.JSONException
+ import org.json.JSONObject
+ import timber.log.Timber
+@@ -373,6 +375,23 @@ open class AnkiDroidJsAPI(
+                 getColUnsafe.updateNote(note)
+                 convertToByteArray(apiContract, true)
+             }
++            "setNoteTags" -> {
++                val jsonObject = JSONObject(apiParams)
++                val noteId = jsonObject.getLong("noteId")
++                val tags = jsonObject.getJSONArray("tags")
++                val note =
++                    getColUnsafe.getNote(noteId).apply {
++                        setTagsFromStr(getColUnsafe, tags.stringIterable().joinToString(" "))
++                    }
++                getColUnsafe.updateNote(note)
++                convertToByteArray(apiContract, true)
++            }
++            "getTagsFromNote" -> {
++                val jsonObject = JSONObject(apiParams)
++                val noteId = jsonObject.getLong("noteId")
++                val note = getColUnsafe.getNote(noteId)
++                convertToByteArray(apiContract, JSONArray(note.tags).toString())
++            }
+             "sttSetLanguage" -> convertToByteArray(apiContract, speechRecognizer.setLanguage(apiParams))
+             "sttStart" -> {
+                 val callback =
+diff --git a/gradle.properties b/gradle.properties
+index 509de8a9e4..e257a70586 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 2f64680e40..f8202bcc26 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -17,4 +17,4 @@ dependencyResolutionManagement {
+     }
+ }
+ 
+-include(":lint-rules", ":api", ":AnkiDroid", ":testlib", ":common")
+\ No newline at end of file
++include(":lint-rules", ":api", ":AnkiDroid", ":testlib", ":common")
+
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITagsTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITagsTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITagsTest.kt
+@@ -0,0 +1,250 @@
++/****************************************************************************************
++ * Copyright (c) 2025 Ankidroid Contributors                                            *
++ *                                                                                      *
++ * This program is free software; you can redistribute it and/or modify it under        *
++ * the terms of the GNU General Public License as published by the Free Software        *
++ * Foundation; either version 3 of the License, or (at your option) any later           *
++ * version.                                                                             *
++ *                                                                                      *
++ * This program is distributed in the hope that it will be useful, but WITHOUT ANY      *
++ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A      *
++ * PARTICULAR PURPOSE. See the GNU General Public License for more details.             *
++ *                                                                                      *
++ * You should have received a copy of the GNU General Public License along with         *
++ * this program.  If not, see <http://www.gnu.org/licenses/>.                            *
++ ****************************************************************************************/
++
++package com.ichi2.anki
++
++import androidx.test.ext.junit.runners.AndroidJUnit4
++import com.ichi2.anki.AnkiDroidJsAPI.Companion.SUCCESS_KEY
++import com.ichi2.anki.AnkiDroidJsAPI.Companion.VALUE_KEY
++import com.ichi2.anki.AnkiDroidJsAPITest.Companion.formatApiResult
++import com.ichi2.anki.AnkiDroidJsAPITest.Companion.getDataFromRequest
++import com.ichi2.anki.AnkiDroidJsAPITest.Companion.jsApiContract
++import com.ichi2.utils.BASIC_MODEL_NAME
++import org.hamcrest.CoreMatchers.equalTo
++import org.hamcrest.MatcherAssert.assertThat
++import org.json.JSONArray
++import org.json.JSONObject
++import org.junit.Test
++import org.junit.runner.RunWith
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++@RunWith(AndroidJUnit4::class)
++class AnkiDroidJsAPITagsTest : RobolectricTest() {
++    private fun startReviewer(): Reviewer = ReviewerTest.startReviewer(this)
++
++    @Test
++    fun testGetTagsFromNote() =
++        runTest {
++            val models = col.notetypes
++            val didA = addDeck("Test", setAsSelected = true)
++            val basic = models.byName(BASIC_MODEL_NAME)
++            basic!!.put("did", didA)
++            val note = addBasicNote("foo", "bar")
++            note.addTag("tag1")
++            note.addTag("tag2")
++            col.updateNote(note)
++
++            val reviewer: Reviewer = startReviewer()
++            val jsapi = reviewer.jsApi
++
++            waitForAsyncTasksToComplete()
++
++            // Get tags from note
++            val noteIdParam = JSONObject().apply { put("noteId", note.id) }.toString()
++            val response = getDataFromRequest("getTagsFromNote", jsapi, noteIdParam)
++            val result = JSONObject(response)
++
++            assertTrue(result.getBoolean(SUCCESS_KEY), "API call should succeed")
++            val tagsJson = JSONArray(result.getString(VALUE_KEY))
++            assertEquals(2, tagsJson.length(), "Note should have 2 tags")
++
++            val tags = mutableSetOf<String>()
++            for (i in 0 until tagsJson.length()) {
++                tags.add(tagsJson.getString(i))
++            }
++            assertTrue(tags.contains("tag1"), "Should contain tag1")
++            assertTrue(tags.contains("tag2"), "Should contain tag2")
++        }
++
++    @Test
++    fun testSetNoteTags() =
++        runTest {
++            val models = col.notetypes
++            val didA = addDeck("Test", setAsSelected = true)
++            val basic = models.byName(BASIC_MODEL_NAME)
++            basic!!.put("did", didA)
++            val note = addBasicNote("foo", "bar")
++            note.addTag("oldTag1")
++            note.addTag("oldTag2")
++            col.updateNote(note)
++
++            val reviewer: Reviewer = startReviewer()
++            val jsapi = reviewer.jsApi
++
++            waitForAsyncTasksToComplete()
++
++            // Set new tags
++            val newTags = JSONArray().apply { put("newTag1"); put("newTag2"); put("newTag3") }
++            val setTagsParam =
++                JSONObject().apply {
++                    put("noteId", note.id)
++                    put("tags", newTags)
++                }.toString()
++
++            assertThat(
++                getDataFromRequest("setNoteTags", jsapi, setTagsParam),
++                equalTo(formatApiResult(true)),
++            )
++
++            waitForAsyncTasksToComplete()
++
++            // Verify tags were set
++            val updatedNote = col.getNote(note.id)
++            assertEquals(3, updatedNote.tags.size, "Note should have 3 tags")
++            assertTrue(updatedNote.tags.contains("newTag1"), "Should contain newTag1")
++            assertTrue(updatedNote.tags.contains("newTag2"), "Should contain newTag2")
++            assertTrue(updatedNote.tags.contains("newTag3"), "Should contain newTag3")
++            assertFalse(updatedNote.tags.contains("oldTag1"), "Should not contain oldTag1")
++            assertFalse(updatedNote.tags.contains("oldTag2"), "Should not contain oldTag2")
++        }
++
++    @Test
++    fun testRemoveTagUsingSetNoteTags() =
++        runTest {
++            val models = col.notetypes
++            val didA = addDeck("Test", setAsSelected = true)
++            val basic = models.byName(BASIC_MODEL_NAME)
++            basic!!.put("did", didA)
++            val note = addBasicNote("foo", "bar")
++            note.addTag("tag1")
++            note.addTag("tag2")
++            note.addTag("tag3")
++            col.updateNote(note)
++
++            val reviewer: Reviewer = startReviewer()
++            val jsapi = reviewer.jsApi
++
++            waitForAsyncTasksToComplete()
++
++            // Remove "tag2" by setting tags to only "tag1" and "tag3"
++            val newTags = JSONArray().apply { put("tag1"); put("tag3") }
++            val setTagsParam =
++                JSONObject().apply {
++                    put("noteId", note.id)
++                    put("tags", newTags)
++                }.toString()
++
++            assertThat(
++                getDataFromRequest("setNoteTags", jsapi, setTagsParam),
++                equalTo(formatApiResult(true)),
++            )
++
++            waitForAsyncTasksToComplete()
++
++            // Verify tag was removed
++            val updatedNote = col.getNote(note.id)
++            assertEquals(2, updatedNote.tags.size, "Note should have 2 tags")
++            assertTrue(updatedNote.tags.contains("tag1"), "Should contain tag1")
++            assertTrue(updatedNote.tags.contains("tag3"), "Should contain tag3")
++            assertFalse(updatedNote.tags.contains("tag2"), "Should not contain tag2")
++        }
++
++    @Test
++    fun testSetNoteTagsWithEmptyArray() =
++        runTest {
++            val models = col.notetypes
++            val didA = addDeck("Test", setAsSelected = true)
++            val basic = models.byName(BASIC_MODEL_NAME)
++            basic!!.put("did", didA)
++            val note = addBasicNote("foo", "bar")
++            note.addTag("tag1")
++            note.addTag("tag2")
++            col.updateNote(note)
++
++            val reviewer: Reviewer = startReviewer()
++            val jsapi = reviewer.jsApi
++
++            waitForAsyncTasksToComplete()
++
++            // Set empty tags array to remove all tags
++            val newTags = JSONArray()
++            val setTagsParam =
++                JSONObject().apply {
++                    put("noteId", note.id)
++                    put("tags", newTags)
++                }.toString()
++
++            assertThat(
++                getDataFromRequest("setNoteTags", jsapi, setTagsParam),
++                equalTo(formatApiResult(true)),
++            )
++
++            waitForAsyncTasksToComplete()
++
++            // Verify all tags were removed
++            val updatedNote = col.getNote(note.id)
++            assertEquals(0, updatedNote.tags.size, "Note should have no tags")
++        }
++
++    @Test
++    fun testGetAndSetTagsWorkflow() =
++        runTest {
++            // This test demonstrates the typical workflow for removing a specific tag
++            val models = col.notetypes
++            val didA = addDeck("Test", setAsSelected = true)
++            val basic = models.byName(BASIC_MODEL_NAME)
++            basic!!.put("did", didA)
++            val note = addBasicNote("foo", "bar")
++            note.addTag("important")
++            note.addTag("to-review")
++            note.addTag("deprecated")
++            col.updateNote(note)
++
++            val reviewer: Reviewer = startReviewer()
++            val jsapi = reviewer.jsApi
++
++            waitForAsyncTasksToComplete()
++
++            // 1. Get current tags
++            val noteIdParam = JSONObject().apply { put("noteId", note.id) }.toString()
++            val getResponse = getDataFromRequest("getTagsFromNote", jsapi, noteIdParam)
++            val getResult = JSONObject(getResponse)
++            val currentTagsJson = JSONArray(getResult.getString(VALUE_KEY))
++
++            // 2. Convert to list and remove "deprecated" tag
++            val currentTags = mutableListOf<String>()
++            for (i in 0 until currentTagsJson.length()) {
++                currentTags.add(currentTagsJson.getString(i))
++            }
++            val filteredTags = currentTags.filter { it != "deprecated" }
++
++            // 3. Set the updated tags
++            val newTags = JSONArray()
++            filteredTags.forEach { newTags.put(it) }
++            val setTagsParam =
++                JSONObject().apply {
++                    put("noteId", note.id)
++                    put("tags", newTags)
++                }.toString()
++
++            assertThat(
++                getDataFromRequest("setNoteTags", jsapi, setTagsParam),
++                equalTo(formatApiResult(true)),
++            )
++
++            waitForAsyncTasksToComplete()
++
++            // 4. Verify the workflow worked
++            val updatedNote = col.getNote(note.id)
++            assertEquals(2, updatedNote.tags.size, "Note should have 2 tags")
++            assertTrue(updatedNote.tags.contains("important"), "Should contain important")
++            assertTrue(updatedNote.tags.contains("to-review"), "Should contain to-review")
++            assertFalse(updatedNote.tags.contains("deprecated"), "Should not contain deprecated")
++        }
++}
++
+
+diff --git a/JS_API_TAG_OPERATIONS.md b/JS_API_TAG_OPERATIONS.md
+new file mode 100644
+--- /dev/null
++++ b/JS_API_TAG_OPERATIONS.md
+@@ -0,0 +1,125 @@
++# JavaScript API - Tag Operations
++
++This document describes the new tag management APIs added to AnkiDroid's JavaScript API.
++
++## Overview
++
++Two new RESTful API functions have been added to manage note tags:
++
++1. `ankiGetTagsFromNote(noteId)` - Retrieves all tags from a note
++2. `ankiSetNoteTags(noteId, tags)` - Sets/replaces all tags on a note
++
++## Usage Examples
++
++### Get Tags from a Note
++
++```javascript
++const noteId = 1234567890;
++const result = await AnkiDroidJS.ankiGetTagsFromNote(noteId);
++// result.value contains a JSON array of tags: ["tag1", "tag2", "tag3"]
++const tags = JSON.parse(result.value);
++console.log(tags); // ["tag1", "tag2", "tag3"]
++```
++
++### Set Tags on a Note
++
++```javascript
++const noteId = 1234567890;
++const newTags = ["important", "review", "chapter1"];
++const result = await AnkiDroidJS.ankiSetNoteTags(noteId, newTags);
++// result.value will be true if successful
++```
++
++### Remove a Specific Tag
++
++To remove a specific tag, you need to:
++1. Get the current tags
++2. Filter out the tag you want to remove
++3. Set the updated tags
++
++```javascript
++const noteId = 1234567890;
++
++// 1. Get current tags
++const getResult = await AnkiDroidJS.ankiGetTagsFromNote(noteId);
++const currentTags = JSON.parse(getResult.value);
++
++// 2. Remove the tag "deprecated"
++const updatedTags = currentTags.filter(tag => tag !== "deprecated");
++
++// 3. Set the updated tags
++const setResult = await AnkiDroidJS.ankiSetNoteTags(noteId, updatedTags);
++console.log(setResult.value); // true if successful
++```
++
++### Add a Tag (Alternative to ankiAddTagToNote)
++
++```javascript
++const noteId = 1234567890;
++
++// Get current tags
++const getResult = await AnkiDroidJS.ankiGetTagsFromNote(noteId);
++const currentTags = JSON.parse(getResult.value);
++
++// Add a new tag if it doesn't exist
++if (!currentTags.includes("newTag")) {
++    currentTags.push("newTag");
++}
++
++// Set the updated tags
++await AnkiDroidJS.ankiSetNoteTags(noteId, currentTags);
++```
++
++### Remove All Tags
++
++```javascript
++const noteId = 1234567890;
++await AnkiDroidJS.ankiSetNoteTags(noteId, []);
++```
++
++## API Reference
++
++### ankiGetTagsFromNote(noteId)
++
++Retrieves all tags from a note.
++
++**Parameters:**
++- `noteId` (Long): The ID of the note
++
++**Returns:**
++- `ApiResult` object with:
++  - `success` (Boolean): true if the operation succeeded
++  - `value` (String): JSON array of tags as a string
++
++**Example:**
++```javascript
++const result = await AnkiDroidJS.ankiGetTagsFromNote(1234567890);
++// result = { success: true, value: '["tag1","tag2"]' }
++```
++
++### ankiSetNoteTags(noteId, tags)
++
++Sets/replaces all tags on a note.
++
++**Parameters:**
++- `noteId` (Long): The ID of the note
++- `tags` (Array<String>): Array of tag names to set
++
++**Returns:**
++- `ApiResult` object with:
++  - `success` (Boolean): true if the operation succeeded
++  - `value` (Boolean): true if the tags were updated
++
++**Example:**
++```javascript
++const result = await AnkiDroidJS.ankiSetNoteTags(1234567890, ["tag1", "tag2"]);
++// result = { success: true, value: true }
++```
++
++## Notes
++
++- Tags are managed as a complete set, following RESTful principles
++- To remove a tag, get the current tags, filter out the unwanted tag, and set the result
++- Empty arrays are allowed to remove all tags from a note
++- The existing `ankiAddTagToNote` API continues to work for simple tag additions
++

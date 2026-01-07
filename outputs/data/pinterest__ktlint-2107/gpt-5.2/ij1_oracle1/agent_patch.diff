@@ -1,0 +1,94 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/WrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/WrappingRule.kt
+index 732ba49b..087c86d4 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/WrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/WrappingRule.kt
+@@ -169,7 +169,21 @@ public class WrappingRule :
+             ?.getEndOfBlock()
+             ?.takeIf { it.elementType == RBRACE }
+             ?.let { rbrace ->
+-                if (hasNewLineInClosedRange(lbrace, rbrace)) {
++                val arrowInFunctionLiteralOnSameLineAsOpeningBrace =
++                    arrowInFunctionLiteralOnSameLineAsOpeningBrace(
++                        lbrace = lbrace,
++                        rbrace = rbrace,
++                    )
++                if (
++                    hasNewLineInClosedRange(lbrace, rbrace) &&
++                    // Kotlin function literals (lambdas) are typically formatted with the parameter list on the same
++                    // line as the opening brace:
++                    //     { a ->
++                    //         body
++                    //     }
++                    // Do not force a newline after '{' in that situation.
++                    arrowInFunctionLiteralOnSameLineAsOpeningBrace == null
++                ) {
+                     requireNewlineAfterLeaf(lbrace, autoCorrect, emit)
+                 }
+             }
+@@ -192,6 +206,29 @@ public class WrappingRule :
+         }
+     }
+ 
++    private fun arrowInFunctionLiteralOnSameLineAsOpeningBrace(
++        lbrace: ASTNode,
++        rbrace: ASTNode,
++    ): ASTNode? {
++        val functionLiteral = lbrace.treeParent.takeIf { it.elementType == FUNCTION_LITERAL } ?: return null
++        // Only consider the arrow which is part of this function literal header, and ignore arrows in nested
++        // lambdas/when-entries inside the body.
++        val arrow = functionLiteral.findChildByType(ARROW) ?: return null
++
++        // Only apply this exception when the parameter list and arrow are on the same line as the opening brace.
++        // In case they are wrapped already, ktlint may still want to enforce a newline after '{'.
++        if (!noNewLineInClosedRange(lbrace, arrow)) {
++            return null
++        }
++
++        // Sanity check: the arrow must be located before the end of this block.
++        if (arrow.startOffset >= rbrace.startOffset) {
++            return null
++        }
++
++        return arrow
++    }
++
+     private fun ASTNode.followedByEolComment() =
+         null !=
+             leaves()
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/WrappingRuleFunctionLiteralRegressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/WrappingRuleFunctionLiteralRegressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/WrappingRuleFunctionLiteralRegressionTest.kt
+@@ -0,0 +1,23 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++internal class WrappingRuleFunctionLiteralRegressionTest {
++    private val wrappingRuleAssertThat = assertThatRule { WrappingRule() }
++
++    @Test
++    fun `Given a multiline lambda with explicit parameters then do not require a newline after the opening brace`() {
++        val code =
++            """
++            fun foo() {
++                val f = { size ->
++                    icon?.getBitmap(size)?.await()
++                }
++            }
++            """.trimIndent()
++
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

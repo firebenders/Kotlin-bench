@@ -1,0 +1,183 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 39ae35af..3f6128ae 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -230,6 +230,12 @@ public class IndentationRule :
+                 node.elementType == USER_TYPE ->
+                 startIndentContext(node)
+ 
++            node.elementType == SUPER_TYPE_LIST ->
++                startIndentContext(
++                    fromAstNode = node.getPrecedingLeadingCommentsAndWhitespaces(),
++                    toAstNode = node.lastChildLeafOrSelf(),
++                )
++
+             node.elementType == DELEGATED_SUPER_TYPE_ENTRY ||
+                 node.elementType == ANNOTATED_EXPRESSION ||
+                 node.elementType == TYPE_REFERENCE ->
+@@ -586,7 +592,11 @@ public class IndentationRule :
+ 
+     private fun visitClass(node: ASTNode) {
+         // Inner indent contexts in reversed order
+-        var nextToAstNode: ASTNode = node.lastChildLeafOrSelf()
++        var nextToAstNode: ASTNode =
++            node
++                .findChildByType(CLASS_BODY)
++                ?.prevCodeLeaf()
++                ?: node.lastChildLeafOrSelf()
+         node
+             .findChildByType(WHERE_KEYWORD)
+             ?.let { where ->
+@@ -612,16 +622,6 @@ public class IndentationRule :
+                     fromAstNode = primaryConstructor.getPrecedingLeadingCommentsAndWhitespaces(),
+                     toAstNode = nextToAstNode,
+                 ).prevCodeLeaf()
+-        } else {
+-            node
+-                .findChildByType(SUPER_TYPE_LIST)
+-                ?.let { superTypeList ->
+-                    nextToAstNode =
+-                        startIndentContext(
+-                            fromAstNode = superTypeList.getPrecedingLeadingCommentsAndWhitespaces(),
+-                            toAstNode = superTypeList.lastChildLeafOrSelf(),
+-                        ).prevCodeLeaf()
+-                }
+         }
+ 
+         // Leading annotations and comments should be indented at same level as class itself
+@@ -634,16 +634,11 @@ public class IndentationRule :
+ 
+     private fun visitObjectDeclaration(node: ASTNode) {
+         // Inner indent contexts in reversed order
+-        var nextToAstNode: ASTNode = node.lastChildLeafOrSelf()
+-        node
+-            .findChildByType(SUPER_TYPE_LIST)
+-            ?.let { superTypeList ->
+-                nextToAstNode =
+-                    startIndentContext(
+-                        fromAstNode = superTypeList.getPrecedingLeadingCommentsAndWhitespaces(),
+-                        toAstNode = superTypeList.lastChildLeafOrSelf(),
+-                    ).prevCodeLeaf()
+-            }
++        var nextToAstNode: ASTNode =
++            node
++                .findChildByType(CLASS_BODY)
++                ?.prevCodeLeaf()
++                ?: node.lastChildLeafOrSelf()
+ 
+         // Leading annotations and comments should be indented at same level as class itself
+         startIndentContext(
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssue1916Test.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssue1916Test.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssue1916Test.kt
+@@ -0,0 +1,100 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++internal class IndentationRuleIssue1916Test {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Issue 1916 - Indentation class body when class has multiline super type list (ktlint_official only) - case 1`() {
++        val code =
++            """
++            class Foo(
++                val bar1: Bar,
++                val bar2: Bar,
++            ) : FooBar(bar1, bar2),
++                BarFoo1,
++                BarFoo2 {
++                // body
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue 1916 - Indentation class body when class has multiline super type list (ktlint_official only) - case 2`() {
++        val code =
++            """
++            class Foo
++                constructor(
++                    val bar1: Bar,
++                    val bar2: Bar,
++                ) : FooBar(bar1, bar2),
++                    BarFoo1,
++                    BarFoo2 {
++                // body
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue 1916 - Explicit constructor with multiline parameter list and super type list`() {
++        val code =
++            """
++            class Foo
++            @Bar1 @Bar2
++            constructor(
++                foo1: Foo1,
++                foo2: Foo2,
++            ) : Foobar(
++                "foobar1",
++                "foobar2",
++            ) {
++                fun foo() = "foo"
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            class Foo
++                @Bar1 @Bar2
++                constructor(
++                    foo1: Foo1,
++                    foo2: Foo2,
++                ) : Foobar(
++                    "foobar1",
++                    "foobar2",
++                ) {
++                fun foo() = "foo"
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue 1916 - Indentation class body when class has multiline super type list (intellij_idea)`() {
++        val code =
++            """
++            class Foo(
++                val bar1: Bar,
++                val bar2: Bar,
++            ) : FooBar(bar1, bar2),
++                BarFoo1,
++                BarFoo2 {
++                // body
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

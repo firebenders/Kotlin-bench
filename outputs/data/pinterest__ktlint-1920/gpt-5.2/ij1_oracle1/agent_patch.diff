@@ -1,0 +1,116 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+index bdddca08..cf9b4c01 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+@@ -9,6 +9,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PROJECTION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIMARY_CONSTRUCTOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
+@@ -18,10 +19,12 @@ import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRu
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.children
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf
++import com.pinterest.ktlint.rule.engine.core.api.indent
+ import com.pinterest.ktlint.rule.engine.core.api.isCodeLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpace
+ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+@@ -78,6 +81,7 @@ public class AnnotationRule :
+         id = "annotation",
+         usesEditorConfigProperties =
+             setOf(
++                CODE_STYLE_PROPERTY,
+                 INDENT_SIZE_PROPERTY,
+                 INDENT_STYLE_PROPERTY,
+             ),
+@@ -127,6 +131,10 @@ public class AnnotationRule :
+     ) {
+         require(node.elementType == ANNOTATION_ENTRY)
+ 
++        if (codeStyle == ktlint_official && node.isPrimaryConstructorAnnotationEntry() && node.shouldWrapPrimaryConstructorAnnotations()) {
++            node.wrapPrimaryConstructorAnnotation(emit, autoCorrect)
++        }
++
+         if (node.isAnnotationEntryWithValueArgumentList() &&
+             node.treeParent.treeParent.elementType != VALUE_PARAMETER &&
+             node.treeParent.treeParent.elementType != VALUE_ARGUMENT &&
+@@ -245,14 +253,56 @@ public class AnnotationRule :
+         }
+     }
+ 
+-    private fun ASTNode.typeProjectionOrNull() =
+-        takeIf { elementType == ANNOTATION_ENTRY }
+-            ?.takeIf { it.treeParent.elementType == MODIFIER_LIST }
+-            ?.treeParent
+-            ?.takeIf { it.treeParent.elementType == TYPE_REFERENCE }
+-            ?.treeParent
+-            ?.takeIf { it.treeParent.elementType == TYPE_PROJECTION }
++    private fun ASTNode.typeProjectionOrNull(): ASTNode? {
++        require(elementType == ANNOTATION_ENTRY)
++        val typeReference =
++            takeIf { treeParent.elementType == MODIFIER_LIST }
++                ?.treeParent
++                ?.takeIf { it.treeParent.elementType == TYPE_REFERENCE }
++                ?.treeParent
++                ?: return null
++        return typeReference
++            .takeIf { it.treeParent.elementType == TYPE_PROJECTION }
+             ?.treeParent
++    }
++
++    private fun ASTNode.isPrimaryConstructorAnnotationEntry(): Boolean {
++        require(elementType == ANNOTATION_ENTRY)
++        return treeParent.elementType == MODIFIER_LIST &&
++            treeParent.treeParent.elementType == PRIMARY_CONSTRUCTOR
++    }
++
++    private fun ASTNode.shouldWrapPrimaryConstructorAnnotations(): Boolean {
++        require(elementType == ANNOTATION_ENTRY)
++        val modifierList = treeParent
++        if (modifierList.elementType != MODIFIER_LIST || modifierList.treeParent.elementType != PRIMARY_CONSTRUCTOR) {
++            return false
++        }
++        val annotationEntries = modifierList.children().filter { it.elementType == ANNOTATION_ENTRY }.toList()
++        return annotationEntries.size > 1
++    }
++
++    private fun ASTNode.wrapPrimaryConstructorAnnotation(
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        require(elementType == ANNOTATION_ENTRY)
++        val modifierList = treeParent
++        val primaryConstructor = modifierList.treeParent
++        val classNode = primaryConstructor.treeParent
++        val expectedIndent = classNode.indent().plus(indentConfig.indent)
++
++        val shouldBeMovedToNewLine =
++            isFirstAnnotationEntry() ||
++                (isPrecededByOtherAnnotationEntryOnTheSameLine() && isOnSameLineAsPreviousAnnotationEntry())
++
++        if (shouldBeMovedToNewLine && !prevLeaf().isWhiteSpaceWithNewline()) {
++            emit(startOffset, "Expected newline before '@'", true)
++            if (autoCorrect) {
++                upsertWhitespaceBeforeMe(expectedIndent)
++            }
++        }
++    }
+ 
+     private fun ASTNode.isPrecededByAnnotationOnAnotherLine(): Boolean {
+         val firstAnnotation = treeParent.findChildByType(ANNOTATION_ENTRY)
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

@@ -1,0 +1,196 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+index 28a6ebc7..5f7c880f 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+@@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.AT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK_COMMENT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EOL_COMMENT
+@@ -19,6 +20,7 @@ import com.pinterest.ktlint.rule.engine.core.api.IndentConfig.Companion.DEFAULT_
+ import com.pinterest.ktlint.rule.engine.core.api.Rule
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.children
++import com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+@@ -523,15 +525,21 @@ public class FunctionSignatureRule :
+         autoCorrect: Boolean,
+         maxLengthRemainingForFirstLineOfBodyExpression: Int,
+     ) {
++        val eqNode = node.findChildByType(EQ)
+         val lastNodeOfFunctionSignatureWithBodyExpression =
+-            node
+-                .findChildByType(EQ)
++            eqNode
+                 ?.nextLeaf(includeEmpty = true)
+                 ?: return
+         val bodyNodes = node.getFunctionBody(lastNodeOfFunctionSignatureWithBodyExpression)
+         val whiteSpaceBeforeFunctionBodyExpression = bodyNodes.getStartingWhitespaceOrNull()
+         val functionBodyExpressionNodes = bodyNodes.dropWhile { it.isWhiteSpace() }
+ 
++        // Do not merge body expression starting with an annotation (e.g. @Suppress("DEPRECATION")) as that would violate the
++        // annotation rule which requires a newline before the annotation. Note that the expression might be wrapped inside a
++        // binary expression (e.g. @Suppress("DEPRECATION") foo ?: bar), so we need to check if the first leaf is an AT token.
++        val bodyExpression = eqNode.nextCodeSibling()
++        val isBodyExpressionAnnotated = bodyExpression?.firstChildLeafOrSelf()?.elementType == AT
++
+         val functionBodyExpressionLines =
+             functionBodyExpressionNodes
+                 .joinTextToString()
+@@ -541,7 +549,9 @@ public class FunctionSignatureRule :
+             ?.also { firstLineOfBodyExpression ->
+                 if (whiteSpaceBeforeFunctionBodyExpression.isWhiteSpaceWithNewline()) {
+                     val mergeWithFunctionSignature =
+-                        if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression) {
++                        if (isBodyExpressionAnnotated) {
++                            false
++                        } else if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression) {
+                             functionBodyExpressionWrapping == default ||
+                                 (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||
+                                 node.isMultilineFunctionSignatureWithoutExplicitReturnType(
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt
+@@ -0,0 +1,127 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.ruleset.standard.rules.FunctionSignatureRule.Companion.FUNCTION_BODY_EXPRESSION_WRAPPING_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.EOL_CHAR
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.MAX_LINE_LENGTH_MARKER
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Nested
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.params.ParameterizedTest
++import org.junit.jupiter.params.provider.EnumSource
++
++/**
++ * Tests for issue https://github.com/pinterest/ktlint/issues/2028
++ *
++ * The function-signature rule should not merge annotated expressions with function signatures
++ * as that would violate the annotation rule.
++ */
++class FunctionSignatureRuleAnnotatedExpressionTest {
++    private val functionSignatureWrappingRuleAssertThat = assertThatRule { FunctionSignatureRule() }
++
++    @Nested
++    inner class `Given a function with annotated expression body on separate line` {
++        @ParameterizedTest(name = "bodyExpressionWrapping: {0}")
++        @EnumSource(
++            value = FunctionSignatureRule.FunctionBodyExpressionWrapping::class,
++        )
++        fun `Given that the body expression starts with an annotation then do not merge with function signature`(
++            bodyExpressionWrapping: FunctionSignatureRule.FunctionBodyExpressionWrapping,
++        ) {
++            val code =
++                """
++                // $MAX_LINE_LENGTH_MARKER                                                                                $EOL_CHAR
++                private fun getErrorMessage(value: String): String =
++                    @Suppress("DEPRECATION")
++                    "result"
++                """.trimIndent()
++            functionSignatureWrappingRuleAssertThat(code)
++                .setMaxLineLength()
++                .withEditorConfigOverride(FUNCTION_BODY_EXPRESSION_WRAPPING_PROPERTY to bodyExpressionWrapping)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a simple function with annotated expression body then do not merge`() {
++            val code =
++                """
++                // $MAX_LINE_LENGTH_MARKER                                    $EOL_CHAR
++                fun foo(): String =
++                    @Suppress("DEPRECATION")
++                    bar()
++                """.trimIndent()
++            functionSignatureWrappingRuleAssertThat(code)
++                .setMaxLineLength()
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given a function with annotated expression body that would fit on same line then still do not merge`() {
++            val code =
++                """
++                // $MAX_LINE_LENGTH_MARKER                                                                                                       $EOL_CHAR
++                fun foo(): String =
++                    @Suppress("DEPRECATION")
++                    bar()
++                """.trimIndent()
++            functionSignatureWrappingRuleAssertThat(code)
++                .setMaxLineLength()
++                .hasNoLintViolations()
++        }
++    }
++
++    @Nested
++    inner class `Given a multiline function signature with annotated expression body` {
++        @Test
++        fun `Given a multiline signature without explicit return type and annotated expression body then do not merge`() {
++            val code =
++                """
++                // $MAX_LINE_LENGTH_MARKER       $EOL_CHAR
++                fun functionSignatureTooLongForSingleLine(
++                    a: Any,
++                    b: Any
++                ) =
++                    @Suppress("DEPRECATION")
++                    "result"
++                """.trimIndent()
++            functionSignatureWrappingRuleAssertThat(code)
++                .setMaxLineLength()
++                .hasNoLintViolations()
++        }
++    }
++
++    @Nested
++    inner class `Issue 2028 - Given a complex annotated expression body` {
++        @Test
++        fun `Given the exact issue example then do not merge annotated expression with function signature`() {
++            val code =
++                """
++                private fun getErrorMessage(value: String): String =
++                    @Suppress("DEPRECATION")
++                    customMessage.takeUnless { it.isEmpty() } ?: value
++                """.trimIndent()
++            functionSignatureWrappingRuleAssertThat(code)
++                .hasNoLintViolations()
++        }
++
++        @ParameterizedTest(name = "bodyExpressionWrapping: {0}")
++        @EnumSource(
++            value = FunctionSignatureRule.FunctionBodyExpressionWrapping::class,
++        )
++        fun `Given annotated expression body with elvis operator that fits on same line then still do not merge`(
++            bodyExpressionWrapping: FunctionSignatureRule.FunctionBodyExpressionWrapping,
++        ) {
++            val code =
++                """
++                // $MAX_LINE_LENGTH_MARKER                                                                                $EOL_CHAR
++                private fun getErrorMessage(value: String): String =
++                    @Suppress("DEPRECATION")
++                    oldValue ?: defaultValue
++                """.trimIndent()
++            functionSignatureWrappingRuleAssertThat(code)
++                .setMaxLineLength()
++                .withEditorConfigOverride(FUNCTION_BODY_EXPRESSION_WRAPPING_PROPERTY to bodyExpressionWrapping)
++                .hasNoLintViolations()
++        }
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

@@ -1,0 +1,155 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ea4b034e..f214e351 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -11,7 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ ### Fixed
+ * Do not enable the experimental rules by default when `.editorconfig` properties `disabled_rules` or `ktlint_disabled_rules` are set. ([#1771](https://github.com/pinterest/ktlint/issues/1771))
+ * A function signature not having any parameters which exceeds the `max-line-length` should be ignored by rule `function-signature` ([#1773](https://github.com/pinterest/ktlint/issues/1773))
+-* 
++* Always place Kotlin array syntax annotations (`@[...]`, `@file:[...]`) on a separate line. ([#1765](https://github.com/pinterest/ktlint/issues/1765))
+ 
+ ### Changed
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+index 7fdfdd88..038a8db5 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+@@ -49,11 +49,56 @@ public class AnnotationRule : Rule("annotation") {
+             FILE_ANNOTATION_LIST -> {
+                 visitFileAnnotationList(node, emit, autoCorrect)
+             }
++            ANNOTATION -> {
++                visitAnnotation(node, emit, autoCorrect)
++            }
+             ANNOTATION_ENTRY ->
+                 visitAnnotationEntry(node, emit, autoCorrect)
+         }
+     }
+ 
++    private fun visitAnnotation(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        require(node.elementType == ANNOTATION)
++
++        // Kotlin array syntax annotations (e.g. `@[A B]` or `@file:[A B]`) are handled at ANNOTATION element level to
++        // prevent complex wrapping/reformatting of the annotation entries inside the brackets.
++        if (node.isOnSameLineAsAnnotatedConstruct()) {
++            val containsAnnotationEntryWithValueArgumentList =
++                node
++                    .children()
++                    .filter { it.elementType == ANNOTATION_ENTRY }
++                    .any { it.isAnnotationEntryWithValueArgumentList() }
++
++            // File annotations are already enforced to be separated from the package statement with a blank line. Only
++            // report a separate violation when the file annotation contains parameters, to keep the behavior consistent
++            // with non-array syntax file annotations.
++            if (!node.isPartOf(FILE_ANNOTATION_LIST) || containsAnnotationEntryWithValueArgumentList) {
++                emit(
++                    node.startOffset,
++                    if (containsAnnotationEntryWithValueArgumentList) {
++                        "Annotation with parameter(s) should be placed on a separate line prior to the annotated construct"
++                    } else {
++                        "Multiple annotations should not be placed on the same line as the annotated construct"
++                    },
++                    // Keep consistent with other annotation checks: annotated expressions can be hard to auto-correct.
++                    node.treeParent.elementType != ANNOTATED_EXPRESSION,
++                )
++            }
++
++            // Auto-correct by moving everything following the array syntax annotation to the next line.
++            if (autoCorrect && node.treeParent.elementType != ANNOTATED_EXPRESSION && !node.isPartOf(FILE_ANNOTATION_LIST)) {
++                node
++                    .lastChildLeafOrSelf()
++                    .nextCodeLeaf()
++                    ?.upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++            }
++        }
++    }
++
+     private fun visitAnnotationEntry(
+         node: ASTNode,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+@@ -61,6 +106,12 @@ public class AnnotationRule : Rule("annotation") {
+     ) {
+         require(node.elementType == ANNOTATION_ENTRY)
+ 
++        // Do not enforce any wrapping of annotation entries inside Kotlin's array syntax annotations:
++        // e.g. `@[A B]` or `@file:[A B]`. Array syntax annotations are handled at ANNOTATION element level.
++        if (node.treeParent.elementType == ANNOTATION) {
++            return
++        }
++
+         if (node.isAnnotationEntryWithValueArgumentList() &&
+             node.treeParent.treeParent.elementType != VALUE_PARAMETER && // fun fn(@Ann("blah") a: String)
+             node.treeParent.treeParent.elementType != VALUE_ARGUMENT && // fn(@Ann("blah") "42")
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/ArraySyntaxAnnotationRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/ArraySyntaxAnnotationRuleTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/ArraySyntaxAnnotationRuleTest.kt
+@@ -0,0 +1,54 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class ArraySyntaxAnnotationRuleTest {
++    private val annotationRuleAssertThat = assertThatRule { AnnotationRule() }
++
++    @Test
++    fun `Given an array syntax annotation on the same line as the annotated construct then place it on a separate line`() {
++        val code =
++            """
++            @[JvmStatic Provides] fun foo() = 42
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[JvmStatic Provides]
++            fun foo() = 42
++            """.trimIndent()
++
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Multiple annotations should not be placed on the same line as the annotated construct")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given an array syntax annotation containing an annotation with parameter on the same line as the annotated construct then place it on a separate line without wrapping entries`() {
++        val code =
++            """
++            @[Foo("bar") Bar] fun foo() = 42
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[Foo("bar") Bar]
++            fun foo() = 42
++            """.trimIndent()
++
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Annotation with parameter(s) should be placed on a separate line prior to the annotated construct")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given an array syntax annotation on its own line then do not report a violation`() {
++        val code =
++            """
++            @[JvmStatic Provides]
++            fun foo() = 42
++            """.trimIndent()
++
++        annotationRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

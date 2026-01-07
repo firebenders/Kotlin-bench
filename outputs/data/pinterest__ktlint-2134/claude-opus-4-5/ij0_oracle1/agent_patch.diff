@@ -1,0 +1,138 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+index dbed1796..6b2d2be2 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+@@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.LAMBDA_ARGUMENT
+@@ -20,6 +21,8 @@ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPE
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf
+ import com.pinterest.ktlint.rule.engine.core.api.indent
++import com.pinterest.ktlint.rule.engine.core.api.lastChildLeafOrSelf
++import com.pinterest.ktlint.rule.engine.core.api.leavesIncludingSelf
+ import com.pinterest.ktlint.rule.engine.core.api.leavesOnLine
+ import com.pinterest.ktlint.rule.engine.core.api.nextCodeSibling
+ import com.pinterest.ktlint.rule.engine.core.api.nextSibling
+@@ -156,7 +159,40 @@ public class BinaryExpressionWrappingRule :
+                         .takeWhile { leaf -> leaf != stopAtOperationReferenceLeaf }
+                         .lengthWithoutNewlinePrefix()
+             }
+-            ?: false
++            ?: false ||
++            exceedsMaxLineLengthAfterWrappingOnElvisOperator(operationReference)
++
++    private fun exceedsMaxLineLengthAfterWrappingOnElvisOperator(operationReference: ASTNode): Boolean {
++        // The ChainWrappingRule never allows the elvis operator to be wrapped at the end of a line. Wrapping after the elvis operator only
++        // makes sense when it is certain that the result will be valid according to the ChainWrappingRule. In case the right-hand side of
++        // the elvis operator is still exceeding the max-line-length when it is preceded by the elvis operator, then wrapping should not be
++        // autocorrected as it results in a conflict with ChainWrappingRule that can not be resolved.
++        if (operationReference.firstChildLeafOrSelf().elementType != ELVIS) {
++            return false
++        }
++        val rightHandSide = operationReference.nextCodeSibling() ?: return false
++        val rightHandSideFirstLineLength = rightHandSide.firstLineLength()
++        // When wrapped:
++        //     val foobar = leftHandSize
++        //         ?: rightHandSide
++        // The length of the line containing the right hand side is calculated as
++        //     length of indent + "?: ".length + rightHandSideLength
++        // Note: childIndentOf returns indent with newline prefix, so we need to subtract 1 for the newline character
++        val lengthAfterWrapping =
++            indentConfig.childIndentOf(operationReference).length - 1 +
++                "?: ".length +
++                rightHandSideFirstLineLength
++        return lengthAfterWrapping > maxLineLength
++    }
++
++    private fun ASTNode.firstLineLength(): Int {
++        val stopAtLeaf = lastChildLeafOrSelf()
++        return firstChildLeafOrSelf()
++            .leavesIncludingSelf()
++            .takeWhile { !it.textContains('\n') && it != stopAtLeaf }
++            .sumOf { it.textLength }
++            .plus(stopAtLeaf.text.substringBefore('\n').length)
++    }
+ 
+     private fun ASTNode.isOnLineExceedingMaxLineLength() = leavesOnLine().lengthWithoutNewlinePrefix() > maxLineLength
+ 
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingElvisIssueTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingElvisIssueTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingElvisIssueTest.kt
+@@ -0,0 +1,61 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat
++import org.junit.jupiter.api.Test
++
++/**
++ * Test for the issue: "Endless loop in wrapping binary expression after elvis operator"
++ * https://github.com/pinterest/ktlint/issues/2296
++ *
++ * When a line ends with `?:` and the right-hand side expression is long enough that wrapping
++ * after the elvis operator would still exceed max line length (because ChainWrappingRule will
++ * move `?:` to the start of the next line), ktlint should not try to auto-correct as it
++ * would result in an endless loop.
++ */
++class BinaryExpressionWrappingElvisIssueTest {
++    private val binaryExpressionWrappingRuleAssertThat = KtLintAssertThat.assertThatRule { BinaryExpressionWrappingRule() }
++
++    @Test
++    fun `Given a binary expression with elvis operator where right-hand side exceeds max line length when wrapped`() {
++        // When the right-hand side is so long that even when placed on a new line with "?: " prefix,
++        // it would still exceed max line length, wrapping should not be auto-corrected to avoid an
++        // endless loop with ChainWrappingRule.
++        // Line: "    foobar ?: throw Exception()" = 31 chars
++        // After ChainWrappingRule: "        ?: throw Exception()" = 28 chars
++        // With max_line_length = 27, wrapped line still exceeds, so auto-correct would fail.
++        val code =
++            """
++            val foo =
++                foobar ?: throw Exception()
++            """.trimIndent()
++        binaryExpressionWrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 27)
++            .hasLintViolationWithoutAutoCorrect(2, 12, "Line is exceeding max line length")
++    }
++
++    @Test
++    fun `Given a binary expression with elvis operator where right-hand side fits when wrapped`() {
++        // When the right-hand side is short enough that it fits when placed on a new line
++        // with "?: " prefix, wrapping should be auto-corrected.
++        // Line: "    foobar ?: throw Exception()" = 31 chars
++        // After ChainWrappingRule: "        ?: throw Exception()" = 28 chars
++        // With max_line_length = 30, the original exceeds but wrapped fits.
++        val code =
++            """
++            val foo =
++                foobar ?: throw Exception()
++            """.trimIndent()
++        val formattedCode =
++            """
++            val foo =
++                foobar ?:
++                    throw Exception()
++            """.trimIndent()
++        binaryExpressionWrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 30)
++            .hasLintViolation(2, 14, "Line is exceeding max line length. Break line after operator in binary expression")
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

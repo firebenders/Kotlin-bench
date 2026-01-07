@@ -1,0 +1,91 @@
+diff --git a/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt b/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt
+index 3d489aa94..98933c1e0 100644
+--- a/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt
++++ b/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt
+@@ -47,6 +47,11 @@ public fun <T> Flow<T>.take(count: Int): Flow<T> {
+     require(count > 0) { "Requested element count $count should be positive" }
+     return flow {
+         var consumed = 0
++        // A dedicated marker is required so that we don't accidentally swallow AbortFlowException
++        // that belongs to a downstream operator (e.g., terminal operators like `first`).
++val ownershipMarker = object : FlowCollector<T> {
++            override suspend fun emit(value: T) {}
++        }
+         try {
+             collect { value ->
+                 // Note: this for take is not written via collectWhile on purpose.
+@@ -56,18 +61,18 @@ public fun <T> Flow<T>.take(count: Int): Flow<T> {
+                 if (++consumed < count) {
+                     return@collect emit(value)
+                 } else {
+-                    return@collect emitAbort(value)
++                    return@collect emitAbort(value, ownershipMarker)
+                 }
+             }
+         } catch (e: AbortFlowException) {
+-            e.checkOwnership(owner = this)
++            e.checkOwnership(owner = ownershipMarker)
+         }
+     }
+ }
+ 
+-private suspend fun <T> FlowCollector<T>.emitAbort(value: T) {
++private suspend fun <T> FlowCollector<T>.emitAbort(value: T, ownershipMarker: FlowCollector<*>) {
+     emit(value)
+-    throw AbortFlowException(this)
++    throw AbortFlowException(ownershipMarker)
+ }
+ 
+ /**
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index 781d5d070..a693aa516 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -4,10 +4,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/common/test/flow/terminal/FirstTakeOnCompletionTest.kt b/kotlinx-coroutines-core/common/test/flow/terminal/FirstTakeOnCompletionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/flow/terminal/FirstTakeOnCompletionTest.kt
+@@ -0,0 +1,31 @@
++package kotlinx.coroutines.flow
++
++import kotlinx.coroutines.*
++import kotlinx.coroutines.testing.*
++import kotlin.test.*
++
++class FirstTakeOnCompletionTest : TestBase() {
++
++    @Test
++    fun testTakeOnCompletionFirstDoesNotHang() = runTest {
++        val result = withTimeout(1_000) {
++            flowOf(1)
++                .take(1)
++                .onCompletion { if (it == null) awaitCancellation() }
++                .first()
++        }
++        assertEquals(1, result)
++    }
++
++    @Test
++    fun testTakeLargerThanUpstreamOnCompletionFirstDoesNotHang() = runTest {
++        val result = withTimeout(1_000) {
++            flowOf(1, 2, 3)
++                .take(100)
++                .onCompletion { if (it == null) awaitCancellation() }
++                .first()
++        }
++        assertEquals(1, result)
++    }
++}
++

@@ -1,0 +1,172 @@
+diff --git a/kotlinx-coroutines-core/common/src/EventLoop.common.kt b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+index 6bfcbf0cb..2f9534333 100644
+--- a/kotlinx-coroutines-core/common/src/EventLoop.common.kt
++++ b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+@@ -256,21 +256,7 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+         // unconfined events take priority
+         if (processUnconfinedEvent()) return 0
+         // queue all delayed tasks that are due to be executed
+-        val delayed = _delayed.value
+-        if (delayed != null && !delayed.isEmpty) {
+-            val now = nanoTime()
+-            while (true) {
+-                // make sure that moving from delayed to queue removes from delayed only after it is added to queue
+-                // to make sure that 'isEmpty' and `nextTime` that check both of them
+-                // do not transiently report that both delayed and queue are empty during move
+-                delayed.removeFirstIf {
+-                    if (it.timeToExecute(now)) {
+-                        enqueueImpl(it)
+-                    } else
+-                        false
+-                } ?: break // quit loop when nothing more to remove or enqueueImpl returns false on "isComplete"
+-            }
+-        }
++        rescheduleAllDelayedFromQueue()
+         // then process one event from queue
+         val task = dequeue()
+         if (task != null) {
+@@ -283,6 +269,9 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+     final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
+ 
+     open fun enqueue(task: Runnable) {
++        // Process any delayed tasks that are due before enqueuing this task
++        // This ensures yield() and similar operations don't jump ahead of ready delayed tasks
++        rescheduleAllDelayedFromQueue()
+         if (enqueueImpl(task)) {
+             // todo: we should unpark only when this delayed task became first in the queue
+             unpark()
+@@ -291,6 +280,23 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+         }
+     }
+ 
++    private fun rescheduleAllDelayedFromQueue() {
++        // Move all delayed tasks that are due to the regular queue
++        val delayed = _delayed.value
++        if (delayed != null && !delayed.isEmpty) {
++            val now = nanoTime()
++            while (true) {
++                delayed.removeFirstIf {
++                    if (it.timeToExecute(now)) {
++                        enqueueImpl(it)
++                    } else {
++                        false
++                    }
++                } ?: break
++            }
++        }
++    }
++
+     @Suppress("UNCHECKED_CAST")
+     private fun enqueueImpl(task: Runnable): Boolean {
+         _queue.loop { queue ->
+
+diff --git a/kotlinx-coroutines-core/jvm/test/YieldDelayTest.kt b/kotlinx-coroutines-core/jvm/test/YieldDelayTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/YieldDelayTest.kt
+@@ -0,0 +1,105 @@
++package kotlinx.coroutines
++
++import kotlinx.coroutines.testing.*
++import org.junit.Test
++import kotlin.test.*
++
++/**
++ * Tests for yield() behavior with delayed tasks.
++ * See https://github.com/Kotlin/kotlinx.coroutines/issues/[issue-number]
++ */
++class YieldDelayTest : TestBase() {
++    
++    @Test
++    fun testYieldAfterDelayExpired() = runBlocking {
++        val result = mutableListOf<String>()
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1)
++            result.add("delayed")
++        }
++        
++        Thread.sleep(100) // Wait for delay to expire
++        yield()
++        result.add("main")
++        
++        // Wait for all coroutines to complete
++        Thread.sleep(10)
++        
++        // The delayed coroutine should execute first, before the main coroutine resumes
++        assertEquals(listOf("delayed", "main"), result)
++    }
++    
++    @Test
++    fun testYieldWithMultipleDelayedTasks() = runBlocking {
++        val result = mutableListOf<String>()
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1)
++            result.add("delayed1")
++        }
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(2)
++            result.add("delayed2")
++        }
++        
++        Thread.sleep(100) // Wait for both delays to expire
++        yield()
++        result.add("main")
++        
++        // Wait for all coroutines to complete
++        Thread.sleep(10)
++        
++        // Both delayed coroutines should execute before main resumes
++        assertEquals(3, result.size)
++        assertTrue(result.contains("delayed1"))
++        assertTrue(result.contains("delayed2"))
++        assertEquals("main", result[2], "Main should be last")
++    }
++    
++    @Test
++    fun testYieldBeforeDelayExpires() = runBlocking {
++        val result = mutableListOf<String>()
++        
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(100)
++            result.add("delayed")
++        }
++        
++        // Don't wait - yield immediately
++        yield()
++        result.add("main")
++        
++        // The main coroutine should resume immediately since delay hasn't expired
++        assertEquals(listOf("main"), result)
++        
++        // Now wait for the delayed task using delay() so the event loop can process
++        delay(200)
++        assertEquals(listOf("main", "delayed"), result)
++    }
++    
++    @Test
++    fun testOriginalIssueReproducer() = runBlocking {
++        val result = mutableListOf<String>()
++        
++        // This is the exact reproducer from the issue
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1)
++            result.add("This should be first")
++        }
++        
++        Thread.sleep(1000) // Wait much longer than the 1ms delay
++        yield()
++        result.add("This should be second")
++        
++        // Wait for everything to complete
++        Thread.sleep(10)
++        
++        // Verify the correct order: delayed task should execute before main resumes
++        assertEquals(2, result.size)
++        assertEquals("This should be first", result[0])
++        assertEquals("This should be second", result[1])
++    }
++}
++

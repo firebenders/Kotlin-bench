@@ -1,17 +1,5 @@
-diff --git a/CHANGELOG.md b/CHANGELOG.md
-index ab67c249..c40e8872 100644
---- a/CHANGELOG.md
-+++ b/CHANGELOG.md
-@@ -16,6 +16,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
- * Allow to 'unset' the `.editorconfig` property `ktlint_function_signature_rule_force_multiline_when_parameter_count_greater_or_equal_than` when using `ktlint_official` code style `function-signature` ([#1977](https://github.com/pinterest/ktlint/issues/1977))
- * Prevent nullpointer exception (NPE) if or operator at start of line is followed by dot qualified expression `indent` ([#1993](https://github.com/pinterest/ktlint/issues/1993))
- * Restrict indentation of closing quotes to `ktlint_official` code style to keep formatting of other code styles consistent with `0.48.x` and before `indent` ([#1971](https://github.com/pinterest/ktlint/issues/1971))
-+* Fix incorrect indentation of lambda parameters when parameters are wrapped to multiple lines in non-ktlint_official code styles `indent` ([#1756](https://github.com/pinterest/ktlint/issues/1756))
- 
- ### Changed
- * Separated Baseline functionality out of `ktlint-cli` into separate `ktlint-baseline` module for API consumers
 diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
-index 65465d1e..63767506 100644
+index 65465d1e..6d978bd9 100644
 --- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
 +++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
 @@ -452,7 +452,10 @@ public class IndentationRule :
@@ -21,56 +9,73 @@ index 65465d1e..63767506 100644
 -        if (codeStyle == ktlint_official || isFirstParameterOfFunctionLiteralPrecededByNewLine()) {
 +        if (codeStyle == ktlint_official ||
 +            isFirstParameterOfFunctionLiteralPrecededByNewLine() ||
-+            areFunctionLiteralParametersWrappedToMultipleLines()
++            !isFunctionLiteralLbraceOnSameLineAsReferenceExpressionOfCallExpression()
 +        ) {
              // val fieldExample =
              //      LongNameClass {
              //              paramA,
-@@ -484,6 +487,11 @@ public class IndentationRule :
+@@ -484,6 +487,26 @@ public class IndentationRule :
              ?.findChildByType(VALUE_PARAMETER_LIST)
              ?.prevSibling { it.textContains('\n') } != null
  
-+    private fun ASTNode.areFunctionLiteralParametersWrappedToMultipleLines() =
-+        parent(FUNCTION_LITERAL)
-+            ?.findChildByType(VALUE_PARAMETER_LIST)
-+            ?.textContains('\n') == true
++    private fun ASTNode.isFunctionLiteralLbraceOnSameLineAsReferenceExpressionOfCallExpression(): Boolean {
++        val lbrace =
++            parent(FUNCTION_LITERAL)
++                ?.findChildByType(LBRACE)
++                ?: return true // Assume same line when not found
++        val referenceExpression =
++            parent(CALL_EXPRESSION)
++                ?.findChildByType(REFERENCE_EXPRESSION)
++                ?: return true // Assume same line when not found
++        // Check if there's a newline between the reference expression and the lbrace
++        var node: ASTNode? = referenceExpression.lastChildLeafOrSelf().nextLeaf()
++        while (node != null && node != lbrace) {
++            if (node.textContains('\n')) {
++                return false
++            }
++            node = node.nextLeaf()
++        }
++        return true
++    }
 +
      private fun visitLparBeforeCondition(node: ASTNode) {
          startIndentContext(
              fromAstNode = requireNotNull(node.nextLeaf()), // Allow to pickup whitespace before condition
-diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
-index 059e278f..5b48e216 100644
---- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
-+++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTest.kt
-@@ -4090,9 +4090,8 @@ internal class IndentationRuleTest {
-         indentationRuleAssertThat(code).hasNoLintViolations()
-     }
- 
--    @Disabled("To be fixed as code as lambda with parameters on multiple line")
-     @Test
--    fun `Given a function with lambda parameters on multiple lines then align the parameters`() {
-+    fun `Issue 1756 - Given a function with lambda parameters wrapped to separate lines then use double indent`() {
-         val code =
-             """
-             val fieldExample =
-@@ -4102,20 +4101,58 @@ internal class IndentationRuleTest {
-                     ClassB(paramA, paramB, paramC)
-                 }
-             """.trimIndent()
--        val formattedCode =
-+        // With parameters wrapped to multiple lines, use double indent instead of aligning with first parameter
-+        indentationRuleAssertThat(code).hasNoLintViolations()
-+    }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleLambdaParameterIssue1756Test.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleLambdaParameterIssue1756Test.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleLambdaParameterIssue1756Test.kt
+@@ -0,0 +1,208 @@
++package com.pinterest.ktlint.ruleset.standard.rules
 +
-+    @Test
-+    fun `Issue 1756 - Given a trailing lambda with parameters on separate lines after multiline call arguments`() {
-+        val code =
-             """
--            val fieldExample =
--                LongNameClass { paramA,
--                                paramB,
--                                paramC ->
--                    ClassB(paramA, paramB, paramC)
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.android_studio
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.intellij_idea
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Nested
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for Issue 1756: Lambda parameters should be correctly indented when the lambda
++ * is on a continuation line (i.e., the function call has wrapped arguments and the lambda
++ * is on a separate line from the function name).
++ *
++ * See: https://github.com/pinterest/ktlint/issues/1756
++ */
++class IndentationRuleLambdaParameterIssue1756Test {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Nested
++    inner class `Given a function call with wrapped arguments followed by a lambda with parameters on multiple lines` {
++        // When lambda is on a continuation line (i.e., arguments are wrapped), the lambda parameters
++        // should use double indent from the lambda's base, not alignment with the function name
++        // Base indent of lambda = 8 (inside class + function)
++        // Double indent for parameters = 8 + 8 = 16
++        private val code =
++            """
 +            fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
 +                c(a, b)
 +            }
@@ -87,41 +92,169 @@ index 059e278f..5b48e216 100644
 +                }
 +            }
 +            """.trimIndent()
-+        // With parameters wrapped to multiple lines, use double indent instead of aligning with first parameter
-+        indentationRuleAssertThat(code).hasNoLintViolations()
++
++        @Test
++        fun `Given ktlint_official code style then expect no violations`() {
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given intellij_idea code style then expect no violations`() {
++            // With the fix, lambda parameters on a continuation line should use double indent
++            // instead of trying to align with a function name that's on a different line
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to intellij_idea)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given android_studio code style then expect no violations`() {
++            // With the fix, lambda parameters on a continuation line should use double indent
++            // instead of trying to align with a function name that's on a different line
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to android_studio)
++                .hasNoLintViolations()
++        }
 +    }
 +
-+    @Test
-+    fun `Issue 1756 - Given intellij_idea code style and trailing lambda with parameters on separate lines`() {
-+        val code =
++    @Nested
++    inner class `Given a function call without wrapped arguments with lambda on same line` {
++        private val code =
 +            """
-+            fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
-+                c(a, b)
-+            }
-+
 +            class Foo {
 +                fun foo() {
-+                    combine(
-+                        Any(),
-+                        Any()
-+                    ) { a,
++                    combine { a,
++                              b ->
++                        TODO()
++                    }
++                }
++            }
++            """.trimIndent()
++
++        @Test
++        fun `Given ktlint_official code style then double indent is expected`() {
++            val formattedCode =
++                """
++                class Foo {
++                    fun foo() {
++                        combine { a,
++                                b ->
++                            TODO()
++                        }
++                    }
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++                .isFormattedAs(formattedCode)
++        }
++
++        @Test
++        fun `Given intellij_idea code style then alignment with first parameter is expected`() {
++            // In IntelliJ IDEA style, when the lambda is on the same line as the function call,
++            // parameters should be aligned with the first parameter
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to intellij_idea)
++                .hasNoLintViolations()
++        }
++    }
++
++    @Nested
++    inner class `Given a trailing lambda with first parameter on newline` {
++        private val code =
++            """
++            class Foo {
++                fun foo() {
++                    combine {
++                            a,
 +                            b ->
 +                        TODO()
 +                    }
-                 }
++                }
 +            }
-             """.trimIndent()
-+        // With parameters wrapped to multiple lines, use double indent instead of aligning with first parameter
-         indentationRuleAssertThat(code)
--            .hasLintViolations(
--                LintViolation(3, 1, "Unexpected indentation (12) (should be 20)"),
--                LintViolation(4, 1, "Unexpected indentation (12) (should be 20)"),
--            ).isFormattedAs(formattedCode)
-+            .withEditorConfigOverride(CODE_STYLE_PROPERTY to intellij_idea)
-+            .hasNoLintViolations()
-     }
- 
-     @Nested
++            """.trimIndent()
++
++        @Test
++        fun `Given ktlint_official code style then expect no violations with double indent`() {
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given intellij_idea code style then expect no violations with double indent`() {
++            // When the first parameter is on a newline, double indent is used for all code styles
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to intellij_idea)
++                .hasNoLintViolations()
++        }
++    }
++
++    @Nested
++    inner class `Issue 1756 - Given the exact example from the issue` {
++        // The original issue showed this error:
++        // Unexpected indentation (8) (should be 14) (standard:indent)
++        // The fix makes ktlint use double indent (8) instead of alignment (14)
++        // when the lambda is on a continuation line
++
++        @Test
++        fun `Given intellij_idea code style with 2-space indent then expect double indent`() {
++            // With 2-space indent, inside a class method at 4 spaces:
++            // Lambda parameters should be at 4 (method body) + 4 (double indent) = 8 spaces
++            val code =
++                """
++                fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
++                  c(a, b)
++                }
++
++                class Foo {
++                  fun foo() {
++                    combine(
++                      Any(),
++                      Any()
++                    ) { a,
++                        b ->
++                      TODO()
++                    }
++                  }
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to intellij_idea)
++                .withEditorConfigOverride(INDENT_SIZE_PROPERTY to 2)
++                .hasNoLintViolations()
++        }
++
++        @Test
++        fun `Given android_studio code style with 2-space indent then expect double indent`() {
++            val code =
++                """
++                fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
++                  c(a, b)
++                }
++
++                class Foo {
++                  fun foo() {
++                    combine(
++                      Any(),
++                      Any()
++                    ) { a,
++                        b ->
++                      TODO()
++                    }
++                  }
++                }
++                """.trimIndent()
++            indentationRuleAssertThat(code)
++                .withEditorConfigOverride(CODE_STYLE_PROPERTY to android_studio)
++                .withEditorConfigOverride(INDENT_SIZE_PROPERTY to 2)
++                .hasNoLintViolations()
++        }
++    }
++}
++
 
 diff --git a/local.properties b/local.properties
 new file mode 100644

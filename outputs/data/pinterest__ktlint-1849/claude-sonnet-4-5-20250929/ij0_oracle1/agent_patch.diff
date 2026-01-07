@@ -1,0 +1,161 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+index 0530f0d2..3c89a468 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+@@ -83,7 +83,8 @@ public class AnnotationRule : StandardRule("annotation") {
+ 
+         if (node.treeParent.elementType != ANNOTATION &&
+             node.isPrecededByOtherAnnotationEntry() &&
+-            node.isOnSameLineAsAnnotatedConstruct()
++            node.isOnSameLineAsAnnotatedConstruct() &&
++            !node.isPartOf(TYPE_ARGUMENT_LIST) // Annotations in type argument lists are handled separately
+         ) {
+             checkForMultipleAnnotationsOnSameLineAsAnnotatedConstruct(node, emit, autoCorrect)
+         }
+@@ -174,13 +175,15 @@ public class AnnotationRule : StandardRule("annotation") {
+             node
+                 .siblings(forward = false)
+                 .any { it.isWhiteSpaceWithNewline() }
+-        if (isFollowedWithAnnotationHavingValueArgumentList || isPrecededWithAnnotationOnOtherLine) {
++        val isInTypeArgumentList = node.isPartOf(TYPE_ARGUMENT_LIST)
++        if (isFollowedWithAnnotationHavingValueArgumentList || isPrecededWithAnnotationOnOtherLine || isInTypeArgumentList) {
+             emit(
+                 node.startOffset,
+                 "Annotation must be placed on separate line",
+-                true,
++                // Disable auto-correction for TYPE_ARGUMENT_LIST due to AST manipulation constraints
++                !isInTypeArgumentList,
+             )
+-            if (autoCorrect) {
++            if (autoCorrect && !isInTypeArgumentList) {
+                 node
+                     .lastChildLeafOrSelf()
+                     .nextLeaf()
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTypeArgumentListTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTypeArgumentListTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTypeArgumentListTest.kt
+@@ -0,0 +1,114 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for annotation formatting in type argument lists.
++ * Issue: https://github.com/pinterest/ktlint/issues/673
++ */
++class AnnotationRuleTypeArgumentListTest {
++    private val annotationRuleAssertThat = assertThatRule { AnnotationRule() }
++
++    @Test
++    fun `Given a single annotation in a type argument list then do not report a violation`() {
++        val code =
++            """
++            data class FooRequestDto(
++                val data: List<@Valid FooDto>,
++            )
++
++            annotation class Valid
++            class FooDto
++            """.trimIndent()
++        annotationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a single annotation with parameter in a type argument list then do not report a violation`() {
++        val code =
++            """
++            data class FooRequestDto(
++                val data: List<@Suppress("test") FooDto>,
++            )
++
++            class FooDto
++            """.trimIndent()
++        annotationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given multiple annotations on same line in a type argument list then report violations`() {
++        val code =
++            """
++            data class FooRequestDto(
++                val data: List<@Valid @NotNull FooDto>,
++            )
++
++            annotation class Valid
++            annotation class NotNull
++            class FooDto
++            """.trimIndent()
++        // Multiple annotations in type argument lists should be on separate lines,
++        // but auto-correction is not currently supported for this case
++        annotationRuleAssertThat(code)
++            .hasLintViolationsWithoutAutoCorrect(
++                LintViolation(2, 20, "Annotation must be placed on separate line"),
++                LintViolation(2, 27, "Annotation must be placed on separate line"),
++            )
++    }
++
++    @Test
++    fun `Given multiple annotations on same line in a type argument list with Map then report violations`() {
++        val code =
++            """
++            data class FooRequestDto(
++                val data: Map<@Valid @NotNull String, @Valid @NotNull Int>,
++            )
++
++            annotation class Valid
++            annotation class NotNull
++            """.trimIndent()
++        // Multiple annotations in type argument lists should be on separate lines,
++        // but auto-correction is not currently supported for this case
++        annotationRuleAssertThat(code)
++            .hasLintViolationsWithoutAutoCorrect(
++                LintViolation(2, 19, "Annotation must be placed on separate line"),
++                LintViolation(2, 26, "Annotation must be placed on separate line"),
++                LintViolation(2, 43, "Annotation must be placed on separate line"),
++                LintViolation(2, 50, "Annotation must be placed on separate line"),
++            )
++    }
++
++    @Test
++    fun `Given multiple annotations already on separate lines in a type argument list then do not report violations`() {
++        val code =
++            """
++            data class FooRequestDto(
++                val data: List<
++                    @Valid
++                    @NotNull
++                    FooDto
++                >,
++            )
++
++            annotation class Valid
++            annotation class NotNull
++            class FooDto
++            """.trimIndent()
++        annotationRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given annotations with parameters on same line in a type argument list then do not report violations`() {
++        val code =
++            """
++            val aProperty: Map<@Ann("test") Int, @JvmSuppressWildcards(true) (String) -> Int?>
++
++            annotation class Ann(val s: String)
++            """.trimIndent()
++        annotationRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

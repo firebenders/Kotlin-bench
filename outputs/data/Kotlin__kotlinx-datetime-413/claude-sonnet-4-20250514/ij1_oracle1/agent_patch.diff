@@ -1,0 +1,177 @@
+diff --git a/core/common/src/internal/format/FormatStructure.kt b/core/common/src/internal/format/FormatStructure.kt
+index 64644e8..12f6563 100644
+--- a/core/common/src/internal/format/FormatStructure.kt
++++ b/core/common/src/internal/format/FormatStructure.kt
+@@ -8,6 +8,11 @@ package kotlinx.datetime.internal.format
+ import kotlinx.datetime.internal.format.formatter.*
+ import kotlinx.datetime.internal.format.parser.*
+ 
++/**
++ * Checks if a character is an ASCII digit (0-9).
++ */
++private fun Char.isAsciiDigit(): Boolean = this in '0'..'9'
++
+ internal sealed interface FormatStructure<in T> {
+     fun parser(): ParserStructure<T>
+     fun formatter(): FormatterStructure<T>
+@@ -37,16 +42,16 @@ internal class ConstantFormatStructure<in T>(
+         operations = when {
+             string.isEmpty() -> emptyList()
+             else -> buildList {
+-                val suffix = if (string[0].isDigit()) {
+-                    add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(string.takeWhile { it.isDigit() }))))
+-                    string.dropWhile { it.isDigit() }
++                val suffix = if (string[0].isAsciiDigit()) {
++                    add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(string.takeWhile { it.isAsciiDigit() }))))
++                    string.dropWhile { it.isAsciiDigit() }
+                 } else {
+                     string
+                 }
+                 if (suffix.isNotEmpty()) {
+-                    if (suffix[suffix.length - 1].isDigit()) {
+-                        add(PlainStringParserOperation(suffix.dropLastWhile { it.isDigit() }))
+-                        add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(suffix.takeLastWhile { it.isDigit() }))))
++                    if (suffix[suffix.length - 1].isAsciiDigit()) {
++                        add(PlainStringParserOperation(suffix.dropLastWhile { it.isAsciiDigit() }))
++                        add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(suffix.takeLastWhile { it.isAsciiDigit() }))))
+                     } else {
+                         add(PlainStringParserOperation(suffix))
+                     }
+diff --git a/core/common/src/internal/format/parser/NumberConsumer.kt b/core/common/src/internal/format/parser/NumberConsumer.kt
+index 6813e2e..922d69b 100644
+--- a/core/common/src/internal/format/parser/NumberConsumer.kt
++++ b/core/common/src/internal/format/parser/NumberConsumer.kt
+@@ -8,6 +8,27 @@ package kotlinx.datetime.internal.format.parser
+ import kotlinx.datetime.internal.POWERS_OF_TEN
+ import kotlinx.datetime.internal.DecimalFraction
+ 
++/**
++ * Checks if a character is an ASCII digit (0-9).
++ */
++private fun Char.isAsciiDigit(): Boolean = this in '0'..'9'
++
++/**
++ * Converts a string to an Int only if it contains exclusively ASCII digits (0-9).
++ * Returns null if the string contains non-ASCII digits or other characters.
++ */
++private fun String.toAsciiIntOrNull(): Int? {
++    if (isEmpty()) return null
++    
++    // Check if all characters are ASCII digits
++    for (char in this) {
++        if (!char.isAsciiDigit()) return null
++    }
++    
++    // Now we can safely use toIntOrNull since we've verified ASCII digits
++    return toIntOrNull()
++}
++
+ /**
+  * A parser that expects to receive a string consisting of [length] digits, or, if [length] is `null`,
+  * a string consisting of any number of digits.
+@@ -66,7 +87,7 @@ internal class UnsignedIntConsumer<in Receiver>(
+     override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when {
+         maxLength != null && input.length > maxLength -> NumberConsumptionError.TooManyDigits(maxLength)
+         minLength != null && input.length < minLength -> NumberConsumptionError.TooFewDigits(minLength)
+-        else -> when (val result = input.toIntOrNull()) {
++        else -> when (val result = input.toAsciiIntOrNull()) {
+             null -> NumberConsumptionError.ExpectedInt
+             else -> setter.setWithoutReassigning(storage, if (multiplyByMinus1) -result else result)
+         }
+@@ -84,7 +105,7 @@ internal class ReducedIntConsumer<in Receiver>(
+     private val baseMod = base % modulo
+     private val baseFloor = base - baseMod
+ 
+-    override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when (val result = input.toIntOrNull()) {
++    override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when (val result = input.toAsciiIntOrNull()) {
+         null -> NumberConsumptionError.ExpectedInt
+         else -> setter.setWithoutReassigning(storage, if (result >= baseMod) {
+             baseFloor + result
+@@ -121,7 +142,7 @@ internal class FractionPartConsumer<in Receiver>(
+     override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when {
+         minLength != null && input.length < minLength -> NumberConsumptionError.TooFewDigits(minLength)
+         maxLength != null && input.length > maxLength -> NumberConsumptionError.TooManyDigits(maxLength)
+-        else -> when (val numerator = input.toIntOrNull()) {
++        else -> when (val numerator = input.toAsciiIntOrNull()) {
+             null -> NumberConsumptionError.TooManyDigits(9)
+             else -> setter.setWithoutReassigning(storage, DecimalFraction(numerator, input.length))
+         }
+diff --git a/core/common/src/internal/format/parser/ParserOperation.kt b/core/common/src/internal/format/parser/ParserOperation.kt
+index 6ac3a1c..83c7f33 100644
+--- a/core/common/src/internal/format/parser/ParserOperation.kt
++++ b/core/common/src/internal/format/parser/ParserOperation.kt
+@@ -5,6 +5,11 @@
+ 
+ package kotlinx.datetime.internal.format.parser
+ 
++/**
++ * Checks if a character is an ASCII digit (0-9).
++ */
++private fun Char.isAsciiDigit(): Boolean = this in '0'..'9'
++
+ internal interface ParserOperation<in Output> {
+     fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult
+ }
+@@ -15,8 +20,8 @@ internal interface ParserOperation<in Output> {
+ internal class PlainStringParserOperation<Output>(val string: String) : ParserOperation<Output> {
+     init {
+         require(string.isNotEmpty()) { "Empty string is not allowed" }
+-        require(!string[0].isDigit()) { "String '$string' starts with a digit" }
+-        require(!string[string.length - 1].isDigit()) { "String '$string' ends with a digit" }
++        require(!string[0].isAsciiDigit()) { "String '$string' starts with a digit" }
++        require(!string[string.length - 1].isAsciiDigit()) { "String '$string' ends with a digit" }
+     }
+ 
+     override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {
+@@ -77,7 +82,7 @@ internal class NumberSpanParserOperation<Output>(
+         if (startIndex + minLength > input.length)
+             return ParseResult.Error(startIndex) { "Unexpected end of input: yet to parse $whatThisExpects" }
+         var digitsInRow = 0
+-        while (startIndex + digitsInRow < input.length && input[startIndex + digitsInRow].isDigit()) {
++        while (startIndex + digitsInRow < input.length && input[startIndex + digitsInRow].isAsciiDigit()) {
+             ++digitsInRow
+         }
+         if (digitsInRow < minLength)
+diff --git a/core/common/test/format/LocalDateFormatTest.kt b/core/common/test/format/LocalDateFormatTest.kt
+index d136325..635b6ab 100644
+--- a/core/common/test/format/LocalDateFormatTest.kt
++++ b/core/common/test/format/LocalDateFormatTest.kt
+@@ -9,6 +9,7 @@ package kotlinx.datetime.test.format
+ 
+ import kotlinx.datetime.*
+ import kotlinx.datetime.format.*
++import kotlinx.datetime.test.*
+ import kotlin.test.*
+ 
+ class LocalDateFormatTest {
+@@ -253,6 +254,30 @@ class LocalDateFormatTest {
+         }
+     }
+ 
++    @Test
++    fun testRejectsNonAsciiDigits() {
++        // Test that parsing rejects non-ASCII digits that look like ASCII digits
++        // Using Unicode full-width digits and Arabic-Indic digits
++        val withNonAsciiDigits = "2０2４٠٩０６"  // Mix of ASCII and Unicode digits
++        
++        // Should fail to parse because non-ASCII digits should be rejected
++        LocalDate.Formats.ISO_BASIC.assertCanNotParse(withNonAsciiDigits)
++        
++        // Test with different non-ASCII digit characters
++        LocalDate.Formats.ISO_BASIC.assertCanNotParse("２０２４０９０６")  // All full-width digits
++        LocalDate.Formats.ISO_BASIC.assertCanNotParse("٢٠٢٤٠٩٠٦")      // All Arabic-Indic digits
++        
++        // Test with ISO format (with separators)
++        LocalDate.Formats.ISO.assertCanNotParse("2０24-０9-０6")
++        
++        // Ensure normal ASCII digits still work
++        val withAsciiDigits = "20240906"
++        assertEquals(LocalDate(2024, 9, 6), LocalDate.parse(withAsciiDigits, LocalDate.Formats.ISO_BASIC))
++        
++        // Ensure normal ISO format still works
++        assertEquals(LocalDate(2024, 9, 6), LocalDate.parse("2024-09-06", LocalDate.Formats.ISO))
++    }
++
+     private fun test(strings: Map<LocalDate, Pair<String, Set<String>>>, format: DateTimeFormat<LocalDate>) {
+         for ((date, stringsForDate) in strings) {
+             val (canonicalString, otherStrings) = stringsForDate

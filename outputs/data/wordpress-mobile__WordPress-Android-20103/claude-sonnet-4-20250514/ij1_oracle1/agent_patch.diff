@@ -1,0 +1,208 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt
+index c9b02681ea8..f89c284bb92 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt
+@@ -32,6 +32,7 @@ import org.wordpress.android.ui.reader.repository.ReaderDiscoverCommunication.St
+ import org.wordpress.android.ui.reader.repository.ReaderDiscoverCommunication.Success
+ import org.wordpress.android.ui.reader.repository.ReaderDiscoverDataProvider
+ import org.wordpress.android.ui.reader.repository.usecases.tags.GetFollowedTagsUseCase
++import org.wordpress.android.ui.bloggingprompts.BloggingPromptsPostTagProvider
+ import org.wordpress.android.ui.reader.services.discover.ReaderDiscoverLogic.DiscoverTasks.REQUEST_FIRST_PAGE
+ import org.wordpress.android.ui.reader.services.discover.ReaderDiscoverLogic.DiscoverTasks.REQUEST_MORE
+ import org.wordpress.android.ui.reader.tracker.ReaderTracker
+@@ -149,7 +150,7 @@ class ReaderDiscoverViewModel @Inject constructor(
+         _uiState.addSource(readerDiscoverDataProvider.discoverFeed) { posts ->
+             launch {
+                 val userTags = getFollowedTagsUseCase.get()
+-                if (userTags.isEmpty()) {
++                if (shouldShowOnboarding(userTags)) {
+                     _uiState.value = DiscoverUiState.EmptyUiState.ShowNoFollowedTagsUiState {
+                         parentViewModel.onShowReaderInterests()
+                     }
+@@ -174,6 +175,19 @@ class ReaderDiscoverViewModel @Inject constructor(
+         }
+     }
+ 
++    /**
++     * Determines if the onboarding flow should be shown to the user.
++     * Returns true if user has no followed tags except for the automatically added dailyprompt tag.
++     * This allows new users to still see the onboarding even when dailyprompt is auto-subscribed.
++     */
++    private fun shouldShowOnboarding(userTags: ReaderTagList): Boolean {
++        // Filter out the dailyprompt tag when determining if onboarding should be shown
++        val meaningfulTags = userTags.filterNot { tag ->
++            tag.tagSlug.equals(BloggingPromptsPostTagProvider.BLOGGING_PROMPT_TAG, ignoreCase = true)
++        }
++        return meaningfulTags.isEmpty()
++    }
++
+     private fun observeFollowStatus() {
+         // listen to changes on follow status for updating the reader recommended blogs state immediately
+         _uiState.addSource(readerPostCardActionsHandler.followStatusUpdated) { data ->
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt
+index fc06dca994c..ccbbb0cf642 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt
+@@ -23,6 +23,7 @@ import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewMod
+ import org.wordpress.android.ui.reader.repository.ReaderRepositoryCommunication
+ import org.wordpress.android.ui.reader.repository.ReaderTagRepository
+ import org.wordpress.android.ui.reader.tracker.ReaderTracker
++import org.wordpress.android.ui.bloggingprompts.BloggingPromptsPostTagProvider
+ import org.wordpress.android.ui.reader.viewmodels.ReaderViewModel
+ import org.wordpress.android.ui.utils.UiString.UiStringRes
+ import org.wordpress.android.viewmodel.Event
+@@ -92,13 +93,26 @@ class ReaderInterestsViewModel @Inject constructor(
+     }
+ 
+     private fun checkAndLoadInterests(userTags: ReaderTagList) {
+-        if (userTags.isEmpty()) {
++        if (shouldShowInterestsScreen(userTags)) {
+             loadInterests(userTags)
+         } else {
+             parentViewModel?.onCloseReaderInterests()
+         }
+     }
+ 
++    /**
++     * Determines if the interests selection screen should be shown to the user.
++     * Returns true if user has no followed tags except for the automatically added dailyprompt tag.
++     * This allows new users to still see the interests selection even when dailyprompt is auto-subscribed.
++     */
++    private fun shouldShowInterestsScreen(userTags: ReaderTagList): Boolean {
++        // Filter out the dailyprompt tag when determining if interests screen should be shown
++        val meaningfulTags = userTags.filterNot { tag ->
++            tag.tagSlug.equals(BloggingPromptsPostTagProvider.BLOGGING_PROMPT_TAG, ignoreCase = true)
++        }
++        return meaningfulTags.isEmpty()
++    }
++
+     private fun loadInterests(userTags: ReaderTagList) {
+         updateUiState(InitialLoadingUiState)
+         viewModelScope.launch {
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModelTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModelTest.kt
+index 1db7219634e..d574f2c2d53 100644
+--- a/WordPress/src/test/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModelTest.kt
++++ b/WordPress/src/test/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModelTest.kt
+@@ -24,6 +24,7 @@ import org.wordpress.android.models.ReaderBlog
+ import org.wordpress.android.models.ReaderPost
+ import org.wordpress.android.models.ReaderTag
+ import org.wordpress.android.models.ReaderTagList
++import org.wordpress.android.models.ReaderTagType
+ import org.wordpress.android.models.discover.ReaderDiscoverCard.InterestsYouMayLikeCard
+ import org.wordpress.android.models.discover.ReaderDiscoverCard.ReaderPostCard
+ import org.wordpress.android.models.discover.ReaderDiscoverCard.ReaderRecommendedBlogsCard
+@@ -292,6 +293,37 @@ class ReaderDiscoverViewModelTest : BaseUnitTest() {
+         assertThat(uiStates[1]).isInstanceOf(ShowNoFollowedTagsUiState::class.java)
+     }
+ 
++    @Test
++    fun `ShowFollowInterestsEmptyUiState is shown when user only follows dailyprompt tag`() = test {
++        // Arrange
++        val userTags = ReaderTagList().apply {
++            add(ReaderTag.createFromTagName("dailyprompt", ReaderTagType.FOLLOWED))
++        }
++        whenever(getFollowedTagsUseCase.get()).thenReturn(userTags)
++        val uiStates = init().uiStates
++        // Act
++        viewModel.start(parentViewModel)
++        // Assert
++        assertThat(uiStates.size).isEqualTo(2)
++        assertThat(uiStates[1]).isInstanceOf(ShowNoFollowedTagsUiState::class.java)
++    }
++
++    @Test
++    fun `ContentUiState is shown when user follows dailyprompt and other tags`() = test {
++        // Arrange
++        val userTags = ReaderTagList().apply {
++            add(ReaderTag.createFromTagName("dailyprompt", ReaderTagType.FOLLOWED))
++            add(ReaderTag.createFromTagName("technology", ReaderTagType.FOLLOWED))
++        }
++        whenever(getFollowedTagsUseCase.get()).thenReturn(userTags)
++        val uiStates = init().uiStates
++        // Act
++        viewModel.start(parentViewModel)
++        fakeDiscoverFeed.value = createDummyReaderCardsList()
++        // Assert
++        assertThat(uiStates[1]).isInstanceOf(ContentUiState::class.java)
++    }
++
+     @Test
+     fun `ShowNoPostsUiState is shown when the discoverFeed does not contain any posts`() = test {
+         // Arrange
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModelTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModelTest.kt
+index 4b3451b7141..1ba44a4dd66 100644
+--- a/WordPress/src/test/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModelTest.kt
++++ b/WordPress/src/test/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModelTest.kt
+@@ -107,6 +107,44 @@ class ReaderInterestsViewModelTest : BaseUnitTest() {
+             verify(parentViewModel, times(0)).onCloseReaderInterests()
+         }
+ 
++    @Test
++    fun `getInterests invoked if user has only dailyprompt tag`() =
++        testWithOnlyDailypromptTag {
++            // Given
++            val interests = getInterests()
++            whenever(readerTagRepository.getInterests()).thenReturn(SuccessWithData(interests))
++
++            // When
++            initViewModel()
++
++            // Then
++            verify(readerTagRepository, times(1)).getInterests()
++        }
++
++    @Test
++    fun `discover close reader screen NOT triggered if user has only dailyprompt tag`() =
++        testWithOnlyDailypromptTag {
++            // Given
++            val interests = getInterests()
++            whenever(readerTagRepository.getInterests()).thenReturn(SuccessWithData(interests))
++
++            // When
++            initViewModel(EntryPoint.DISCOVER)
++
++            // Then
++            verify(parentViewModel, times(0)).onCloseReaderInterests()
++        }
++
++    @Test
++    fun `discover close reader screen triggered if user has dailyprompt and other tags`() =
++        testWithDailypromptAndOtherTags {
++            // When
++            initViewModel(EntryPoint.DISCOVER)
++
++            // Then
++            verify(parentViewModel, times(1)).onCloseReaderInterests()
++        }
++
+     @Test
+     @Ignore("This test fails due to the way it is structured to test the initial state.")
+     fun `progress bar shown on start hides on successful interests data load`() = testWithEmptyUserTags {
+@@ -620,6 +658,27 @@ class ReaderInterestsViewModelTest : BaseUnitTest() {
+         }
+     }
+ 
++    private fun <T> testWithOnlyDailypromptTag(block: suspend CoroutineScope.() -> T) {
++        test {
++            val userTagsWithOnlyDailyprompt = ReaderTagList().apply {
++                add(ReaderTag.createFromTagName("dailyprompt", ReaderTagType.FOLLOWED))
++            }
++            whenever(readerTagRepository.getUserTags()).thenReturn(SuccessWithData(userTagsWithOnlyDailyprompt))
++            block()
++        }
++    }
++
++    private fun <T> testWithDailypromptAndOtherTags(block: suspend CoroutineScope.() -> T) {
++        test {
++            val userTagsWithDailypromptAndOthers = ReaderTagList().apply {
++                add(ReaderTag.createFromTagName("dailyprompt", ReaderTagType.FOLLOWED))
++                add(ReaderTag.createFromTagName("technology", ReaderTagType.FOLLOWED))
++            }
++            whenever(readerTagRepository.getUserTags()).thenReturn(SuccessWithData(userTagsWithDailypromptAndOthers))
++            block()
++        }
++    }
++
+     private fun getInterests() =
+         ReaderTagList().apply {
+             for (c in 'A'..'Z')

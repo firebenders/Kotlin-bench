@@ -1,0 +1,193 @@
+diff --git a/.editorconfig b/.editorconfig
+deleted file mode 100644
+index 01626914..00000000
+--- a/.editorconfig
++++ /dev/null
+@@ -1,39 +0,0 @@
+-# https://editorconfig.org
+-root = true
+-
+-[*]
+-indent_style = space
+-indent_size = 2
+-max_line_length = 140
+-
+-end_of_line = lf
+-charset = utf-8
+-trim_trailing_whitespace = true
+-insert_final_newline = true
+-
+-[*.{java,kt,kts,scala,rs,xml,kt.spec,kts.spec}]
+-indent_size = 4
+-
+-[*.{kt,kts}]
+-ktlint_code_style = ktlint_official
+-ktlint_ignore_back_ticked_identifier = true
+-
+-ktlint_standard = enabled
+-
+-# Experimental rules run by default run on the ktlint code base itself. Experimental rules should not be released if
+-# we are not pleased ourselves with the results on the ktlint code base.
+-ktlint_experimental = enabled
+-
+-# Don't allow any wildcard imports
+-ij_kotlin_packages_to_use_import_on_demand = unset
+-
+-# Prevent wildcard imports
+-ij_kotlin_name_count_to_use_star_import = 99
+-ij_kotlin_name_count_to_use_star_import_for_members = 99
+-
+-[*.md]
+-trim_trailing_whitespace = false
+-max_line_length = unset
+-
+-[gradle/verification-metadata.xml]
+-indent_size = 3
+diff --git a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+index 201e7dac..b5dc3390 100644
+--- a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
++++ b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+@@ -236,13 +236,28 @@ public fun ASTNode.upsertWhitespaceBeforeMe(text: String) {
+         if (this.elementType == WHITE_SPACE) {
+             return replaceWhitespaceWith(text)
+         }
+-        val previous = treePrev ?: prevLeaf()
++        val previous = treePrev
+         if (previous != null && previous.elementType == WHITE_SPACE) {
+             previous.replaceWhitespaceWith(text)
+-        } else {
++        } else if (previous != null) {
+             PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
+                 (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
+             }
++        } else {
++            // No previous sibling. Try to insert via previous leaf, but avoid circular delegation.
++            val previousLeaf = prevLeaf()
++            if (previousLeaf != null) {
++                // Check if delegating would cause circular recursion
++                if (previousLeaf.treeNext == null && previousLeaf.nextLeaf() == this) {
++                    // Circular case: previous leaf has no next sibling and its next leaf is this node.
++                    // Insert directly using the parent structure.
++                    PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
++                        (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
++                    }
++                } else {
++                    previousLeaf.upsertWhitespaceAfterMe(text)
++                }
++            }
+         }
+     } else {
+         val prevLeaf =
+@@ -270,13 +285,16 @@ public fun ASTNode.upsertWhitespaceAfterMe(text: String) {
+         if (this.elementType == WHITE_SPACE) {
+             return replaceWhitespaceWith(text)
+         }
+-        val next = treeNext ?: nextLeaf()
++        val next = treeNext
+         if (next != null && next.elementType == WHITE_SPACE) {
+             next.replaceWhitespaceWith(text)
+-        } else {
++        } else if (next != null) {
+             PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
+                 (psi as LeafElement).rawInsertAfterMe(psiWhiteSpace)
+             }
++        } else {
++            // No next sibling, so delegate to next leaf to ensure whitespace is inserted at correct level
++            nextLeaf()?.upsertWhitespaceBeforeMe(text)
+         }
+     } else {
+         lastChildLeafOrSelf().upsertWhitespaceAfterMe(text)
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+index 596533b3..9b797322 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+@@ -9,6 +9,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EOL_COMMENT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN_KEYWORD
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.LBRACE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.LPAR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.RPAR
+@@ -118,7 +119,7 @@ public class FunctionSignatureRule :
+         val startOfBodyBlock =
+             this
+                 .findChildByType(BLOCK)
+-                ?.firstChildNode
++                ?.findChildByType(LBRACE)
+         val startOfBodyExpression = this.findChildByType(EQ)
+         return collectLeavesRecursively()
+             .childrenBetween(
+@@ -248,9 +249,34 @@ public class FunctionSignatureRule :
+ 
+         // Calculate the length of the function signature in case it would be rewritten as single line (and without a
+         // maximum line length). The white space correction will be calculated via a dry run of the actual fix.
+-        return actualFunctionSignatureLength +
+-            // Calculate the white space correction in case the signature would be rewritten to a single line
++        val parameterListWhitespaceCorrection =
+             fixWhiteSpacesInValueParameterList(node, emit, autoCorrect, multiline = false, dryRun = true)
++        
++        // Also account for the space needed before the body block/expression
++        val bodySpacingCorrection = calculateBodySpacingCorrection(node)
++        
++        return actualFunctionSignatureLength + parameterListWhitespaceCorrection + bodySpacingCorrection
++    }
++
++    private fun calculateBodySpacingCorrection(node: ASTNode): Int {
++        // Check if there's a body block
++        val block = node.findChildByType(BLOCK)
++        if (block != null) {
++            val lastNodeOfFunctionSignatureWithBlockBody =
++                node
++                    .getLastNodeOfFunctionSignatureWithBlockBody()
++                    ?.nextLeaf(includeEmpty = true)
++                    ?: return 0
++
++            val bodyNodes = node.getFunctionBody(lastNodeOfFunctionSignatureWithBlockBody)
++            val whiteSpaceBeforeFunctionBodyBlock = bodyNodes.getStartingWhitespaceOrNull()
++            
++            // If there's no space or the space is not a single space, we need to add 1 char
++            if (whiteSpaceBeforeFunctionBodyBlock?.text != " ") {
++                return 1 - (whiteSpaceBeforeFunctionBodyBlock?.textLength ?: 0)
++            }
++        }
++        return 0
+     }
+ 
+     private fun ASTNode.getFunctionSignatureLength() = indent(false).length + getFunctionSignatureNodesLength()
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt
+index 138b8cd9..515382fa 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleTest.kt
+@@ -39,7 +39,7 @@ class FunctionSignatureRuleTest {
+     }
+ 
+     @Test
+-    fun `Given a single line function signature which is equal to the max line length but missing a space before the opening brace of the body block, and the function is followed by a body block, then do no change the signature`() {
++    fun `Given single line signature at max length missing space before brace then reformat to multiline`() {
+         // Note: the remainder of the tests primarily uses the single expression body as it is a bit more concise than
+         // the block expression.
+         val code =
+@@ -63,7 +63,13 @@ class FunctionSignatureRuleTest {
+         functionSignatureWrappingRuleAssertThat(code)
+             .setMaxLineLength()
+             .addAdditionalRuleProvider { FunctionStartOfBodySpacingRule() }
+-            .hasLintViolation(2, 38, "Expected a single space before body block")
++            .hasLintViolations(
++                LintViolation(2, 7, "Newline expected after opening parenthesis"),
++                LintViolation(2, 15, "Parameter should start on a newline"),
++                LintViolation(2, 23, "Parameter should start on a newline"),
++                LintViolation(2, 29, "Newline expected before closing parenthesis"),
++                LintViolation(2, 38, "Expected a single space before body block"),
++            )
+             .isFormattedAs(formattedCode)
+     }
+ 
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

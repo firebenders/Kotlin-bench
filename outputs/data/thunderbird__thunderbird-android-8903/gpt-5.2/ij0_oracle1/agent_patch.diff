@@ -1,0 +1,75 @@
+diff --git a/legacy/core/src/main/java/com/fsck/k9/preferences/KoinModule.kt b/legacy/core/src/main/java/com/fsck/k9/preferences/KoinModule.kt
+index 0000661227..56603a5f17 100644
+--- a/legacy/core/src/main/java/com/fsck/k9/preferences/KoinModule.kt
++++ b/legacy/core/src/main/java/com/fsck/k9/preferences/KoinModule.kt
+@@ -69,7 +69,13 @@ val preferencesModule = module {
+         )
+     }
+ 
+-    factory { UnifiedInboxConfigurator(accountManager = get()) }
++    factory {
++        UnifiedInboxConfigurator(
++            accountManager = get(),
++            preferences = get(),
++            settingsChangePublisher = get(),
++        )
++    }
+ 
+     factory {
+         SettingsImporter(
+diff --git a/legacy/core/src/main/java/com/fsck/k9/preferences/UnifiedInboxConfigurator.kt b/legacy/core/src/main/java/com/fsck/k9/preferences/UnifiedInboxConfigurator.kt
+index ac2a2e65fc..cd3dfd3fb2 100644
+--- a/legacy/core/src/main/java/com/fsck/k9/preferences/UnifiedInboxConfigurator.kt
++++ b/legacy/core/src/main/java/com/fsck/k9/preferences/UnifiedInboxConfigurator.kt
+@@ -1,18 +1,47 @@
+ package com.fsck.k9.preferences
+ 
+ import app.k9mail.legacy.account.AccountManager
++import app.k9mail.legacy.preferences.SettingsChangePublisher
+ import com.fsck.k9.K9
++import com.fsck.k9.Preferences
+ 
+ /**
+  * Configures the unified inbox after an account has been added.
+  */
+ class UnifiedInboxConfigurator(
+     private val accountManager: AccountManager,
++    private val preferences: Preferences,
++    private val settingsChangePublisher: SettingsChangePublisher,
+ ) {
+     fun configureUnifiedInbox() {
+-        if (accountManager.getAccounts().size > 1) {
+-            K9.isShowUnifiedInbox = true
+-            K9.saveSettingsAsync()
++        val finishedAccountsCount = accountManager.getAccounts().count { it.isFinishedSetup }
++        if (finishedAccountsCount < 2) return
++
++        val storage = preferences.storage
++        val isShowUnifiedInboxConfigured =
++            storage.contains("showUnifiedInbox") || storage.contains("hideSpecialAccounts")
++
++        val shouldEnableUnifiedInbox = when {
++            // Enable Unified Inbox when a second account has been added.
++            finishedAccountsCount == 2 -> !K9.isShowUnifiedInbox
++
++            // Adding further accounts should preserve existing settings. Only auto-enable if it has never been
++            // configured (e.g. due to an interrupted setup process where settings weren't saved).
++            else -> !isShowUnifiedInboxConfigured
+         }
+-    }
++
++        if (!shouldEnableUnifiedInbox) return
++
++        K9.isShowUnifiedInbox = true
++
++        // Persist immediately so the setting survives process death right after setup.
++        val committed = preferences.createStorageEditor()
++            .putBoolean("showUnifiedInbox", true)
++            .commit()
++
++        if (committed) {
++            // Notify subscribers (e.g. the navigation drawer) that settings have changed.
++            settingsChangePublisher.publish()
++        }
++}
+ }

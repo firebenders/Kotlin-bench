@@ -1,0 +1,130 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/WrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/WrappingRule.kt
+index 732ba49b..12bcfb07 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/WrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/WrappingRule.kt
+@@ -164,6 +164,12 @@ public class WrappingRule :
+             return
+         }
+ 
++        // Skip wrapping for single-line function literals with parameters
++        // e.g. { size -> icon?.getBitmap(size)?.await() }
++        if (node.treeParent.elementType == FUNCTION_LITERAL && node.isPartOfSingleLineFunctionLiteralWithParameters()) {
++            return
++        }
++
+         node
+             .takeUnless { it.firstChildLeafOrSelf().elementType == EOL_COMMENT }
+             ?.getEndOfBlock()
+@@ -718,6 +724,21 @@ public class WrappingRule :
+                 }
+             }
+ 
++    private fun ASTNode.isPartOfSingleLineFunctionLiteralWithParameters(): Boolean {
++        require(elementType == BLOCK)
++        val functionLiteral = treeParent.takeIf { it.elementType == FUNCTION_LITERAL } ?: return false
++
++        // Check if the function literal has parameters
++        val valueParameterList = functionLiteral.findChildByType(VALUE_PARAMETER_LIST) ?: return false
++
++        // Check if there's an arrow (which separates parameters from body)
++        val arrow = functionLiteral.findChildByType(ARROW) ?: return false
++
++        // Check that there's no newline before the arrow (parameters are on single line)
++        val lbrace = getStartOfBlock()?.takeIf { it.elementType == LBRACE } ?: return false
++        return noNewLineInClosedRange(lbrace, arrow)
++    }
++
+     private companion object {
+         private val LTOKEN_SET = TokenSet.create(LPAR, LBRACE, LBRACKET, LT)
+         private val RTOKEN_SET = TokenSet.create(RPAR, RBRACE, RBRACKET, GT)
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/LambdaWrappingIssueTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/LambdaWrappingIssueTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/LambdaWrappingIssueTest.kt
+@@ -0,0 +1,77 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++/**
++ * Test for lambda wrapping issue where single-line lambdas with parameters
++ * should not be forced to wrap.
++ */
++class LambdaWrappingIssueTest {
++    private val wrappingRuleAssertThat = assertThatRule { WrappingRule() }
++
++    @Test
++    fun `Given a single-line lambda with parameter that does not exceed max line length`() {
++        val code =
++            """
++            val foo = { size -> icon?.getBitmap(size)?.await() }
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a single-line lambda with parameter on one line should keep it unchanged`() {
++        val code =
++            """
++            val x = { a -> someFunction(a) }
++            val y = { size -> icon?.getBitmap(size)?.await() }
++            val z = { p -> doSomething(p) }
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a multiline lambda with parameter on separate line should keep special formatting`() {
++        val code =
++            """
++            val foo = {
++                    a,
++                    b,
++                    c ->
++                doSomething()
++            }
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a lambda with parameter where body is on multiple lines`() {
++        val code =
++            """
++            val foo = { size ->
++                val bitmap = icon?.getBitmap(size)
++                bitmap?.await()
++            }
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a lambda without parameters should wrap if semicolon is used`() {
++        val code =
++            """
++            val foo = { doSomething(); doSomethingElse() }
++            """.trimIndent()
++        val formattedCode =
++            """
++            val foo = {
++                doSomething();
++            doSomethingElse()
++            }
++            """.trimIndent()
++        wrappingRuleAssertThat(code)
++            .hasLintViolation(1, 27, "Missing newline after \";\"")
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

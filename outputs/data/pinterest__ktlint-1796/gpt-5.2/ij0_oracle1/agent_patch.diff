@@ -1,0 +1,160 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt
+index 11d7bf81..a1c66827 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt
+@@ -2,11 +2,13 @@ package com.pinterest.ktlint.ruleset.standard
+ 
+ import com.pinterest.ktlint.core.Rule
+ import com.pinterest.ktlint.core.ast.ElementType.CLASS_BODY
++import com.pinterest.ktlint.core.ast.ElementType.COMMA
+ import com.pinterest.ktlint.core.ast.ElementType.ENUM_ENTRY
+ import com.pinterest.ktlint.core.ast.ElementType.OBJECT_KEYWORD
+ import com.pinterest.ktlint.core.ast.ElementType.SEMICOLON
+ import com.pinterest.ktlint.core.ast.isWhiteSpace
+ import com.pinterest.ktlint.core.ast.lastChildLeafOrSelf
++import com.pinterest.ktlint.core.ast.nextCodeLeaf
+ import com.pinterest.ktlint.core.ast.nextLeaf
+ import com.pinterest.ktlint.core.ast.parent
+ import com.pinterest.ktlint.core.ast.prevCodeLeaf
+@@ -96,6 +98,13 @@ public class NoSemicolonsRule : Rule("no-semi") {
+             return node.isLastCodeLeafBeforeClosingOfClassBody()
+         }
+ 
++        // After formatting an enum class in which the last enum entry is terminated by a semicolon, the semicolon might
++        // have been moved outside the enum entry. When that semicolon terminates the enum entries list, it should not be
++        // removed unless it is redundant (i.e. it is the last code leaf before the closing brace of the enum class).
++        if (node.treeParent.elementType == CLASS_BODY && node.isEnumEntriesTerminatingSemicolon()) {
++            return node.isLastCodeLeafBeforeClosingOfClassBody()
++        }
++
+         return true
+     }
+ 
+@@ -107,4 +116,15 @@ public class NoSemicolonsRule : Rule("no-semi") {
+             ?.parent(CLASS_BODY)
+             ?.lastChildLeafOrSelf()
+             ?.prevCodeLeaf()
++
++    private fun ASTNode.isEnumEntriesTerminatingSemicolon(): Boolean {
++        val classBody = parent(CLASS_BODY) ?: return false
++        val lastEnumEntry = classBody.getChildren(null).lastOrNull { it.elementType == ENUM_ENTRY } ?: return false
++
++        var candidate = lastEnumEntry.lastChildLeafOrSelf().nextCodeLeaf()
++        while (candidate != null && candidate.elementType == COMMA) {
++            candidate = candidate.nextCodeLeaf()
++        }
++        return candidate == this
++    }
+ }
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRule.kt
+index 3035e5f2..2f2834c5 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRule.kt
+@@ -16,7 +16,9 @@ import com.pinterest.ktlint.core.ast.ElementType.WHEN_ENTRY
+ import com.pinterest.ktlint.core.ast.ElementType.WHITE_SPACE
+ import com.pinterest.ktlint.core.ast.children
+ import com.pinterest.ktlint.core.ast.isCodeLeaf
++import com.pinterest.ktlint.core.ast.lastChildLeafOrSelf
+ import com.pinterest.ktlint.core.ast.lineIndent
++import com.pinterest.ktlint.core.ast.nextCodeLeaf
+ import com.pinterest.ktlint.core.ast.noNewLineInClosedRange
+ import com.pinterest.ktlint.core.ast.prevCodeLeaf
+ import com.pinterest.ktlint.core.ast.prevLeaf
+@@ -221,9 +223,20 @@ public class TrailingCommaOnDeclarationSiteRule :
+     private fun ASTNode.findNodeAfterTrailingCommaPosition(): ASTNode {
+         val lastEnumEntry = children().last { it.psi is KtEnumEntry }
+ 
+-        val semicolonAfterLastEnumEntry = lastEnumEntry
+-            .children()
+-            .singleOrNull { it.elementType == ElementType.SEMICOLON }
++        // In Kotlin PSI the semicolon terminating the enum entries list might be a direct child of the last enum entry.
++        // However, after auto-correction the semicolon might have been moved outside of the enum entry. In that case,
++        // the semicolon is found as the next code leaf after the last enum entry (skipping an optional comma).
++        val semicolonAfterLastEnumEntry =
++            lastEnumEntry
++                .children()
++                .singleOrNull { it.elementType == ElementType.SEMICOLON }
++                ?: run {
++                    var nextCodeLeaf = lastEnumEntry.lastChildLeafOrSelf().nextCodeLeaf()
++                    while (nextCodeLeaf != null && nextCodeLeaf.elementType == ElementType.COMMA) {
++                        nextCodeLeaf = nextCodeLeaf.nextCodeLeaf()
++                    }
++                    nextCodeLeaf?.takeIf { it.elementType == ElementType.SEMICOLON }
++                }
+ 
+         return semicolonAfterLastEnumEntry ?: lastChildNode
+     }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/EnumTrailingCommaWithMemberDeclarationsFormattingTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/EnumTrailingCommaWithMemberDeclarationsFormattingTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/EnumTrailingCommaWithMemberDeclarationsFormattingTest.kt
+@@ -0,0 +1,60 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.core.Code
++import com.pinterest.ktlint.core.KtLintRuleEngine
++import com.pinterest.ktlint.core.LintError
++import org.assertj.core.api.Assertions.assertThat
++import org.junit.jupiter.api.Test
++
++class EnumTrailingCommaWithMemberDeclarationsFormattingTest {
++    @Test
++    fun `Given an enum with member declarations and missing trailing comma then ktlint format should not report uncorrected errors`() {
++        val code =
++            """
++            enum class TestEnum() {
++                A,
++                B;
++
++                companion object {
++                    const val A_NUMBER = 1L
++                }
++            }
++            """.trimIndent()
++
++        val expectedFormattedCode =
++            """
++            enum class TestEnum() {
++                A,
++                B,
++                ;
++
++                companion object {
++                    const val A_NUMBER = 1L
++                }
++            }
++            """.trimIndent()
++
++        val ruleProviders = StandardRuleSetProvider().getRuleProviders()
++        val ruleEngine = KtLintRuleEngine(ruleProviders = ruleProviders)
++
++        val tempDir = java.nio.file.Files.createTempDirectory("ktlint-")
++        val kotlinFile = tempDir.resolve("TestEnum.kt")
++        kotlinFile.toFile().writeText(code + "\n")
++
++        val lintErrorsWithCorrectionInfo = mutableListOf<Pair<LintError, Boolean>>()
++        val formattedCode =
++            ruleEngine.format(Code.CodeFile(kotlinFile.toFile())) { lintError, corrected ->
++                lintErrorsWithCorrectionInfo.add(lintError to corrected)
++            }
++
++        val uncorrectedErrors = lintErrorsWithCorrectionInfo.filter { !it.second }.map { it.first }
++        assertThat(uncorrectedErrors)
++            .describedAs(
++                "Ktlint should not report uncorrected errors after formatting. " +
++                    "Reported errors were: $lintErrorsWithCorrectionInfo",
++            )
++            .isEmpty()
++        assertThat(formattedCode.trimEnd()).isEqualTo(expectedFormattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

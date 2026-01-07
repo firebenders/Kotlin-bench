@@ -1,0 +1,267 @@
+diff --git a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+index 201e7dac..4205d684 100644
+--- a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
++++ b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+@@ -236,13 +236,42 @@ public fun ASTNode.upsertWhitespaceBeforeMe(text: String) {
+         if (this.elementType == WHITE_SPACE) {
+             return replaceWhitespaceWith(text)
+         }
+-        val previous = treePrev ?: prevLeaf()
+-        if (previous != null && previous.elementType == WHITE_SPACE) {
+-            previous.replaceWhitespaceWith(text)
+-        } else {
++
++        val prevSibling = treePrev
++        if (prevSibling != null && prevSibling.elementType == WHITE_SPACE) {
++            prevSibling.replaceWhitespaceWith(text)
++            return
++        }
++
++        val prevLeaf = prevLeaf()
++        if (prevLeaf != null && prevLeaf.elementType == WHITE_SPACE) {
++            prevLeaf.replaceWhitespaceWith(text)
++            return
++        }
++
++        // When inserting whitespace before a leaf node which is the first child of a composite element, inserting the
++        // whitespace as a sibling of that leaf would incorrectly make it part of the composite element. Instead, insert
++        // the whitespace before the closest ancestor that has a previous sibling.
++        if (treePrev != null) {
+             PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
+                 (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
+             }
++        } else {
++            PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
++                var insertBefore: ASTNode? = this
++                while (insertBefore != null && insertBefore.treePrev == null) {
++                    insertBefore = insertBefore.treeParent
++                }
++
++                val insertionParent = insertBefore?.treeParent
++                if (insertionParent != null) {
++                    insertionParent.addChild(psiWhiteSpace.node, insertBefore)
++                } else if (treeParent != null) {
++                    // Fall back to inserting in the current parent. This also prevents failures when the node is
++                    // temporarily detached from the tree due to ongoing autocorrections.
++                    (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
++                }
++            }
+         }
+     } else {
+         val prevLeaf =
+@@ -270,13 +299,42 @@ public fun ASTNode.upsertWhitespaceAfterMe(text: String) {
+         if (this.elementType == WHITE_SPACE) {
+             return replaceWhitespaceWith(text)
+         }
+-        val next = treeNext ?: nextLeaf()
+-        if (next != null && next.elementType == WHITE_SPACE) {
+-            next.replaceWhitespaceWith(text)
+-        } else {
++
++        val nextSibling = treeNext
++        if (nextSibling != null && nextSibling.elementType == WHITE_SPACE) {
++            nextSibling.replaceWhitespaceWith(text)
++            return
++        }
++
++        val nextLeaf = nextLeaf()
++        if (nextLeaf != null && nextLeaf.elementType == WHITE_SPACE) {
++            nextLeaf.replaceWhitespaceWith(text)
++            return
++        }
++
++        // When inserting whitespace after a leaf node which is the last child of a composite element, inserting the
++        // whitespace as a sibling of that leaf would incorrectly make it part of the composite element. Instead, insert
++        // the whitespace after the closest ancestor that has a next sibling.
++        if (treeNext != null) {
+             PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
+                 (psi as LeafElement).rawInsertAfterMe(psiWhiteSpace)
+             }
++        } else {
++            PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
++                var insertAfter: ASTNode? = this
++                while (insertAfter != null && insertAfter.treeNext == null) {
++                    insertAfter = insertAfter.treeParent
++                }
++
++                val insertionParent = insertAfter?.treeParent
++                if (insertionParent != null) {
++                    insertionParent.addChild(psiWhiteSpace.node, insertAfter?.treeNext)
++                } else if (treeParent != null) {
++                    // Fall back to inserting in the current parent. This also prevents failures when the node is
++                    // temporarily detached from the tree due to ongoing autocorrections.
++                    (psi as LeafElement).rawInsertAfterMe(psiWhiteSpace)
++                }
++            }
+         }
+     } else {
+         lastChildLeafOrSelf().upsertWhitespaceAfterMe(text)
+
+diff --git a/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeWhitespacePlacementTest.kt b/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeWhitespacePlacementTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeWhitespacePlacementTest.kt
+@@ -0,0 +1,78 @@
++package com.pinterest.ktlint.rule.engine.core.api
++
++import com.pinterest.ktlint.rule.engine.api.Code
++import com.pinterest.ktlint.rule.engine.api.KtLintRuleEngine
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.LBRACE
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.RPAR
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER_LIST
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
++import org.assertj.core.api.Assertions.assertThat
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.lang.FileASTNode
++import org.junit.jupiter.api.Test
++
++class ASTNodeWhitespacePlacementTest {
++    @Test
++    fun `Given LBRACE which is first child of a BLOCK then upsertWhitespaceBeforeMe inserts whitespace before the BLOCK`() {
++        val code = "fun foo(){}"
++
++        val fileAstNode = transformCodeToAST(code)
++        val funNode = requireNotNull(fileAstNode.findChildByType(FUN))
++        val blockNode = requireNotNull(funNode.findChildByType(BLOCK))
++        val lbraceNode = requireNotNull(blockNode.firstChildNode)
++        require(lbraceNode.elementType == LBRACE)
++
++        lbraceNode.upsertWhitespaceBeforeMe(" ")
++
++        assertThat(fileAstNode.text).isEqualTo("fun foo() {}")
++        assertThat(blockNode.firstChildNode.elementType).isEqualTo(LBRACE)
++        assertThat(blockNode.treePrev.elementType).isEqualTo(WHITE_SPACE)
++        assertThat(blockNode.treePrev.text).isEqualTo(" ")
++    }
++
++    @Test
++    fun `Given RPAR which is last child of a VALUE_PARAMETER_LIST then upsertWhitespaceAfterMe inserts whitespace after the VALUE_PARAMETER_LIST`() {
++        val code = "fun foo(){}"
++
++        val fileAstNode = transformCodeToAST(code)
++        val funNode = requireNotNull(fileAstNode.findChildByType(FUN))
++        val valueParameterList = requireNotNull(funNode.findChildByType(VALUE_PARAMETER_LIST))
++        val rparNode = requireNotNull(valueParameterList.findChildByType(RPAR))
++        require(rparNode.treeNext == null) { "RPAR should be last child of VALUE_PARAMETER_LIST in this test" }
++
++        rparNode.upsertWhitespaceAfterMe(" ")
++
++        assertThat(fileAstNode.text).isEqualTo("fun foo() {}")
++        assertThat(valueParameterList.treeNext.elementType).isEqualTo(WHITE_SPACE)
++        assertThat(valueParameterList.treeNext.text).isEqualTo(" ")
++        assertThat(valueParameterList.treeNext.treeNext.elementType).isEqualTo(BLOCK)
++    }
++
++    private fun transformCodeToAST(code: String): FileASTNode =
++        KtLintRuleEngine(
++            ruleProviders =
++                setOf(
++                    RuleProvider { DummyRule() },
++                ),
++        ).transformToAst(
++            Code.fromSnippet(code),
++        )
++
++    /**
++     * A dummy rule for testing.
++     */
++    private open class DummyRule : Rule(
++        ruleId = RuleId("test:dummy-rule"),
++        about = About(),
++    ) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++        }
++    }
++}
++
+
+diff --git a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/FormatWhitespaceBeforeFunctionBodyRegressionTest.kt b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/FormatWhitespaceBeforeFunctionBodyRegressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/FormatWhitespaceBeforeFunctionBodyRegressionTest.kt
+@@ -0,0 +1,71 @@
++package com.pinterest.ktlint.rule.engine.api
++
++import com.pinterest.ktlint.rule.engine.core.api.Rule
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import com.pinterest.ktlint.ruleset.standard.rules.FunctionSignatureRule
++import com.pinterest.ktlint.ruleset.standard.rules.FunctionStartOfBodySpacingRule
++import com.pinterest.ktlint.ruleset.standard.rules.SpacingAroundCurlyRule
++import org.assertj.core.api.Assertions.assertThat
++import org.junit.jupiter.api.Test
++import java.util.concurrent.atomic.AtomicInteger
++
++class FormatWhitespaceBeforeFunctionBodyRegressionTest {
++    @Test
++    fun `Format should converge within 2 runs when inserting missing whitespace before function body`() {
++        val code =
++            """
++            class UampNotificationManager(
++                private val context: Context,
++                sessionToken: MediaSessionCompat.Token,
++                notificationListener: PlayerNotificationManager.NotificationListener,
++            ) {
++                fun showNotificationForPlayer(player: Player){
++                    notificationManager.setPlayer(player)
++                }
++            }
++            """.trimIndent()
++
++        val expected =
++            """
++            class UampNotificationManager(
++                private val context: Context,
++                sessionToken: MediaSessionCompat.Token,
++                notificationListener: PlayerNotificationManager.NotificationListener,
++            ) {
++                fun showNotificationForPlayer(player: Player) {
++                    notificationManager.setPlayer(player)
++                }
++            }
++            """.trimIndent()
++
++        val formatRunCounter = AtomicInteger(0)
++        val ruleProviders =
++            setOf(
++                RuleProvider { SpacingAroundCurlyRule() },
++                RuleProvider { FunctionStartOfBodySpacingRule() },
++                RuleProvider { FunctionSignatureRule() },
++                RuleProvider {
++                    object : Rule(
++                        ruleId = RuleId("test:format-run-counter"),
++                        about = About(),
++                    ) {
++                        override fun beforeFirstNode(editorConfig: com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig) {
++                            formatRunCounter.incrementAndGet()
++                        }
++                    }
++                },
++            )
++
++        val formatted =
++            KtLintRuleEngine(
++                ruleProviders = ruleProviders,
++            ).format(
++                Code.fromSnippet(code),
++            )
++
++        assertThat(formatted).isEqualTo(expected)
++        assertThat(formatRunCounter.get()).isEqualTo(2)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

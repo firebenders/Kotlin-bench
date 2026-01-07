@@ -1,0 +1,149 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 737e9a62..58cda167 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -26,12 +26,16 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.DOT_QUALIFIED_EXPRE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELSE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.FINALLY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUNCTION_LITERAL
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.IDENTIFIER
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.IF
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.KDOC
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.CATCH
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TRY
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPEALIAS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.KDOC_END
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.KDOC_LEADING_ASTERISK
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.KDOC_START
+@@ -224,6 +228,12 @@ public class IndentationRule :
+             node.elementType == IF ->
+                 visitIf(node)
+ 
++            node.elementType == TRY ->
++                visitTry(node)
++
++            node.elementType == TYPEALIAS ->
++                visitTypeAlias(node)
++
+             node.elementType == LBRACE ->
+                 visitLbrace(node)
+ 
+@@ -375,6 +385,60 @@ public class IndentationRule :
+         )
+     }
+ 
++    private fun visitTry(node: ASTNode) {
++        // Inner indent contexts in reversed order
++        var nextToAstNode: ASTNode = node.lastChildLeafOrSelf()
++
++        // Ensure that catch/finally clauses align with the try expression. This prevents a false positive where a
++        // continuation indent (e.g. after '=') is applied to the catch/finally keyword.
++        node
++            .findChildByType(FINALLY)
++            ?.let { fromAstNode ->
++                nextToAstNode = startIndentContext(
++                    fromAstNode = fromAstNode,
++                    toAstNode = nextToAstNode,
++                    childIndent = "",
++                ).prevCodeLeaf()
++            }
++
++        // There can be multiple catch clauses. Start the indent context for the first catch clause; subsequent catch
++        // clauses are part of this same context.
++        node
++            .findChildByType(CATCH)
++            ?.let { fromAstNode ->
++                nextToAstNode = startIndentContext(
++                    fromAstNode = fromAstNode,
++                    toAstNode = nextToAstNode,
++                    childIndent = "",
++                ).prevCodeLeaf()
++            }
++
++        startIndentContext(
++            fromAstNode = node,
++            toAstNode = nextToAstNode,
++            childIndent = "",
++        )
++    }
++
++    private fun visitTypeAlias(node: ASTNode) {
++        // Inner indent contexts in reversed order
++        var nextToAstNode: ASTNode = node.lastChildLeafOrSelf()
++        node
++            .findChildByType(EQ)
++            ?.let { eq ->
++                nextToAstNode = startIndentContext(
++                    fromAstNode = eq,
++                    toAstNode = nextToAstNode,
++                ).prevCodeLeaf()
++            }
++
++        startIndentContext(
++            fromAstNode = node,
++            toAstNode = nextToAstNode,
++            childIndent = "",
++        )
++    }
++
+     private fun visitLbrace(node: ASTNode) {
+         // Outer indent context
+         val rbrace = requireNotNull(
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTryCatchAndTypeAliasTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTryCatchAndTypeAliasTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleTryCatchAndTypeAliasTest.kt
+@@ -0,0 +1,40 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++internal class IndentationRuleTryCatchAndTypeAliasTest {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Given a try catch expression in a function with expression body`() {
++        val code =
++            """
++            fun test() = try {
++              1
++            }
++            catch(_: Throwable) {
++              2
++            }
++            """.trimIndent()
++
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(INDENT_SIZE_PROPERTY to 2)
++            .hasNoLintViolations()
++}
++
++    @Test
++    fun `Given a typealias with type on next line`() {
++        val code =
++            """
++            typealias Foo =
++              HashMap<Bar, Baz?>
++            """.trimIndent()
++
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(INDENT_SIZE_PROPERTY to 2)
++            .hasNoLintViolations()
++}
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

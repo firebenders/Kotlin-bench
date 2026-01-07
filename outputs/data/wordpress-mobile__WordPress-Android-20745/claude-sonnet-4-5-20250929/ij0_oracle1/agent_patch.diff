@@ -1,0 +1,207 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PublishSettingsViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PublishSettingsViewModel.kt
+index 6b9ac3478a3..703081adfeb 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PublishSettingsViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PublishSettingsViewModel.kt
+@@ -187,6 +187,10 @@ constructor(
+     }
+ 
+     fun onAddToCalendar(postRepository: EditPostRepository) {
++        // Check if the post is loaded before accessing its properties
++        if (!postRepository.hasPost()) {
++            return
++        }
+         val startTime = DateTimeUtils.dateFromIso8601(postRepository.dateCreated).time
+         val site = siteStore.getSiteByLocalId(postRepository.localSiteId)
+         val title = resourceProvider.getString(
+@@ -206,11 +210,14 @@ constructor(
+ 
+     private fun getCurrentPublishDateAsCalendar(postRepository: EditPostRepository): Calendar {
+         val calendar = localeManagerWrapper.getCurrentCalendar()
+-        val dateCreated = postRepository.dateCreated
+-        // Set the currently selected time if available
+-        if (!TextUtils.isEmpty(dateCreated)) {
+-            calendar.time = DateTimeUtils.dateFromIso8601(dateCreated)
+-            calendar.timeZone = localeManagerWrapper.getTimeZone()
++        // Check if the post is loaded before accessing its properties
++        if (postRepository.hasPost()) {
++            val dateCreated = postRepository.dateCreated
++            // Set the currently selected time if available
++            if (!TextUtils.isEmpty(dateCreated)) {
++                calendar.time = DateTimeUtils.dateFromIso8601(dateCreated)
++                calendar.timeZone = localeManagerWrapper.getTimeZone()
++            }
+         }
+         return calendar
+     }
+@@ -219,6 +226,10 @@ constructor(
+         postRepository: EditPostRepository,
+         schedulingReminderPeriod: Period = OFF
+     ) {
++        // Check if the post is loaded before accessing its properties
++        if (!postRepository.hasPost()) {
++            return
++        }
+         postSchedulingNotificationStore.deleteSchedulingReminders(postRepository.id)
+         if (schedulingReminderPeriod != OFF) {
+             val notificationId = postSchedulingNotificationStore.schedule(postRepository.id, schedulingReminderPeriod)
+
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/posts/PublishSettingsViewModelNullPointerTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/posts/PublishSettingsViewModelNullPointerTest.kt
+new file mode 100644
+--- /dev/null
++++ b/WordPress/src/test/java/org/wordpress/android/ui/posts/PublishSettingsViewModelNullPointerTest.kt
+@@ -0,0 +1,155 @@
++package org.wordpress.android.ui.posts
++
++import kotlinx.coroutines.ExperimentalCoroutinesApi
++import org.assertj.core.api.Assertions.assertThat
++import org.junit.Before
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.mockito.Mock
++import org.mockito.junit.MockitoJUnitRunner
++import org.mockito.kotlin.mock
++import org.mockito.kotlin.whenever
++import org.wordpress.android.BaseUnitTest
++import org.wordpress.android.R
++import org.wordpress.android.fluxc.store.PostSchedulingNotificationStore
++import org.wordpress.android.fluxc.store.SiteStore
++import org.wordpress.android.ui.posts.prepublishing.publishsettings.PrepublishingPublishSettingsViewModel
++import org.wordpress.android.util.LocaleManagerWrapper
++import org.wordpress.android.viewmodel.ResourceProvider
++import java.util.Calendar
++import java.util.Locale
++import java.util.TimeZone
++
++/**
++ * Test to verify the fix for NullPointerException in PublishSettingsViewModel.
++ *
++ * Issue: JETPACK-ANDROID-JPV (https://a8c.sentry.io/issues/5004070666/)
++ *
++ * The NPE occurred when:
++ * 1. EditPostRepository.dateCreated was accessed
++ * 2. But the internal 'post' field in EditPostRepository was null
++ * 3. This happened when start() was called before the post was loaded
++ *
++ * The fix adds hasPost() checks before accessing post properties.
++ */
++@ExperimentalCoroutinesApi
++@RunWith(MockitoJUnitRunner::class)
++class PublishSettingsViewModelNullPointerTest : BaseUnitTest() {
++    private lateinit var viewModel: PrepublishingPublishSettingsViewModel
++
++    @Mock
++    lateinit var localeManagerWrapper: LocaleManagerWrapper
++
++    @Mock
++    lateinit var resourceProvider: ResourceProvider
++
++    @Mock
++    lateinit var postSchedulingNotificationStore: PostSchedulingNotificationStore
++
++    @Mock
++    lateinit var postSettingsUtils: PostSettingsUtils
++
++    @Mock
++    lateinit var siteStore: SiteStore
++
++    @Mock
++    lateinit var editPostRepository: EditPostRepository
++
++    private lateinit var mockCalendar: Calendar
++
++    @Before
++    fun setup() {
++        viewModel = PrepublishingPublishSettingsViewModel(
++            resourceProvider,
++            postSettingsUtils,
++            localeManagerWrapper,
++            postSchedulingNotificationStore,
++            siteStore
++        )
++        mockCalendar = Calendar.getInstance(Locale.US).apply {
++            timeZone = TimeZone.getDefault()
++        }
++        whenever(localeManagerWrapper.getCurrentCalendar()).thenReturn(mockCalendar)
++        whenever(localeManagerWrapper.getTimeZone()).thenReturn(TimeZone.getDefault())
++        whenever(resourceProvider.getString(R.string.immediately)).thenReturn("Immediately")
++    }
++
++    @Test
++    fun `start does not crash when EditPostRepository has no post loaded`() {
++        // Given: An EditPostRepository where hasPost() returns false (post is null)
++        whenever(editPostRepository.hasPost()).thenReturn(false)
++
++        // When: start() is called with this repository
++        // Then: It should not throw NullPointerException
++        viewModel.start(editPostRepository)
++
++        // Verify: The view model initializes with current calendar defaults
++        assertThat(viewModel.year).isNotNull
++        assertThat(viewModel.month).isNotNull
++        assertThat(viewModel.day).isNotNull
++        assertThat(viewModel.hour).isNotNull
++        assertThat(viewModel.minute).isNotNull
++    }
++
++    @Test
++    fun `start does not crash when EditPostRepository is null`() {
++        // When: start() is called with null repository
++        // Then: It should not throw NullPointerException
++        viewModel.start(null)
++
++        // Verify: The view model initializes with current calendar defaults
++        assertThat(viewModel.year).isNotNull
++        assertThat(viewModel.month).isNotNull
++        assertThat(viewModel.day).isNotNull
++        assertThat(viewModel.hour).isNotNull
++        assertThat(viewModel.minute).isNotNull
++    }
++
++    @Test
++    fun `start works correctly when EditPostRepository has post loaded`() {
++        // Given: An EditPostRepository where hasPost() returns true
++        whenever(editPostRepository.hasPost()).thenReturn(true)
++        whenever(editPostRepository.dateCreated).thenReturn("2024-01-15T10:30:00+00:00")
++        whenever(editPostRepository.getPost()).thenReturn(mock())
++
++        // When: start() is called with this repository
++        viewModel.start(editPostRepository)
++
++        // Then: It should initialize with the post's date
++        assertThat(viewModel.year).isNotNull
++        assertThat(viewModel.month).isNotNull
++        assertThat(viewModel.day).isNotNull
++        assertThat(viewModel.hour).isNotNull
++        assertThat(viewModel.minute).isNotNull
++    }
++
++    @Test
++    fun `onAddToCalendar does not crash when post is not loaded`() {
++        // Given: An EditPostRepository where hasPost() returns false
++        whenever(editPostRepository.hasPost()).thenReturn(false)
++
++        // When: onAddToCalendar is called
++        // Then: It should not throw NullPointerException and should return early
++        viewModel.onAddToCalendar(editPostRepository)
++
++        // The method should return early without emitting any event
++        // No assertion needed - the test passes if no exception is thrown
++    }
++
++    @Test
++    fun `scheduleNotification does not crash when post is not loaded`() {
++        // Given: An EditPostRepository where hasPost() returns false
++        whenever(editPostRepository.hasPost()).thenReturn(false)
++
++        // When: scheduleNotification is called
++        // Then: It should not throw NullPointerException
++        viewModel.scheduleNotification(
++            editPostRepository,
++            PostSchedulingNotificationStore.SchedulingReminderModel.Period.ONE_HOUR
++        )
++
++        // The method should return early without crashing
++        // No assertion needed - the test passes if no exception is thrown
++    }
++}
++

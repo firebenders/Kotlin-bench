@@ -1,0 +1,183 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
+index 167cc132..7ac24f2d 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
+@@ -45,6 +45,7 @@ import com.pinterest.ktlint.core.ast.ElementType.WHITE_SPACE
+ import com.pinterest.ktlint.core.ast.children
+ import com.pinterest.ktlint.core.ast.firstChildLeafOrSelf
+ import com.pinterest.ktlint.core.ast.isPartOfComment
++import com.pinterest.ktlint.core.ast.isPartOfString
+ import com.pinterest.ktlint.core.ast.isWhiteSpace
+ import com.pinterest.ktlint.core.ast.isWhiteSpaceWithNewline
+ import com.pinterest.ktlint.core.ast.isWhiteSpaceWithoutNewline
+@@ -127,6 +128,11 @@ public class WrappingRule :
+     ) {
+         require(node.elementType == BLOCK)
+ 
++        if (node.isPartOfString()) {
++            // Do not wrap blocks inside string templates
++            return
++        }
++
+         val startOfBlock = node.prevLeaf { !it.isPartOfComment() && !it.isWhiteSpace() }
+         if (startOfBlock?.elementType != LBRACE) {
+             return
+@@ -172,6 +178,10 @@ public class WrappingRule :
+         autoCorrect: Boolean,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+     ) {
++        if (node.isPartOfString()) {
++            // Do not rearrange parentheses/brackets inside string templates
++            return
++        }
+         val rElementType = MATCHING_RTOKEN_MAP[node.elementType]
+         var newlineInBetween = false
+         var parameterListInBetween = false
+@@ -428,6 +438,8 @@ public class WrappingRule :
+     ) {
+         val p = node.treeParent
+         if (
++            // Do not wrap arrows inside string templates
++            node.isPartOfString() ||
+             // check
+             // `{ p -> ... }`
+             // and
+@@ -568,6 +580,10 @@ public class WrappingRule :
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+     ) {
+         if (node.elementType == BLOCK) {
++            if (node.isPartOfString()) {
++                // Do not wrap blocks inside string templates
++                return
++            }
+             val startOfBlock = node.prevLeaf { !it.isPartOfComment() && !it.isWhiteSpace() }
+             if (startOfBlock?.elementType != LBRACE) {
+                 return
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleStringTemplateTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleStringTemplateTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleStringTemplateTest.kt
+@@ -0,0 +1,114 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.MULTILINE_STRING_QUOTE
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for the WrappingRule related to string templates.
++ *
++ * See: https://github.com/pinterest/ktlint/issues/1776
++ */
++internal class WrappingRuleStringTemplateTest {
++    private val wrappingRuleAssertThat = assertThatRule { WrappingRule() }
++
++    @Test
++    fun `Issue 1776 - Given a raw string with a let block inside then do not report false positive`() {
++        val code =
++            """
++            class QueryGenerator {
++                fun getQueryString(query: QueryRequest): String {
++                    val q = $MULTILINE_STRING_QUOTE
++                        SELECT *
++                        FROM table_name_long_enough_so_max_line_length_is_met_and_wrapping_rule_is_violated_and_generates_an_error
++                        WHERE 1 = 1
++                        ${"$"}{query.gameId?.let { "AND id = ?" } ?: ""}
++                    $MULTILINE_STRING_QUOTE
++                    return q
++                }
++            }
++
++            data class QueryRequest(
++                val gameId: String?,
++            )
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue 1776 - Given a raw string with a lambda block inside should not be wrapped`() {
++        val code =
++            """
++            val s = $MULTILINE_STRING_QUOTE
++                Some text with very long content that should exceed the max line length limit when checked by the rule
++                ${"$"}{items.filter { it.isNotEmpty() }.joinToString()}
++            $MULTILINE_STRING_QUOTE
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue 1776 - Given a raw string with multiple lambda blocks should not be wrapped`() {
++        val code =
++            """
++            val sql = $MULTILINE_STRING_QUOTE
++                SELECT * FROM users
++                WHERE 1 = 1
++                ${"$"}{name?.let { "AND name = ?" } ?: ""}
++                ${"$"}{age?.let { "AND age > ?" } ?: ""}
++                ${"$"}{country?.let { "AND country = ?" } ?: ""}
++            $MULTILINE_STRING_QUOTE.trimIndent()
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Issue 1776 - Given a raw string with nested lambda in string template should not be wrapped`() {
++        val code =
++            """
++            fun buildQuery(): String {
++                val condition = $MULTILINE_STRING_QUOTE
++                    ${"$"}{values.mapNotNull { v -> v.takeIf { it > 0 }?.let { "value = ${"$"}it" } }.joinToString(" OR ")}
++                $MULTILINE_STRING_QUOTE.trimIndent()
++                return condition
++            }
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a non-raw string with let block in short line should not be wrapped`() {
++        val code =
++            """
++            val s = "${"$"}{foo?.let { bar }}"
++            """.trimIndent()
++        wrappingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a multiline block outside of string template should still be wrapped`() {
++        val code =
++            """
++            fun test() {
++                foo.let { bar
++                    baz }
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun test() {
++                foo.let {
++                    bar
++                    baz
++                }
++            }
++            """.trimIndent()
++        wrappingRuleAssertThat(code)
++            .addAdditionalRuleProvider { IndentationRule() }
++            .hasLintViolations(
++                com.pinterest.ktlint.test.LintViolation(2, 14, "Missing newline after \"{\""),
++                com.pinterest.ktlint.test.LintViolation(3, 12, "Missing newline before \"}\""),
++            ).isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

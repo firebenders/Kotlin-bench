@@ -1,0 +1,245 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 65465d1e..5f7ffb94 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -461,6 +461,25 @@ public class IndentationRule :
+             //          ClassB(paramA, paramB, paramC)
+             //      }
+             indentConfig.indent.repeat(2)
++        } else if (isFunctionLiteralOnDifferentLineThanFunctionCall()) {
++            // When the lambda opening brace is on a different line from the function call,
++            // use double indent instead of alignment:
++            // combine(
++            //     Any(),
++            //     Any()
++            // ) { a,
++            //         b ->
++            //     TODO()
++            // }
++            indentConfig.indent.repeat(2)
++        } else if (hasFunctionCallArgumentsBeforeLambda()) {
++            // When there are function arguments before the lambda, use double indent
++            // instead of alignment (as the alignment calculation is based on function name only):
++            // combine(Any(), Any()) { a,
++            //         b ->
++            //     TODO()
++            // }
++            indentConfig.indent.repeat(2)
+         } else {
+             // Allow default IntelliJ IDEA formatting:
+             // val fieldExample =
+@@ -484,6 +503,48 @@ public class IndentationRule :
+             ?.findChildByType(VALUE_PARAMETER_LIST)
+             ?.prevSibling { it.textContains('\n') } != null
+ 
++    private fun ASTNode.isFunctionLiteralOnDifferentLineThanFunctionCall(): Boolean =
++        parent(FUNCTION_LITERAL)
++            ?.findChildByType(LBRACE)
++            ?.let { lbrace ->
++                parent(CALL_EXPRESSION)
++                    ?.let { callExpression ->
++                        // Check if the call expression has a VALUE_ARGUMENT_LIST (meaning it has arguments before the lambda)
++                        val hasValueArguments = callExpression.findChildByType(VALUE_ARGUMENT_LIST) != null
++                        if (hasValueArguments) {
++                            // If there are arguments, check if there's a newline between VALUE_ARGUMENT_LIST and the lambda
++                            val valueArgumentList = callExpression.findChildByType(VALUE_ARGUMENT_LIST)
++                            var currentNode: ASTNode? = valueArgumentList?.nextLeaf()
++                            while (currentNode != null && currentNode != lbrace) {
++                                if (currentNode.textContains('\n')) {
++                                    return true
++                                }
++                                currentNode = currentNode.nextLeaf()
++                            }
++                            false
++                        } else {
++                            // If there are no arguments, check from the function reference
++                            val referenceExpression = callExpression.findChildByType(REFERENCE_EXPRESSION)
++                            var currentNode: ASTNode? = referenceExpression?.nextLeaf()
++                            while (currentNode != null && currentNode != lbrace) {
++                                if (currentNode.textContains('\n')) {
++                                    return true
++                                }
++                                currentNode = currentNode.nextLeaf()
++                            }
++                            false
++                        }
++                    }
++            } ?: false
++
++    private fun ASTNode.hasFunctionCallArgumentsBeforeLambda(): Boolean =
++        parent(CALL_EXPRESSION)
++            ?.findChildByType(VALUE_ARGUMENT_LIST)
++            ?.let { valueArgumentList ->
++                // Check if the VALUE_ARGUMENT_LIST has any actual arguments (not just the lambda)
++                valueArgumentList.children().any { it.elementType == VALUE_ARGUMENT }
++            } ?: false
++
+     private fun visitLparBeforeCondition(node: ASTNode) {
+         startIndentContext(
+             fromAstNode = requireNotNull(node.nextLeaf()), // Allow to pickup whitespace before condition
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue1756Test.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue1756Test.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/Issue1756Test.kt
+@@ -0,0 +1,152 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++class Issue1756Test {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Issue 1756 - Format lambda parameters on multiple lines with non-ktlint_official code style`() {
++        val code =
++            """
++            fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
++                c(a, b)
++            }
++
++            class Foo {
++                fun foo() {
++                    combine(
++                        Any(),
++                        Any()
++                    ) { a,
++                              b ->
++                        TODO()
++                    }
++                }
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
++                c(a, b)
++            }
++
++            class Foo {
++                fun foo() {
++                    combine(
++                        Any(),
++                        Any()
++                    ) { a,
++                            b ->
++                        TODO()
++                    }
++                }
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.intellij_idea)
++            .hasLintViolation(11, 1, "Unexpected indentation (18) (should be 16)")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue 1756 - Format lambda parameters on multiple lines with ktlint_official code style`() {
++        val code =
++            """
++            fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
++                c(a, b)
++            }
++
++            class Foo {
++                fun foo() {
++                    combine(
++                        Any(),
++                        Any()
++                    ) { a,
++                              b ->
++                        TODO()
++                    }
++                }
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) {
++                c(a, b)
++            }
++
++            class Foo {
++                fun foo() {
++                    combine(
++                        Any(),
++                        Any()
++                    ) { a,
++                            b ->
++                        TODO()
++                    }
++                }
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.ktlint_official)
++            .hasLintViolation(11, 1, "Unexpected indentation (18) (should be 16)")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue 1756 - Lambda on same line as function call with arguments should use double indent for intellij_idea`() {
++        val code =
++            """
++            fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) = Unit
++
++            fun foo() {
++                combine(Any(), Any()) { a,
++                                        b ->
++                    TODO()
++                }
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) = Unit
++
++            fun foo() {
++                combine(Any(), Any()) { a,
++                        b ->
++                    TODO()
++                }
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.intellij_idea)
++            .hasLintViolation(5, 1, "Unexpected indentation (28) (should be 12)")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Issue 1756 - Lambda with parameters on newline after opening brace for intellij_idea`() {
++        val code =
++            """
++            fun combine(a: Any, b: Any, c: (Any, Any) -> Unit) = Unit
++
++            fun foo() {
++                combine(
++                    Any(),
++                    Any()
++                ) {
++                        a,
++                        b ->
++                    TODO()
++                }
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to CodeStyleValue.intellij_idea)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

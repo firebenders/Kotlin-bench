@@ -1,0 +1,241 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b971418b..921ec3bc 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -10,6 +10,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ 
+ ### Fixed
+ 
++* Fix `property-naming` rule incorrectly flagging properties with custom getters when annotations or modifiers appear before the `get()` keyword
++
+ ### Changed
+ 
+ ## [0.49.1] - 2023-05-12
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+index 9942f64a..c24a84d6 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+@@ -3,6 +3,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS_BODY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONST_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.GET_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.IDENTIFIER
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OBJECT_DECLARATION
+@@ -104,8 +105,9 @@ public class PropertyNamingRule :
+ 
+     private fun ASTNode.hasCustomGetter() =
+         findChildByType(PROPERTY_ACCESSOR)
+-            ?.firstChildNode
+-            ?.text == "get"
++            ?.children()
++            ?.any { it.elementType == GET_KEYWORD }
++            ?: false
+ 
+     private fun ASTNode.hasConstModifier() = hasModifier(CONST_KEYWORD)
+ 
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleAnnotationGetterTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleAnnotationGetterTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleAnnotationGetterTest.kt
+@@ -0,0 +1,87 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat
++import org.junit.jupiter.api.Test
++
++class PropertyNamingRuleAnnotationGetterTest {
++    private val propertyNamingRuleAssertThat =
++        KtLintAssertThat.assertThatRule { PropertyNamingRule() }
++
++    @Test
++    fun `Given an extension property with annotation on getter then do not emit`() {
++        val code =
++            """
++            import android.annotation.SuppressLint
++            import android.content.Context
++
++            val Context.adsDelegateFactory @SuppressLint("WrongConstant") get() =
++                applicationContext.getSystemService(SYSTEM_SERVICE_AD_DELEGATE_FACTORY) as AdsDelegateFactory
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given an extension property with private modifier on getter then do not emit`() {
++        val code =
++            """
++            import android.content.Context
++
++            val Context.adsDelegateFactory private get() =
++                applicationContext.getSystemService(SYSTEM_SERVICE_AD_DELEGATE_FACTORY) as AdsDelegateFactory
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a top-level property with annotation on getter then do not emit`() {
++        val code =
++            """
++            import android.annotation.SuppressLint
++
++            val foo @SuppressLint("WrongConstant") get() = "bar"
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a class property with annotation on getter then do not emit`() {
++        val code =
++            """
++            import android.annotation.SuppressLint
++
++            class Foo {
++                val bar @SuppressLint("WrongConstant") get() = "baz"
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given an object property with annotation on getter then do not emit`() {
++        val code =
++            """
++            import android.annotation.SuppressLint
++
++            object Foo {
++                val bar @SuppressLint("WrongConstant") get() = "baz"
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a companion object property with annotation on getter then do not emit`() {
++        val code =
++            """
++            import android.annotation.SuppressLint
++
++            class Foo {
++                companion object {
++                    val bar @SuppressLint("WrongConstant") get() = "baz"
++                }
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleEdgeCasesTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleEdgeCasesTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRuleEdgeCasesTest.kt
+@@ -0,0 +1,97 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat
++import org.junit.jupiter.api.Test
++
++class PropertyNamingRuleEdgeCasesTest {
++    private val propertyNamingRuleAssertThat =
++        KtLintAssertThat.assertThatRule { PropertyNamingRule() }
++
++    @Test
++    fun `Given property with multiple annotations on getter then do not emit`() {
++        val code =
++            """
++            import android.annotation.SuppressLint
++
++            val foo @Deprecated("test") @SuppressLint("WrongConstant") get() = "bar"
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given property with annotation and modifier on getter then do not emit`() {
++        val code =
++            """
++            import android.annotation.SuppressLint
++
++            class Foo {
++                val bar @SuppressLint("WrongConstant") private get() = "baz"
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given property with getter but no annotation should follow naming rules`() {
++        val code =
++            """
++            val FOO_BAR get() = "bar"
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given top-level val without getter should emit`() {
++        val code =
++            """
++            val foo = "bar"
++            """.trimIndent()
++        @Suppress("ktlint:argument-list-wrapping", "ktlint:max-line-length")
++        propertyNamingRuleAssertThat(code)
++            .hasLintViolationWithoutAutoCorrect(1, 5, "Property name should use the screaming snake case notation when the value can not be changed")
++    }
++
++    @Test
++    fun `Given companion object property with annotation on getter should not emit`() {
++        val code =
++            """
++            import android.annotation.SuppressLint
++
++            class Foo {
++                companion object {
++                    val myProperty @SuppressLint("test") get() = "value"
++                }
++            }
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given companion object property without getter should emit`() {
++        val code =
++            """
++            class Foo {
++                companion object {
++                    val myProperty = "value"
++                }
++            }
++            """.trimIndent()
++        @Suppress("ktlint:argument-list-wrapping", "ktlint:max-line-length")
++        propertyNamingRuleAssertThat(code)
++            .hasLintViolationWithoutAutoCorrect(3, 13, "Property name should use the screaming snake case notation when the value can not be changed")
++    }
++
++    @Test
++    fun `Given property with getter on new line with annotation should not emit`() {
++        val code =
++            """
++            import android.annotation.SuppressLint
++
++            val foo
++                @SuppressLint("test")
++                get() = "bar"
++            """.trimIndent()
++        propertyNamingRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

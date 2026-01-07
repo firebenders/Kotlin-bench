@@ -1,0 +1,98 @@
+diff --git a/kotlinx-coroutines-core/common/src/CoroutineStart.kt b/kotlinx-coroutines-core/common/src/CoroutineStart.kt
+index c4c4cea72..15a5922c0 100644
+--- a/kotlinx-coroutines-core/common/src/CoroutineStart.kt
++++ b/kotlinx-coroutines-core/common/src/CoroutineStart.kt
+@@ -356,7 +356,7 @@ public enum class CoroutineStart {
+     public operator fun <R, T> invoke(block: suspend R.() -> T, receiver: R, completion: Continuation<T>): Unit =
+         when (this) {
+             DEFAULT -> block.startCoroutineCancellable(receiver, completion)
+-            ATOMIC -> block.startCoroutine(receiver, completion)
++            ATOMIC -> runSafely(completion) { block.startCoroutine(receiver, completion) }
+             UNDISPATCHED -> block.startCoroutineUndispatched(receiver, completion)
+             LAZY -> Unit // will start lazily
+         }
+diff --git a/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt b/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
+index e00c1fdd6..799a4f63d 100644
+--- a/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
++++ b/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
+@@ -219,8 +219,12 @@ internal suspend fun <T, V> withContextUndispatched(
+     block: suspend (V) -> T
+ ): T =
+     suspendCoroutineUninterceptedOrReturn { uCont ->
+-        withCoroutineContext(newContext, countOrElement) {
+-            block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))
++        try {
++            withCoroutineContext(newContext, countOrElement) {
++                block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))
++            }
++        } catch (e: Throwable) {
++            throw if (e is DispatchException) e.cause else e
+         }
+     }
+ 
+diff --git a/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt b/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
+index 1e87d767a..c4898d945 100644
+--- a/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
++++ b/kotlinx-coroutines-core/common/src/intrinsics/Cancellable.kt
+@@ -41,7 +41,7 @@ internal fun Continuation<Unit>.startCoroutineCancellable(fatalCompletion: Conti
+  * Thus if dispatcher throws an exception during coroutine start, coroutine never completes, so we should treat dispatcher exception
+  * as its cause and resume completion.
+  */
+-private inline fun runSafely(completion: Continuation<*>, block: () -> Unit) {
++internal inline fun runSafely(completion: Continuation<*>, block: () -> Unit) {
+     try {
+         block()
+     } catch (e: Throwable) {
+@@ -49,7 +49,7 @@ private inline fun runSafely(completion: Continuation<*>, block: () -> Unit) {
+     }
+ }
+ 
+-private fun dispatcherFailure(completion: Continuation<*>, e: Throwable) {
++internal fun dispatcherFailure(completion: Continuation<*>, e: Throwable) {
+     /*
+      * This method is invoked when we failed to start a coroutine due to the throwing
+      * dispatcher implementation or missing Dispatchers.Main.
+diff --git a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+index 511199701..64d899b62 100644
+--- a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
++++ b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+@@ -12,21 +12,15 @@ import kotlin.coroutines.intrinsics.*
+  */
+ internal fun <R, T> (suspend (R) -> T).startCoroutineUndispatched(receiver: R, completion: Continuation<T>) {
+     val actualCompletion = probeCoroutineCreated(completion)
+-    val value = try {
+-        /* The code below is started immediately in the current stack-frame
+-         * and runs until the first suspension point. */
+-        withCoroutineContext(actualCompletion.context, null) {
++    runSafely(actualCompletion) {
++        val value = withCoroutineContext(actualCompletion.context, null) {
+             probeCoroutineResumed(actualCompletion)
+             startCoroutineUninterceptedOrReturn(receiver, actualCompletion)
+         }
+-    } catch (e: Throwable) {
+-        val reportException = if (e is DispatchException) e.cause else e
+-        actualCompletion.resumeWithException(reportException)
+-        return
+-    }
+-    if (value !== COROUTINE_SUSPENDED) {
+-        @Suppress("UNCHECKED_CAST")
+-        actualCompletion.resume(value as T)
++        if (value !== COROUTINE_SUSPENDED) {
++            @Suppress("UNCHECKED_CAST")
++            actualCompletion.resume(value as T)
++        }
+     }
+ }
+ 
+@@ -62,9 +56,9 @@ private inline fun <T> ScopeCoroutine<T>.undispatchedResult(
+     val result = try {
+         startBlock()
+     } catch (e: Throwable) {
+-        CompletedExceptionally(e)
++        CompletedExceptionally(if (e is DispatchException) e.cause else e)
+     }
+-    /*
++/*
+      * We're trying to complete our undispatched block here and have three code-paths:
+      * (1) Coroutine is suspended.
+      * Otherwise, coroutine had returned result, so we are completing our block (and its job).

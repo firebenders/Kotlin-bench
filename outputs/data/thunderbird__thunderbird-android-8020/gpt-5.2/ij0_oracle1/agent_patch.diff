@@ -1,0 +1,76 @@
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+index a14cb14bdb..8b54d700a4 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+@@ -18,6 +18,7 @@ internal class UserInputEmailAddressParser {
+                 when {
+                     address.isIncomplete() -> null
+                     address.isNonAsciiAddress() -> throw NonAsciiEmailAddressException(address.address)
++                    !address.hasValidRfc5321Domain() -> null
+                     else -> Address.parse(address.toEncodedString()).firstOrNull()
+                 }
+             }
+@@ -26,6 +27,33 @@ internal class UserInputEmailAddressParser {
+     private fun Address.isIncomplete() = hostname.isNullOrBlank()
+ 
+     private fun Address.isNonAsciiAddress() = !CharsetUtil.isASCII(address)
++
++    /**
++     * mime4j uses RFC 5322 parsing rules which allow characters in the domain part that are not valid in RFC 5321.
++     * This is relevant for SMTP envelope validation (e.g. `user@gmail.com/`).
++     */
++    private fun Address.hasValidRfc5321Domain(): Boolean {
++        val domain = hostname ?: return false
++
++        // Allow address literals (e.g. user@[192.0.2.1])
++        if (domain.startsWith("[") && domain.endsWith("]") && domain.length > 2) {
++            return true
++        }
++
++        if (domain.length > 255) return false
++
++        val labels = domain.split('.')
++        if (labels.any { it.isEmpty() }) return false
++
++        for (label in labels) {
++            if (label.length !in 1..63) return false
++            if (!label.first().isLetterOrDigit()) return false
++            if (!label.last().isLetterOrDigit()) return false
++            if (!label.all { it.isLetterOrDigit() || it == '-' }) return false
++        }
++
++        return true
++    }
+ }
+ 
+ internal class NonAsciiEmailAddressException(message: String) : Exception(message)
+
+diff --git a/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserRfc5321ValidationTest.kt b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserRfc5321ValidationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserRfc5321ValidationTest.kt
+@@ -0,0 +1,24 @@
++package com.fsck.k9.view
++
++import assertk.assertThat
++import assertk.assertions.isEmpty
++import kotlin.test.Test
++
++class UserInputEmailAddressParserRfc5321ValidationTest {
++    private val parser = UserInputEmailAddressParser()
++
++    @Test
++    fun `domain part with trailing slash should be rejected`() {
++        val addresses = parser.parse("user@gmail.com/")
++
++        assertThat(addresses).isEmpty()
++    }
++
++    @Test
++    fun `address in angle brackets with trailing slash should be rejected`() {
++        val addresses = parser.parse("<user@gmail.com/>")
++
++        assertThat(addresses).isEmpty()
++    }
++}
++

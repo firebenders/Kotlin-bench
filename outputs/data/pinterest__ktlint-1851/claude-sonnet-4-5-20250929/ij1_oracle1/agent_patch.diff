@@ -1,0 +1,260 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 737e9a62..9c89729c 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -12,6 +12,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK_COMMENT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BODY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.CATCH
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS_BODY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLOSING_QUOTE
+@@ -26,6 +27,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.DOT_QUALIFIED_EXPRE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELSE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.FINALLY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUNCTION_LITERAL
+@@ -61,7 +63,9 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.SUPER_TYPE_CALL_ENT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.SUPER_TYPE_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.SUPER_TYPE_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.THEN
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_ARGUMENT_LIST
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPEALIAS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_CONSTRAINT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_CONSTRAINT_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PARAMETER_LIST
+@@ -224,6 +228,12 @@ public class IndentationRule :
+             node.elementType == IF ->
+                 visitIf(node)
+ 
++            node.elementType == TRY ->
++                visitTry(node)
++
++            node.elementType == TYPEALIAS ->
++                visitTypealias(node)
++
+             node.elementType == LBRACE ->
+                 visitLbrace(node)
+ 
+@@ -375,6 +385,58 @@ public class IndentationRule :
+         )
+     }
+ 
++    private fun visitTry(node: ASTNode) {
++        var nextToAstNode = node.lastChildLeafOrSelf()
++        node
++            .findChildByType(FINALLY)
++            ?.let { fromAstNode ->
++                nextToAstNode = startIndentContext(
++                    fromAstNode = fromAstNode,
++                    toAstNode = nextToAstNode,
++                    childIndent = "",
++                ).prevCodeLeaf()
++            }
++
++        node
++            .children()
++            .filter { it.elementType == CATCH }
++            .toList()
++            .reversed()
++            .forEach { catchNode ->
++                nextToAstNode = startIndentContext(
++                    fromAstNode = catchNode,
++                    toAstNode = nextToAstNode,
++                    childIndent = "",
++                ).prevCodeLeaf()
++            }
++
++        // The try block itself should not get extra indentation
++        startIndentContext(
++            fromAstNode = node,
++            toAstNode = nextToAstNode,
++            childIndent = "",
++        )
++    }
++
++    private fun visitTypealias(node: ASTNode) {
++        // Inner indent contexts in reversed order
++        var nextToAstNode: ASTNode = node.lastChildLeafOrSelf()
++        node
++            .findChildByType(EQ)
++            ?.let { fromAstNode ->
++                nextToAstNode = startIndentContext(
++                    fromAstNode = fromAstNode,
++                    toAstNode = nextToAstNode,
++                ).prevCodeLeaf()
++            }
++
++        startIndentContext(
++            fromAstNode = node,
++            toAstNode = nextToAstNode,
++            childIndent = "",
++        )
++    }
++
+     private fun visitLbrace(node: ASTNode) {
+         // Outer indent context
+         val rbrace = requireNotNull(
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssueTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssueTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleIssueTest.kt
+@@ -0,0 +1,144 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for indentation issues with try/catch and typealias
++ */
++class IndentationRuleIssueTest {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Given a try-catch with expression-style function should not extra indent catch block`() {
++        val code =
++            """
++            fun test() = try {
++            1
++            }
++            catch(_: Throwable) {
++            2
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun test() = try {
++              1
++            }
++            catch(_: Throwable) {
++              2
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(INDENT_SIZE_PROPERTY to 2)
++            .hasLintViolations(
++                LintViolation(2, 1, "Unexpected indentation (0) (should be 2)"),
++                LintViolation(5, 1, "Unexpected indentation (0) (should be 2)"),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a try-catch-finally with expression-style function should not extra indent catch and finally blocks`() {
++        val code =
++            """
++            fun test() = try {
++            1
++            } catch(_: Throwable) {
++            2
++            } finally {
++            3
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun test() = try {
++              1
++            } catch(_: Throwable) {
++              2
++            } finally {
++              3
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(INDENT_SIZE_PROPERTY to 2)
++            .hasLintViolations(
++                LintViolation(2, 1, "Unexpected indentation (0) (should be 2)"),
++                LintViolation(4, 1, "Unexpected indentation (0) (should be 2)"),
++                LintViolation(6, 1, "Unexpected indentation (0) (should be 2)"),
++            ).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a typealias with multiline type should indent the type`() {
++        val code =
++            """
++            typealias Foo =
++            HashMap<Bar, Baz?>
++            """.trimIndent()
++        val formattedCode =
++            """
++            typealias Foo =
++                HashMap<Bar, Baz?>
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .hasLintViolation(2, 1, "Unexpected indentation (0) (should be 4)")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a typealias with multiline type with 2 space indent should indent the type correctly`() {
++        val code =
++            """
++            typealias Foo =
++            HashMap<Bar, Baz?>
++            """.trimIndent()
++        val formattedCode =
++            """
++            typealias Foo =
++              HashMap<Bar, Baz?>
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .withEditorConfigOverride(INDENT_SIZE_PROPERTY to 2)
++            .hasLintViolation(2, 1, "Unexpected indentation (0) (should be 2)")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a nested try-catch with expression-style function should not extra indent catch block`() {
++        val code =
++            """
++            fun test() {
++            val x = try {
++            1
++            }
++            catch(_: Throwable) {
++            2
++            }
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            fun test() {
++                val x = try {
++                    1
++                }
++                catch(_: Throwable) {
++                    2
++                }
++            }
++            """.trimIndent()
++        indentationRuleAssertThat(code)
++            .hasLintViolations(
++                LintViolation(2, 1, "Unexpected indentation (0) (should be 4)"),
++                LintViolation(3, 1, "Unexpected indentation (0) (should be 8)"),
++                LintViolation(4, 1, "Unexpected indentation (0) (should be 4)"),
++                LintViolation(5, 1, "Unexpected indentation (0) (should be 4)"),
++                LintViolation(6, 1, "Unexpected indentation (0) (should be 8)"),
++                LintViolation(7, 1, "Unexpected indentation (0) (should be 4)"),
++            ).isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

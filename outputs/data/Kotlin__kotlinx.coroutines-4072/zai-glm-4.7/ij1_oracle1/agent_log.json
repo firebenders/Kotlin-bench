@@ -1,0 +1,652 @@
+{
+  "session_id": "05fb013d-421d-447c-a0e3-c15d26a908ef",
+  "model": "zai-glm-4.7",
+  "query": "You are working on the Kotlin/kotlinx.coroutines repository.\nThe codebase is at version 1.8 (commit: 60d2fe84).\n\n## Issue to Resolve\n\nCallbackflow close exception misbehavior with timeout\n**Describe the bug**\r\n\r\nWhen `callbackflow` is chained with `timeout` directly, and closed with an exception, the exception won\u0027t be sent to downstream. \r\n\r\n Coroutines version 1.8.0. Kotlin version 1.9.21.\r\n\r\n**Provide a Reproducer**\r\n\r\n```\r\nval flow \u003d callbackFlow\u003cInt\u003e {\r\n    close(IllegalStateException(\"Test Exception\"))\r\n}.timeout(5.seconds)\r\ntry {\r\n    flow.collect()\r\n} catch (e: Exception) {\r\n    println(\"exception got: $e\")\r\n}\r\n```\r\nI expect this to print:\r\n`exception got: java.lang.IllegalStateException: Test Exception`\r\n\r\nBut no exception is caught.\r\n\r\nHowever, if I add any operator between callbackflow and timeout, it works as expected, \r\n```\r\nval flow \u003d callbackFlow\u003cInt\u003e {\r\n    close(IllegalStateException(\"Test Exception\"))\r\n}.catch{throw it}.timeout(5.seconds)\r\ntry {\r\n    flow.collect()\r\n} catch (e: Exception) {\r\n    println(\"exception got: $e\")\r\n}\r\n```\n\n## Relevant Files\n\nThe following files are likely relevant to solving this issue:\n- `kotlinx-coroutines-core/common/src/flow/operators/Delay.kt`\n\n## Instructions\n\nPlease analyze this issue and implement a fix. Make the necessary code changes to resolve the problem described above.\n\nFocus on:\n- Understanding the root cause of the issue\n- Making minimal, targeted changes to fix the problem\n- Ensuring your changes don\u0027t break existing functionality",
+  "start_time_ms": 1767752407041,
+  "end_time_ms": 1767752433244,
+  "total_duration_ms": 26203,
+  "total_input_tokens": 0,
+  "total_output_tokens": 0,
+  "success": true,
+  "error": null,
+  "conversation_history": [
+    {
+      "role": "user",
+      "content": "You are working on the Kotlin/kotlinx.coroutines repository.\nThe codebase is at version 1.8 (commit: 60d2fe84).\n\n## Issue to Resolve\n\nCallbackflow close exception misbehavior with timeout\n**Describe the bug**\r\n\r\nWhen `callbackflow` is chained with `timeout` directly, and closed with an exception, the exception won\u0027t be sent to downstream. \r\n\r\n Coroutines version 1.8.0. Kotlin version 1.9.21.\r\n\r\n**Provide a Reproducer**\r\n\r\n```\r\nval flow \u003d callbackFlow\u003cInt\u003e {\r\n    close(IllegalStateException(\"Test Exception\"))\r\n}.timeout(5.seconds)\r\ntry {\r\n    flow.collect()\r\n} catch (e: Exception) {\r\n    println(\"exception got: $e\")\r\n}\r\n```\r\nI expect this to print:\r\n`exception got: java.lang.IllegalStateException: Test Exception`\r\n\r\nBut no exception is caught.\r\n\r\nHowever, if I add any operator between callbackflow and timeout, it works as expected, \r\n```\r\nval flow \u003d callbackFlow\u003cInt\u003e {\r\n    close(IllegalStateException(\"Test Exception\"))\r\n}.catch{throw it}.timeout(5.seconds)\r\ntry {\r\n    flow.collect()\r\n} catch (e: Exception) {\r\n    println(\"exception got: $e\")\r\n}\r\n```\n\n## Relevant Files\n\nThe following files are likely relevant to solving this issue:\n- `kotlinx-coroutines-core/common/src/flow/operators/Delay.kt`\n\n## Instructions\n\nPlease analyze this issue and implement a fix. Make the necessary code changes to resolve the problem described above.\n\nFocus on:\n- Understanding the root cause of the issue\n- Making minimal, targeted changes to fix the problem\n- Ensuring your changes don\u0027t break existing functionality"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I\u0027ll analyze this issue with `callbackFlow` and `timeout` operator. Let me start by examining the relevant files."
+        }
+      ],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-b39ec16f18d2a3c2",
+          "type": "function",
+          "function": {
+            "name": "read",
+            "arguments": "{\"file_path\": \"/project/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt\"}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 6610
+    },
+    {
+      "role": "tool",
+      "name": "read",
+      "tool_call_id": "chatcmpl-tool-b39ec16f18d2a3c2",
+      "content": "  1→@file:JvmMultifileClass\n  2→@file:JvmName(\"FlowKt\")\n  3→\n  4→package kotlinx.coroutines.flow\n  5→\n  6→import kotlinx.coroutines.*\n  7→import kotlinx.coroutines.channels.*\n  8→import kotlinx.coroutines.flow.internal.*\n  9→import kotlinx.coroutines.selects.*\n 10→import kotlin.jvm.*\n 11→import kotlin.time.*\n 12→\n 13→/* Scaffolding for Knit code examples\n 14→\u003c!--- TEST_NAME FlowDelayTest --\u003e\n 15→\u003c!--- PREFIX .*-duration-.*\n 16→----- INCLUDE .*-duration-.*\n 17→----- INCLUDE .*\n 18→import kotlinx.coroutines.*\n 19→import kotlinx.coroutines.flow.*\n 20→import kotlin.time.Duration.Companion.milliseconds\n 21→\n 22→fun main() \u003d runBlocking {\n 23→----- SUFFIX .*\n 24→.toList().joinToString().let { println(it) } }\n 25→--\u003e\n 26→*/\n 27→\n 28→/**\n 29→ * Returns a flow that mirrors the original flow, but filters out values\n 30→ * that are followed by the newer values within the given [timeout][timeoutMillis].\n 31→ * The latest value is always emitted.\n 32→ *\n 33→ * Example:\n 34→ *\n 35→ * ```kotlin\n 36→ * flow {\n 37→ *     emit(1)\n 38→ *     delay(90)\n 39→ *     emit(2)\n 40→ *     delay(90)\n 41→ *     emit(3)\n 42→ *     delay(1010)\n 43→ *     emit(4)\n 44→ *     delay(1010)\n 45→ *     emit(5)\n 46→ * }.debounce(1000)\n 47→ * ```\n 48→ * \u003c!--- KNIT example-delay-01.kt --\u003e\n 49→ *\n 50→ * produces the following emissions\n 51→ *\n 52→ * ```text\n 53→ * 3, 4, 5\n 54→ * ```\n 55→ * \u003c!--- TEST --\u003e\n 56→ *\n 57→ * Note that the resulting flow does not emit anything as long as the original flow emits\n 58→ * items faster than every [timeoutMillis] milliseconds.\n 59→ */\n 60→@FlowPreview\n 61→public fun \u003cT\u003e Flow\u003cT\u003e.debounce(timeoutMillis: Long): Flow\u003cT\u003e {\n 62→    require(timeoutMillis \u003e\u003d 0L) { \"Debounce timeout should not be negative\" }\n 63→    if (timeoutMillis \u003d\u003d 0L) return this\n 64→    return debounceInternal { timeoutMillis }\n 65→}\n 66→\n 67→/**\n 68→ * Returns a flow that mirrors the original flow, but filters out values\n 69→ * that are followed by the newer values within the given [timeout][timeoutMillis].\n 70→ * The latest value is always emitted.\n 71→ *\n 72→ * A variation of [debounce] that allows specifying the timeout value dynamically.\n 73→ *\n 74→ * Example:\n 75→ *\n 76→ * ```kotlin\n 77→ * flow {\n 78→ *     emit(1)\n 79→ *     delay(90)\n 80→ *     emit(2)\n 81→ *     delay(90)\n 82→ *     emit(3)\n 83→ *     delay(1010)\n 84→ *     emit(4)\n 85→ *     delay(1010)\n 86→ *     emit(5)\n 87→ * }.debounce {\n 88→ *     if (it \u003d\u003d 1) {\n 89→ *         0L\n 90→ *     } else {\n 91→ *         1000L\n 92→ *     }\n 93→ * }\n 94→ * ```\n 95→ * \u003c!--- KNIT example-delay-02.kt --\u003e\n 96→ *\n 97→ * produces the following emissions\n 98→ *\n 99→ * ```text\n100→ * 1, 3, 4, 5\n101→ * ```\n102→ * \u003c!--- TEST --\u003e\n103→ *\n104→ * Note that the resulting flow does not emit anything as long as the original flow emits\n105→ * items faster than every [timeoutMillis] milliseconds.\n106→ *\n107→ * @param timeoutMillis [T] is the emitted value and the return value is timeout in milliseconds.\n108→ */\n109→@FlowPreview\n110→@OverloadResolutionByLambdaReturnType\n111→public fun \u003cT\u003e Flow\u003cT\u003e.debounce(timeoutMillis: (T) -\u003e Long): Flow\u003cT\u003e \u003d\n112→    debounceInternal(timeoutMillis)\n113→\n114→/**\n115→ * Returns a flow that mirrors the original flow, but filters out values\n116→ * that are followed by the newer values within the given [timeout].\n117→ * The latest value is always emitted.\n118→ *\n119→ * Example:\n120→ *\n121→ * ```kotlin\n122→ * flow {\n123→ *     emit(1)\n124→ *     delay(90.milliseconds)\n125→ *     emit(2)\n126→ *     delay(90.milliseconds)\n127→ *     emit(3)\n128→ *     delay(1010.milliseconds)\n129→ *     emit(4)\n130→ *     delay(1010.milliseconds)\n131→ *     emit(5)\n132→ * }.debounce(1000.milliseconds)\n133→ * ```\n134→ * \u003c!--- KNIT example-delay-duration-01.kt --\u003e\n135→ *\n136→ * produces the following emissions\n137→ *\n138→ * ```text\n139→ * 3, 4, 5\n140→ * ```\n141→ * \u003c!--- TEST --\u003e\n142→ *\n143→ * Note that the resulting flow does not emit anything as long as the original flow emits\n144→ * items faster than every [timeout] milliseconds.\n145→ */\n146→@FlowPreview\n147→public fun \u003cT\u003e Flow\u003cT\u003e.debounce(timeout: Duration): Flow\u003cT\u003e \u003d\n148→    debounce(timeout.toDelayMillis())\n149→\n150→/**\n151→ * Returns a flow that mirrors the original flow, but filters out values\n152→ * that are followed by the newer values within the given [timeout].\n153→ * The latest value is always emitted.\n154→ *\n155→ * A variation of [debounce] that allows specifying the timeout value dynamically.\n156→ *\n157→ * Example:\n158→ *\n159→ * ```kotlin\n160→ * flow {\n161→ *     emit(1)\n162→ *     delay(90.milliseconds)\n163→ *     emit(2)\n164→ *     delay(90.milliseconds)\n165→ *     emit(3)\n166→ *     delay(1010.milliseconds)\n167→ *     emit(4)\n168→ *     delay(1010.milliseconds)\n169→ *     emit(5)\n170→ * }.debounce {\n171→ *     if (it \u003d\u003d 1) {\n172→ *         0.milliseconds\n173→ *     } else {\n174→ *         1000.milliseconds\n175→ *     }\n176→ * }\n177→ * ```\n178→ * \u003c!--- KNIT example-delay-duration-02.kt --\u003e\n179→ *\n180→ * produces the following emissions\n181→ *\n182→ * ```text\n183→ * 1, 3, 4, 5\n184→ * ```\n185→ * \u003c!--- TEST --\u003e\n186→ *\n187→ * Note that the resulting flow does not emit anything as long as the original flow emits\n188→ * items faster than every [timeout] unit.\n189→ *\n190→ * @param timeout [T] is the emitted value and the return value is timeout in [Duration].\n191→ */\n192→@FlowPreview\n193→@JvmName(\"debounceDuration\")\n194→@OverloadResolutionByLambdaReturnType\n195→public fun \u003cT\u003e Flow\u003cT\u003e.debounce(timeout: (T) -\u003e Duration): Flow\u003cT\u003e \u003d\n196→    debounceInternal { emittedItem -\u003e\n197→        timeout(emittedItem).toDelayMillis()\n198→    }\n199→\n200→private fun \u003cT\u003e Flow\u003cT\u003e.debounceInternal(timeoutMillisSelector: (T) -\u003e Long): Flow\u003cT\u003e \u003d\n201→    scopedFlow { downstream -\u003e\n202→        // Produce the values using the default (rendezvous) channel\n203→        val values \u003d produce {\n204→            collect { value -\u003e send(value ?: NULL) }\n205→        }\n206→        // Now consume the values\n207→        var lastValue: Any? \u003d null\n208→        while (lastValue !\u003d\u003d DONE) {\n209→            var timeoutMillis \u003d 0L // will be always computed when lastValue !\u003d null\n210→            // Compute timeout for this value\n211→            if (lastValue !\u003d null) {\n212→                timeoutMillis \u003d timeoutMillisSelector(NULL.unbox(lastValue))\n213→                require(timeoutMillis \u003e\u003d 0L) { \"Debounce timeout should not be negative\" }\n214→                if (timeoutMillis \u003d\u003d 0L) {\n215→                    downstream.emit(NULL.unbox(lastValue))\n216→                    lastValue \u003d null // Consume the value\n217→                }\n218→            }\n219→            // assert invariant: lastValue !\u003d null implies timeoutMillis \u003e 0\n220→            assert { lastValue \u003d\u003d null || timeoutMillis \u003e 0 }\n221→            // wait for the next value with timeout\n222→            select\u003cUnit\u003e {\n223→                // Set timeout when lastValue exists and is not consumed yet\n224→                if (lastValue !\u003d null) {\n225→                    onTimeout(timeoutMillis) {\n226→                        downstream.emit(NULL.unbox(lastValue))\n227→                        lastValue \u003d null // Consume the value\n228→                    }\n229→                }\n230→                values.onReceiveCatching { value -\u003e\n231→                    value\n232→                        .onSuccess { lastValue \u003d it }\n233→                        .onFailure {\n234→                            it?.let { throw it }\n235→                            // If closed normally, emit the latest value\n236→                            if (lastValue !\u003d null) downstream.emit(NULL.unbox(lastValue))\n237→                            lastValue \u003d DONE\n238→                        }\n239→                }\n240→            }\n241→        }\n242→    }\n243→\n244→/**\n245→ * Returns a flow that emits only the latest value emitted by the original flow during the given sampling [period][periodMillis].\n246→ *\n247→ * Example:\n248→ *\n249→ * ```kotlin\n250→ * flow {\n251→ *     repeat(10) {\n252→ *         emit(it)\n253→ *         delay(110)\n254→ *     }\n255→ * }.sample(200)\n256→ * ```\n257→ * \u003c!--- KNIT example-delay-03.kt --\u003e\n258→ *\n259→ * produces the following emissions\n260→ *\n261→ * ```text\n262→ * 1, 3, 5, 7, 9\n263→ * ```\n264→ * \u003c!--- TEST --\u003e\n265→ *\n266→ * Note that the latest element is not emitted if it does not fit into the sampling window.\n267→ */\n268→@FlowPreview\n269→public fun \u003cT\u003e Flow\u003cT\u003e.sample(periodMillis: Long): Flow\u003cT\u003e {\n270→    require(periodMillis \u003e 0) { \"Sample period should be positive\" }\n271→    return scopedFlow { downstream -\u003e\n272→        val values \u003d produce(capacity \u003d Channel.CONFLATED) {\n273→            collect { value -\u003e send(value ?: NULL) }\n274→        }\n275→        var lastValue: Any? \u003d null\n276→        val ticker \u003d fixedPeriodTicker(periodMillis)\n277→        while (lastValue !\u003d\u003d DONE) {\n278→            select\u003cUnit\u003e {\n279→                values.onReceiveCatching { result -\u003e\n280→                    result\n281→                        .onSuccess { lastValue \u003d it }\n282→                        .onFailure {\n283→                            it?.let { throw it }\n284→                            ticker.cancel(ChildCancelledException())\n285→                            lastValue \u003d DONE\n286→                        }\n287→                }\n288→\n289→                // todo: shall be start sampling only when an element arrives or sample aways as here?\n290→                ticker.onReceive {\n291→                    val value \u003d lastValue ?: return@onReceive\n292→                    lastValue \u003d null // Consume the value\n293→                    downstream.emit(NULL.unbox(value))\n294→                }\n295→            }\n296→        }\n297→    }\n298→}\n299→\n300→/*\n301→ * TODO this design (and design of the corresponding operator) depends on #540\n302→ */\n303→internal fun CoroutineScope.fixedPeriodTicker(\n304→    delayMillis: Long,\n305→): ReceiveChannel\u003cUnit\u003e {\n306→    return produce(capacity \u003d 0) {\n307→        delay(delayMillis)\n308→        while (true) {\n309→            channel.send(Unit)\n310→            delay(delayMillis)\n311→        }\n312→    }\n313→}\n314→\n315→/**\n316→ * Returns a flow that emits only the latest value emitted by the original flow during the given sampling [period].\n317→ *\n318→ * Example:\n319→ *\n320→ * ```kotlin\n321→ * flow {\n322→ *     repeat(10) {\n323→ *         emit(it)\n324→ *         delay(110.milliseconds)\n325→ *     }\n326→ * }.sample(200.milliseconds)\n327→ * ```\n328→ * \u003c!--- KNIT example-delay-duration-03.kt --\u003e\n329→ *\n330→ * produces the following emissions\n331→ *\n332→ * ```text\n333→ * 1, 3, 5, 7, 9\n334→ * ```\n335→ * \u003c!--- TEST --\u003e\n336→ *\n337→ * Note that the latest element is not emitted if it does not fit into the sampling window.\n338→ */\n339→@FlowPreview\n340→public fun \u003cT\u003e Flow\u003cT\u003e.sample(period: Duration): Flow\u003cT\u003e \u003d sample(period.toDelayMillis())\n341→\n342→/**\n343→ * Returns a flow that will emit a [TimeoutCancellationException] if the upstream doesn\u0027t emit an item within the given time.\n344→ *\n345→ * Example:\n346→ *\n347→ * ```kotlin\n348→ * flow {\n349→ *     emit(1)\n350→ *     delay(100)\n351→ *     emit(2)\n352→ *     delay(100)\n353→ *     emit(3)\n354→ *     delay(1000)\n355→ *     emit(4)\n356→ * }.timeout(100.milliseconds).catch { exception -\u003e\n357→ *     if (exception is TimeoutCancellationException) {\n358→ *         // Catch the TimeoutCancellationException emitted above.\n359→ *         // Emit desired item on timeout.\n360→ *         emit(-1)\n361→ *     } else {\n362→ *         // Throw other exceptions.\n363→ *         throw exception\n364→ *     }\n365→ * }.onEach {\n366→ *     delay(300) // This will not cause a timeout\n367→ * }\n368→ * ```\n369→ * \u003c!--- KNIT example-timeout-duration-01.kt --\u003e\n370→ *\n371→ * produces the following emissions\n372→ *\n373→ * ```text\n374→ * 1, 2, 3, -1\n375→ * ```\n376→ * \u003c!--- TEST --\u003e\n377→ *\n378→ * Note that delaying on the downstream doesn\u0027t trigger the timeout.\n379→ *\n380→ * @param timeout Timeout duration. If non-positive, the flow is timed out immediately\n381→ */\n382→@FlowPreview\n383→public fun \u003cT\u003e Flow\u003cT\u003e.timeout(\n384→    timeout: Duration\n385→): Flow\u003cT\u003e \u003d timeoutInternal(timeout)\n386→\n387→private fun \u003cT\u003e Flow\u003cT\u003e.timeoutInternal(\n388→    timeout: Duration\n389→): Flow\u003cT\u003e \u003d scopedFlow { downStream -\u003e\n390→    if (timeout \u003c\u003d Duration.ZERO) throw TimeoutCancellationException(\"Timed out immediately\")\n391→    val values \u003d buffer(Channel.RENDEZVOUS).produceIn(this)\n392→    whileSelect {\n393→        values.onReceiveCatching { value -\u003e\n394→            value.onSuccess {\n395→                downStream.emit(it)\n396→            }.onClosed {\n397→                return@onReceiveCatching false\n398→            }\n399→            return@onReceiveCatching true\n400→        }\n401→        onTimeout(timeout) {\n402→            throw TimeoutCancellationException(\"Timed out waiting for $timeout\")\n403→        }\n404→    }\n405→}\n406→",
+      "tool_execution_time_ms": 25,
+      "failed": false
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Now let me look at the `callbackFlow` implementation to understand how it handles exceptions:"
+        }
+      ],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-2e2e79355e874eb3ae640c9ddce375de",
+          "type": "function",
+          "function": {
+            "name": "grep",
+            "arguments": "{\"pattern\": \"fun callbackFlow\", \"output_mode\": \"files_with_matches\"}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 1052
+    },
+    {
+      "role": "tool",
+      "name": "grep",
+      "tool_call_id": "chatcmpl-tool-2e2e79355e874eb3ae640c9ddce375de",
+      "content": "Found 1 file limit: 100, offset: 0\nkotlinx-coroutines-core/api/kotlinx-coroutines-core.api",
+      "tool_execution_time_ms": 183,
+      "failed": false
+    },
+    {
+      "role": "assistant",
+      "content": [],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-49b55ae8529245c7881b07bf296a15c8",
+          "type": "function",
+          "function": {
+            "name": "grep",
+            "arguments": "{\"output_mode\": \"files_with_matches\", \"pattern\": \"callbackFlow\", \"type\": \"kt\"}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 1054
+    },
+    {
+      "role": "tool",
+      "name": "grep",
+      "tool_call_id": "chatcmpl-tool-49b55ae8529245c7881b07bf296a15c8",
+      "content": "unrecognized file type: kt",
+      "tool_execution_time_ms": 46,
+      "failed": false
+    },
+    {
+      "role": "assistant",
+      "content": [],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-05e8e75fda51460fa313db4e3f76d541",
+          "type": "function",
+          "function": {
+            "name": "glob",
+            "arguments": "{\"pattern\": \"**/*callbackFlow*.kt\"}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 574
+    },
+    {
+      "role": "tool",
+      "name": "glob",
+      "tool_call_id": "chatcmpl-tool-05e8e75fda51460fa313db4e3f76d541",
+      "content": "No files found",
+      "tool_execution_time_ms": 76,
+      "failed": false
+    },
+    {
+      "role": "assistant",
+      "content": [],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-0936de80620a4020a656ea3e5eb04689",
+          "type": "function",
+          "function": {
+            "name": "grep",
+            "arguments": "{\"output_mode\": \"files_with_matches\", \"pattern\": \"callbackFlow\", \"glob\": \"**/*.kt\"}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 758
+    },
+    {
+      "role": "tool",
+      "name": "grep",
+      "tool_call_id": "chatcmpl-tool-0936de80620a4020a656ea3e5eb04689",
+      "content": "Found 12 files limit: 100, offset: 0\nui/kotlinx-coroutines-javafx/src/JavaFxConvert.kt\nreactive/kotlinx-coroutines-rx3/src/RxConvert.kt\nreactive/kotlinx-coroutines-rx2/src/RxConvert.kt\nkotlinx-coroutines-test/common/test/UnconfinedTestDispatcherTest.kt\nkotlinx-coroutines-core/jvm/test/flow/CallbackFlowTest.kt\nkotlinx-coroutines-core/common/test/flow/channels/ChannelFlowTest.kt\nkotlinx-coroutines-core/common/test/flow/channels/FlowCallbackTest.kt\nkotlinx-coroutines-core/common/test/channels/ProduceTest.kt\nkotlinx-coroutines-core/common/src/flow/Builders.kt\nkotlinx-coroutines-core/common/src/channels/Produce.kt\nkotlinx-coroutines-core/common/src/Delay.kt\nkotlinx-coroutines-core/common/src/CancellableContinuation.kt",
+      "tool_execution_time_ms": 110,
+      "failed": false
+    },
+    {
+      "role": "assistant",
+      "content": [],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-5ae881ef65104606a40b3d606a71c4ed",
+          "type": "function",
+          "function": {
+            "name": "read",
+            "arguments": "{\"file_path\": \"/project/kotlinx-coroutines-core/common/src/flow/Builders.kt\"}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 1182
+    },
+    {
+      "role": "tool",
+      "name": "read",
+      "tool_call_id": "chatcmpl-tool-5ae881ef65104606a40b3d606a71c4ed",
+      "content": "  1→@file:JvmMultifileClass\n  2→@file:JvmName(\"FlowKt\")\n  3→\n  4→package kotlinx.coroutines.flow\n  5→\n  6→import kotlinx.coroutines.*\n  7→import kotlinx.coroutines.channels.*\n  8→import kotlinx.coroutines.channels.Channel.Factory.BUFFERED\n  9→import kotlinx.coroutines.flow.internal.*\n 10→import kotlin.coroutines.*\n 11→import kotlin.jvm.*\n 12→import kotlinx.coroutines.flow.internal.unsafeFlow as flow\n 13→\n 14→/**\n 15→ * Creates a _cold_ flow from the given suspendable [block].\n 16→ * The flow being _cold_ means that the [block] is called every time a terminal operator is applied to the resulting flow.\n 17→ *\n 18→ * Example of usage:\n 19→ *\n 20→ * ```\n 21→ * fun fibonacci(): Flow\u003cBigInteger\u003e \u003d flow {\n 22→ *     var x \u003d BigInteger.ZERO\n 23→ *     var y \u003d BigInteger.ONE\n 24→ *     while (true) {\n 25→ *         emit(x)\n 26→ *         x \u003d y.also {\n 27→ *             y +\u003d x\n 28→ *         }\n 29→ *     }\n 30→ * }\n 31→ *\n 32→ * fibonacci().take(100).collect { println(it) }\n 33→ * ```\n 34→ *\n 35→ * Emissions from [flow] builder are [cancellable] by default \u0026mdash; each call to [emit][FlowCollector.emit]\n 36→ * also calls [ensureActive][CoroutineContext.ensureActive].\n 37→ *\n 38→ * `emit` should happen strictly in the dispatchers of the [block] in order to preserve the flow context.\n 39→ * For example, the following code will result in an [IllegalStateException]:\n 40→ *\n 41→ * ```\n 42→ * flow {\n 43→ *     emit(1) // Ok\n 44→ *     withContext(Dispatcher.IO) {\n 45→ *         emit(2) // Will fail with ISE\n 46→ *     }\n 47→ * }\n 48→ * ```\n 49→ *\n 50→ * If you want to switch the context of execution of a flow, use the [flowOn] operator.\n 51→ */\n 52→public fun \u003cT\u003e flow(@BuilderInference block: suspend FlowCollector\u003cT\u003e.() -\u003e Unit): Flow\u003cT\u003e \u003d SafeFlow(block)\n 53→\n 54→// Named anonymous object\n 55→private class SafeFlow\u003cT\u003e(private val block: suspend FlowCollector\u003cT\u003e.() -\u003e Unit) : AbstractFlow\u003cT\u003e() {\n 56→    override suspend fun collectSafely(collector: FlowCollector\u003cT\u003e) {\n 57→        collector.block()\n 58→    }\n 59→}\n 60→\n 61→/**\n 62→ * Creates a _cold_ flow that produces a single value from the given functional type.\n 63→ */\n 64→public fun \u003cT\u003e (() -\u003e T).asFlow(): Flow\u003cT\u003e \u003d flow {\n 65→    emit(invoke())\n 66→}\n 67→\n 68→/**\n 69→ * Creates a _cold_ flow that produces a single value from the given functional type.\n 70→ *\n 71→ * Example of usage:\n 72→ *\n 73→ * ```\n 74→ * suspend fun remoteCall(): R \u003d ...\n 75→ * fun remoteCallFlow(): Flow\u003cR\u003e \u003d ::remoteCall.asFlow()\n 76→ * ```\n 77→ */\n 78→public fun \u003cT\u003e (suspend () -\u003e T).asFlow(): Flow\u003cT\u003e \u003d flow {\n 79→    emit(invoke())\n 80→}\n 81→\n 82→/**\n 83→ * Creates a _cold_ flow that produces values from the given iterable.\n 84→ */\n 85→public fun \u003cT\u003e Iterable\u003cT\u003e.asFlow(): Flow\u003cT\u003e \u003d flow {\n 86→    forEach { value -\u003e\n 87→        emit(value)\n 88→    }\n 89→}\n 90→\n 91→/**\n 92→ * Creates a _cold_ flow that produces values from the given iterator.\n 93→ */\n 94→public fun \u003cT\u003e Iterator\u003cT\u003e.asFlow(): Flow\u003cT\u003e \u003d flow {\n 95→    forEach { value -\u003e\n 96→        emit(value)\n 97→    }\n 98→}\n 99→\n100→/**\n101→ * Creates a _cold_ flow that produces values from the given sequence.\n102→ */\n103→public fun \u003cT\u003e Sequence\u003cT\u003e.asFlow(): Flow\u003cT\u003e \u003d flow {\n104→    forEach { value -\u003e\n105→        emit(value)\n106→    }\n107→}\n108→\n109→/**\n110→ * Creates a flow that produces values from the specified `vararg`-arguments.\n111→ *\n112→ * Example of usage:\n113→ *\n114→ * ```\n115→ * flowOf(1, 2, 3)\n116→ * ```\n117→ */\n118→public fun \u003cT\u003e flowOf(vararg elements: T): Flow\u003cT\u003e \u003d flow {\n119→    for (element in elements) {\n120→        emit(element)\n121→    }\n122→}\n123→\n124→/**\n125→ * Creates a flow that produces the given [value].\n126→ */\n127→public fun \u003cT\u003e flowOf(value: T): Flow\u003cT\u003e \u003d flow {\n128→    /*\n129→     * Implementation note: this is just an \"optimized\" overload of flowOf(vararg)\n130→     * which significantly reduces the footprint of widespread single-value flows.\n131→     */\n132→    emit(value)\n133→}\n134→\n135→/**\n136→ * Returns an empty flow.\n137→ */\n138→public fun \u003cT\u003e emptyFlow(): Flow\u003cT\u003e \u003d EmptyFlow\n139→\n140→private object EmptyFlow : Flow\u003cNothing\u003e {\n141→    override suspend fun collect(collector: FlowCollector\u003cNothing\u003e) \u003d Unit\n142→}\n143→\n144→/**\n145→ * Creates a _cold_ flow that produces values from the given array.\n146→ * The flow being _cold_ means that the array components are read every time a terminal operator is applied\n147→ * to the resulting flow.\n148→ */\n149→public fun \u003cT\u003e Array\u003cT\u003e.asFlow(): Flow\u003cT\u003e \u003d flow {\n150→    forEach { value -\u003e\n151→        emit(value)\n152→    }\n153→}\n154→\n155→/**\n156→ * Creates a _cold_ flow that produces values from the array.\n157→ * The flow being _cold_ means that the array components are read every time a terminal operator is applied\n158→ * to the resulting flow.\n159→ */\n160→public fun IntArray.asFlow(): Flow\u003cInt\u003e \u003d flow {\n161→    forEach { value -\u003e\n162→        emit(value)\n163→    }\n164→}\n165→\n166→/**\n167→ * Creates a _cold_ flow that produces values from the given array.\n168→ * The flow being _cold_ means that the array components are read every time a terminal operator is applied\n169→ * to the resulting flow.\n170→ */\n171→public fun LongArray.asFlow(): Flow\u003cLong\u003e \u003d flow {\n172→    forEach { value -\u003e\n173→        emit(value)\n174→    }\n175→}\n176→\n177→/**\n178→ * Creates a flow that produces values from the range.\n179→ */\n180→public fun IntRange.asFlow(): Flow\u003cInt\u003e \u003d flow {\n181→    forEach { value -\u003e\n182→        emit(value)\n183→    }\n184→}\n185→\n186→/**\n187→ * Creates a flow that produces values from the range.\n188→ */\n189→public fun LongRange.asFlow(): Flow\u003cLong\u003e \u003d flow {\n190→    forEach { value -\u003e\n191→        emit(value)\n192→    }\n193→}\n194→\n195→/**\n196→ * Creates an instance of a _cold_ [Flow] with elements that are sent to a [SendChannel]\n197→ * provided to the builder\u0027s [block] of code via [ProducerScope]. It allows elements to be\n198→ * produced by code that is running in a different context or concurrently.\n199→ * The resulting flow is _cold_, which means that [block] is called every time a terminal operator\n200→ * is applied to the resulting flow.\n201→ *\n202→ * This builder ensures thread-safety and context preservation, thus the provided [ProducerScope] can be used\n203→ * concurrently from different contexts.\n204→ * The resulting flow completes as soon as the code in the [block] and all its children completes.\n205→ * Use [awaitClose] as the last statement to keep it running.\n206→ * A more detailed example is provided in the documentation of [callbackFlow].\n207→ *\n208→ * A channel with the [default][Channel.BUFFERED] buffer size is used. Use the [buffer] operator on the\n209→ * resulting flow to specify a user-defined value and to control what happens when data is produced faster\n210→ * than consumed, i.e. to control the back-pressure behavior.\n211→ *\n212→ * Adjacent applications of [channelFlow], [flowOn], [buffer], and [produceIn] are\n213→ * always fused so that only one properly configured channel is used for execution.\n214→ *\n215→ * Examples of usage:\n216→ *\n217→ * ```\n218→ * fun \u003cT\u003e Flow\u003cT\u003e.merge(other: Flow\u003cT\u003e): Flow\u003cT\u003e \u003d channelFlow {\n219→ *     // collect from one coroutine and send it\n220→ *     launch {\n221→ *         collect { send(it) }\n222→ *     }\n223→ *     // collect and send from this coroutine, too, concurrently\n224→ *     other.collect { send(it) }\n225→ * }\n226→ *\n227→ * fun \u003cT\u003e contextualFlow(): Flow\u003cT\u003e \u003d channelFlow {\n228→ *     // send from one coroutine\n229→ *     launch(Dispatchers.IO) {\n230→ *         send(computeIoValue())\n231→ *     }\n232→ *     // send from another coroutine, concurrently\n233→ *     launch(Dispatchers.Default) {\n234→ *         send(computeCpuValue())\n235→ *     }\n236→ * }\n237→ * ```\n238→ */\n239→public fun \u003cT\u003e channelFlow(@BuilderInference block: suspend ProducerScope\u003cT\u003e.() -\u003e Unit): Flow\u003cT\u003e \u003d\n240→    ChannelFlowBuilder(block)\n241→\n242→/**\n243→ * Creates an instance of a _cold_ [Flow] with elements that are sent to a [SendChannel]\n244→ * provided to the builder\u0027s [block] of code via [ProducerScope]. It allows elements to be\n245→ * produced by code that is running in a different context or concurrently.\n246→ *\n247→ * The resulting flow is _cold_, which means that [block] is called every time a terminal operator\n248→ * is applied to the resulting flow.\n249→ *\n250→ * This builder ensures thread-safety and context preservation, thus the provided [ProducerScope] can be used\n251→ * from any context, e.g. from a callback-based API.\n252→ * The resulting flow completes as soon as the code in the [block] completes.\n253→ * [awaitClose] should be used to keep the flow running, otherwise the channel will be closed immediately\n254→ * when block completes.\n255→ * [awaitClose] argument is called either when a flow consumer cancels the flow collection\n256→ * or when a callback-based API invokes [SendChannel.close] manually and is typically used\n257→ * to cleanup the resources after the completion, e.g. unregister a callback.\n258→ * Using [awaitClose] is mandatory in order to prevent memory leaks when the flow collection is cancelled,\n259→ * otherwise the callback may keep running even when the flow collector is already completed.\n260→ * To avoid such leaks, this method throws [IllegalStateException] if block returns, but the channel\n261→ * is not closed yet.\n262→ *\n263→ * A channel with the [default][Channel.BUFFERED] buffer size is used. Use the [buffer] operator on the\n264→ * resulting flow to specify a user-defined value and to control what happens when data is produced faster\n265→ * than consumed, i.e. to control the back-pressure behavior.\n266→ *\n267→ * Adjacent applications of [callbackFlow], [flowOn], [buffer], and [produceIn] are\n268→ * always fused so that only one properly configured channel is used for execution.\n269→ *\n270→ * Example of usage that converts a multi-shot callback API to a flow.\n271→ * For single-shot callbacks use [suspendCancellableCoroutine].\n272→ *\n273→ * ```\n274→ * fun flowFrom(api: CallbackBasedApi): Flow\u003cT\u003e \u003d callbackFlow {\n275→ *     val callback \u003d object : Callback { // Implementation of some callback interface\n276→ *         override fun onNextValue(value: T) {\n277→ *             // To avoid blocking you can configure channel capacity using\n278→ *             // either buffer(Channel.CONFLATED) or buffer(Channel.UNLIMITED) to avoid overfill\n279→ *             trySendBlocking(value)\n280→ *                 .onFailure { throwable -\u003e\n281→ *                     // Downstream has been cancelled or failed, can log here\n282→ *                 }\n283→ *         }\n284→ *         override fun onApiError(cause: Throwable) {\n285→ *             cancel(CancellationException(\"API Error\", cause))\n286→ *         }\n287→ *         override fun onCompleted() \u003d channel.close()\n288→ *     }\n289→ *     api.register(callback)\n290→ *     /*\n291→ *      * Suspends until either \u0027onCompleted\u0027/\u0027onApiError\u0027 from the callback is invoked\n292→ *      * or flow collector is cancelled (e.g. by \u0027take(1)\u0027 or because a collector\u0027s coroutine was cancelled).\n293→ *      * In both cases, callback will be properly unregistered.\n294→ *      */\n295→ *     awaitClose { api.unregister(callback) }\n296→ * }\n297→ * ```\n298→ *\n299→ * \u003e The callback `register`/`unregister` methods provided by an external API must be thread-safe, because\n300→ * \u003e `awaitClose` block can be called at any time due to asynchronous nature of cancellation, even\n301→ * \u003e concurrently with the call of the callback.\n302→ */\n303→public fun \u003cT\u003e callbackFlow(@BuilderInference block: suspend ProducerScope\u003cT\u003e.() -\u003e Unit): Flow\u003cT\u003e \u003d CallbackFlowBuilder(block)\n304→\n305→// ChannelFlow implementation that is the first in the chain of flow operations and introduces (builds) a flow\n306→private open class ChannelFlowBuilder\u003cT\u003e(\n307→    private val block: suspend ProducerScope\u003cT\u003e.() -\u003e Unit,\n308→    context: CoroutineContext \u003d EmptyCoroutineContext,\n309→    capacity: Int \u003d BUFFERED,\n310→    onBufferOverflow: BufferOverflow \u003d BufferOverflow.SUSPEND\n311→) : ChannelFlow\u003cT\u003e(context, capacity, onBufferOverflow) {\n312→    override fun create(context: CoroutineContext, capacity: Int, onBufferOverflow: BufferOverflow): ChannelFlow\u003cT\u003e \u003d\n313→        ChannelFlowBuilder(block, context, capacity, onBufferOverflow)\n314→\n315→    override suspend fun collectTo(scope: ProducerScope\u003cT\u003e) \u003d\n316→        block(scope)\n317→\n318→    override fun toString(): String \u003d\n319→        \"block[$block] -\u003e ${super.toString()}\"\n320→}\n321→\n322→private class CallbackFlowBuilder\u003cT\u003e(\n323→    private val block: suspend ProducerScope\u003cT\u003e.() -\u003e Unit,\n324→    context: CoroutineContext \u003d EmptyCoroutineContext,\n325→    capacity: Int \u003d BUFFERED,\n326→    onBufferOverflow: BufferOverflow \u003d BufferOverflow.SUSPEND\n327→) : ChannelFlowBuilder\u003cT\u003e(block, context, capacity, onBufferOverflow) {\n328→\n329→    override suspend fun collectTo(scope: ProducerScope\u003cT\u003e) {\n330→        super.collectTo(scope)\n331→        /*\n332→         * We expect user either call `awaitClose` from within a block (then the channel is closed at this moment)\n333→         * or being closed/cancelled externally/manually. Otherwise \"user forgot to call\n334→         * awaitClose and receives unhelpful ClosedSendChannelException exceptions\" situation is detected.\n335→         */\n336→        if (!scope.isClosedForSend) {\n337→            throw IllegalStateException(\n338→                \"\"\"\n339→                    \u0027awaitClose { yourCallbackOrListener.cancel() }\u0027 should be used in the end of callbackFlow block.\n340→                    Otherwise, a callback/listener may leak in case of external cancellation.\n341→                    See callbackFlow API documentation for the details.\n342→                \"\"\".trimIndent()\n343→            )\n344→        }\n345→    }\n346→\n347→    override fun create(context: CoroutineContext, capacity: Int, onBufferOverflow: BufferOverflow): ChannelFlow\u003cT\u003e \u003d\n348→        CallbackFlowBuilder(block, context, capacity, onBufferOverflow)\n349→}\n350→",
+      "tool_execution_time_ms": 3,
+      "failed": false
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Now let me look at the ChannelFlow implementation to understand how it handles exceptions:"
+        }
+      ],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-90916afea3ee400da8c508e1457a3941",
+          "type": "function",
+          "function": {
+            "name": "grep",
+            "arguments": "{\"glob\": \"**/*.kt\", \"output_mode\": \"files_with_matches\", \"pattern\": \"class ChannelFlow\"}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 1248
+    },
+    {
+      "role": "tool",
+      "name": "grep",
+      "tool_call_id": "chatcmpl-tool-90916afea3ee400da8c508e1457a3941",
+      "content": "Found 4 files limit: 100, offset: 0\nkotlinx-coroutines-core/common/test/flow/channels/ChannelFlowTest.kt\nkotlinx-coroutines-core/common/src/flow/internal/Merge.kt\nkotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt\nkotlinx-coroutines-core/common/src/flow/Builders.kt",
+      "tool_execution_time_ms": 111,
+      "failed": false
+    },
+    {
+      "role": "assistant",
+      "content": [],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-a81d1897c8aa4ff4bd9abf7ea05c224b",
+          "type": "function",
+          "function": {
+            "name": "read",
+            "arguments": "{\"file_path\": \"/project/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt\"}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 837
+    },
+    {
+      "role": "tool",
+      "name": "read",
+      "tool_call_id": "chatcmpl-tool-a81d1897c8aa4ff4bd9abf7ea05c224b",
+      "content": "  1→package kotlinx.coroutines.flow.internal\n  2→\n  3→import kotlinx.coroutines.*\n  4→import kotlinx.coroutines.channels.*\n  5→import kotlinx.coroutines.flow.*\n  6→import kotlinx.coroutines.internal.*\n  7→import kotlin.coroutines.*\n  8→import kotlin.coroutines.intrinsics.*\n  9→import kotlin.jvm.*\n 10→\n 11→internal fun \u003cT\u003e Flow\u003cT\u003e.asChannelFlow(): ChannelFlow\u003cT\u003e \u003d\n 12→    this as? ChannelFlow ?: ChannelFlowOperatorImpl(this)\n 13→\n 14→/**\n 15→ * Operators that can fuse with **downstream** [buffer] and [flowOn] operators implement this interface.\n 16→ *\n 17→ * @suppress **This an internal API and should not be used from general code.**\n 18→ */\n 19→@InternalCoroutinesApi\n 20→public interface FusibleFlow\u003cT\u003e : Flow\u003cT\u003e {\n 21→    /**\n 22→     * This function is called by [flowOn] (with context) and [buffer] (with capacity) operators\n 23→     * that are applied to this flow. Should not be used with [capacity] of [Channel.CONFLATED]\n 24→     * (it shall be desugared to `capacity \u003d 0, onBufferOverflow \u003d DROP_OLDEST`).\n 25→     */\n 26→    public fun fuse(\n 27→        context: CoroutineContext \u003d EmptyCoroutineContext,\n 28→        capacity: Int \u003d Channel.OPTIONAL_CHANNEL,\n 29→        onBufferOverflow: BufferOverflow \u003d BufferOverflow.SUSPEND\n 30→    ): Flow\u003cT\u003e\n 31→}\n 32→\n 33→/**\n 34→ * Operators that use channels as their \"output\" extend this `ChannelFlow` and are always fused with each other.\n 35→ * This class servers as a skeleton implementation of [FusibleFlow] and provides other cross-cutting\n 36→ * methods like ability to [produceIn] the corresponding flow, thus making it\n 37→ * possible to directly use the backing channel if it exists (hence the `ChannelFlow` name).\n 38→ *\n 39→ * @suppress **This an internal API and should not be used from general code.**\n 40→ */\n 41→@InternalCoroutinesApi\n 42→public abstract class ChannelFlow\u003cT\u003e(\n 43→    // upstream context\n 44→    @JvmField public val context: CoroutineContext,\n 45→    // buffer capacity between upstream and downstream context\n 46→    @JvmField public val capacity: Int,\n 47→    // buffer overflow strategy\n 48→    @JvmField public val onBufferOverflow: BufferOverflow\n 49→) : FusibleFlow\u003cT\u003e {\n 50→    init {\n 51→        assert { capacity !\u003d Channel.CONFLATED } // CONFLATED must be desugared to 0, DROP_OLDEST by callers\n 52→    }\n 53→\n 54→    // shared code to create a suspend lambda from collectTo function in one place\n 55→    internal val collectToFun: suspend (ProducerScope\u003cT\u003e) -\u003e Unit\n 56→        get() \u003d { collectTo(it) }\n 57→\n 58→    internal val produceCapacity: Int\n 59→        get() \u003d if (capacity \u003d\u003d Channel.OPTIONAL_CHANNEL) Channel.BUFFERED else capacity\n 60→\n 61→    /**\n 62→     * When this [ChannelFlow] implementation can work without a channel (supports [Channel.OPTIONAL_CHANNEL]),\n 63→     * then it should return a non-null value from this function, so that a caller can use it without the effect of\n 64→     * additional [flowOn] and [buffer] operators, by incorporating its\n 65→     * [context], [capacity], and [onBufferOverflow] into its own implementation.\n 66→     */\n 67→    public open fun dropChannelOperators(): Flow\u003cT\u003e? \u003d null\n 68→\n 69→    public override fun fuse(context: CoroutineContext, capacity: Int, onBufferOverflow: BufferOverflow): Flow\u003cT\u003e {\n 70→        assert { capacity !\u003d Channel.CONFLATED } // CONFLATED must be desugared to (0, DROP_OLDEST) by callers\n 71→        // note: previous upstream context (specified before) takes precedence\n 72→        val newContext \u003d context + this.context\n 73→        val newCapacity: Int\n 74→        val newOverflow: BufferOverflow\n 75→        if (onBufferOverflow !\u003d BufferOverflow.SUSPEND) {\n 76→            // this additional buffer never suspends \u003d\u003e overwrite preceding buffering configuration\n 77→            newCapacity \u003d capacity\n 78→            newOverflow \u003d onBufferOverflow\n 79→        } else {\n 80→            // combine capacities, keep previous overflow strategy\n 81→            newCapacity \u003d when {\n 82→                this.capacity \u003d\u003d Channel.OPTIONAL_CHANNEL -\u003e capacity\n 83→                capacity \u003d\u003d Channel.OPTIONAL_CHANNEL -\u003e this.capacity\n 84→                this.capacity \u003d\u003d Channel.BUFFERED -\u003e capacity\n 85→                capacity \u003d\u003d Channel.BUFFERED -\u003e this.capacity\n 86→                else -\u003e {\n 87→                    // sanity checks\n 88→                    assert { this.capacity \u003e\u003d 0 }\n 89→                    assert { capacity \u003e\u003d 0 }\n 90→                    // combine capacities clamping to UNLIMITED on overflow\n 91→                    val sum \u003d this.capacity + capacity\n 92→                    if (sum \u003e\u003d 0) sum else Channel.UNLIMITED // unlimited on int overflow\n 93→                }\n 94→            }\n 95→            newOverflow \u003d this.onBufferOverflow\n 96→        }\n 97→        if (newContext \u003d\u003d this.context \u0026\u0026 newCapacity \u003d\u003d this.capacity \u0026\u0026 newOverflow \u003d\u003d this.onBufferOverflow)\n 98→            return this\n 99→        return create(newContext, newCapacity, newOverflow)\n100→    }\n101→\n102→    protected abstract fun create(context: CoroutineContext, capacity: Int, onBufferOverflow: BufferOverflow): ChannelFlow\u003cT\u003e\n103→\n104→    protected abstract suspend fun collectTo(scope: ProducerScope\u003cT\u003e)\n105→\n106→    /**\n107→     * Here we use ATOMIC start for a reason (#1825).\n108→     * NB: [produceImpl] is used for [flowOn].\n109→     * For non-atomic start it is possible to observe the situation,\n110→     * where the pipeline after the [flowOn] call successfully executes (mostly, its `onCompletion`)\n111→     * handlers, while the pipeline before does not, because it was cancelled during its dispatch.\n112→     * Thus `onCompletion` and `finally` blocks won\u0027t be executed and it may lead to a different kinds of memory leaks.\n113→     */\n114→    public open fun produceImpl(scope: CoroutineScope): ReceiveChannel\u003cT\u003e \u003d\n115→        scope.produce(context, produceCapacity, onBufferOverflow, start \u003d CoroutineStart.ATOMIC, block \u003d collectToFun)\n116→\n117→    override suspend fun collect(collector: FlowCollector\u003cT\u003e): Unit \u003d\n118→        coroutineScope {\n119→            collector.emitAll(produceImpl(this))\n120→        }\n121→\n122→    protected open fun additionalToStringProps(): String? \u003d null\n123→\n124→    // debug toString\n125→    override fun toString(): String {\n126→        val props \u003d ArrayList\u003cString\u003e(4)\n127→        additionalToStringProps()?.let { props.add(it) }\n128→        if (context !\u003d\u003d EmptyCoroutineContext) props.add(\"context\u003d$context\")\n129→        if (capacity !\u003d Channel.OPTIONAL_CHANNEL) props.add(\"capacity\u003d$capacity\")\n130→        if (onBufferOverflow !\u003d BufferOverflow.SUSPEND) props.add(\"onBufferOverflow\u003d$onBufferOverflow\")\n131→        return \"$classSimpleName[${props.joinToString(\", \")}]\"\n132→    }\n133→}\n134→\n135→// ChannelFlow implementation that operates on another flow before it\n136→internal abstract class ChannelFlowOperator\u003cS, T\u003e(\n137→    @JvmField protected val flow: Flow\u003cS\u003e,\n138→    context: CoroutineContext,\n139→    capacity: Int,\n140→    onBufferOverflow: BufferOverflow\n141→) : ChannelFlow\u003cT\u003e(context, capacity, onBufferOverflow) {\n142→    protected abstract suspend fun flowCollect(collector: FlowCollector\u003cT\u003e)\n143→\n144→    // Changes collecting context upstream to the specified newContext, while collecting in the original context\n145→    private suspend fun collectWithContextUndispatched(collector: FlowCollector\u003cT\u003e, newContext: CoroutineContext) {\n146→        val originalContextCollector \u003d collector.withUndispatchedContextCollector(coroutineContext)\n147→        // invoke flowCollect(originalContextCollector) in the newContext\n148→        return withContextUndispatched(newContext, block \u003d { flowCollect(it) }, value \u003d originalContextCollector)\n149→    }\n150→\n151→    // Slow path when output channel is required\n152→    protected override suspend fun collectTo(scope: ProducerScope\u003cT\u003e) \u003d\n153→        flowCollect(SendingCollector(scope))\n154→\n155→    // Optimizations for fast-path when channel creation is optional\n156→    override suspend fun collect(collector: FlowCollector\u003cT\u003e) {\n157→        // Fast-path: When channel creation is optional (flowOn/flowWith operators without buffer)\n158→        if (capacity \u003d\u003d Channel.OPTIONAL_CHANNEL) {\n159→            val collectContext \u003d coroutineContext\n160→            val newContext \u003d collectContext.newCoroutineContext(context) // compute resulting collect context\n161→            // #1: If the resulting context happens to be the same as it was -- fallback to plain collect\n162→            if (newContext \u003d\u003d collectContext)\n163→                return flowCollect(collector)\n164→            // #2: If we don\u0027t need to change the dispatcher we can go without channels\n165→            if (newContext[ContinuationInterceptor] \u003d\u003d collectContext[ContinuationInterceptor])\n166→                return collectWithContextUndispatched(collector, newContext)\n167→        }\n168→        // Slow-path: create the actual channel\n169→        super.collect(collector)\n170→    }\n171→\n172→    // debug toString\n173→    override fun toString(): String \u003d \"$flow -\u003e ${super.toString()}\"\n174→}\n175→\n176→/**\n177→ * Simple channel flow operator: [flowOn], [buffer], or their fused combination.\n178→ */\n179→internal class ChannelFlowOperatorImpl\u003cT\u003e(\n180→    flow: Flow\u003cT\u003e,\n181→    context: CoroutineContext \u003d EmptyCoroutineContext,\n182→    capacity: Int \u003d Channel.OPTIONAL_CHANNEL,\n183→    onBufferOverflow: BufferOverflow \u003d BufferOverflow.SUSPEND\n184→) : ChannelFlowOperator\u003cT, T\u003e(flow, context, capacity, onBufferOverflow) {\n185→    override fun create(context: CoroutineContext, capacity: Int, onBufferOverflow: BufferOverflow): ChannelFlow\u003cT\u003e \u003d\n186→        ChannelFlowOperatorImpl(flow, context, capacity, onBufferOverflow)\n187→\n188→    override fun dropChannelOperators(): Flow\u003cT\u003e \u003d flow\n189→\n190→    override suspend fun flowCollect(collector: FlowCollector\u003cT\u003e) \u003d\n191→        flow.collect(collector)\n192→}\n193→\n194→// Now if the underlying collector was accepting concurrent emits, then this one is too\n195→// todo: we might need to generalize this pattern for \"thread-safe\" operators that can fuse with channels\n196→private fun \u003cT\u003e FlowCollector\u003cT\u003e.withUndispatchedContextCollector(emitContext: CoroutineContext): FlowCollector\u003cT\u003e \u003d when (this) {\n197→    // SendingCollector \u0026 NopCollector do not care about the context at all and can be used as is\n198→    is SendingCollector, is NopCollector -\u003e this\n199→    // Otherwise just wrap into UndispatchedContextCollector interface implementation\n200→    else -\u003e UndispatchedContextCollector(this, emitContext)\n201→}\n202→\n203→private class UndispatchedContextCollector\u003cT\u003e(\n204→    downstream: FlowCollector\u003cT\u003e,\n205→    private val emitContext: CoroutineContext\n206→) : FlowCollector\u003cT\u003e {\n207→    private val countOrElement \u003d threadContextElements(emitContext) // precompute for fast withContextUndispatched\n208→    private val emitRef: suspend (T) -\u003e Unit \u003d { downstream.emit(it) } // allocate suspend function ref once on creation\n209→\n210→    override suspend fun emit(value: T): Unit \u003d\n211→        withContextUndispatched(emitContext, value, countOrElement, emitRef)\n212→}\n213→\n214→// Efficiently computes block(value) in the newContext\n215→internal suspend fun \u003cT, V\u003e withContextUndispatched(\n216→    newContext: CoroutineContext,\n217→    value: V,\n218→    countOrElement: Any \u003d threadContextElements(newContext), // can be precomputed for speed\n219→    block: suspend (V) -\u003e T\n220→): T \u003d\n221→    suspendCoroutineUninterceptedOrReturn { uCont -\u003e\n222→        withCoroutineContext(newContext, countOrElement) {\n223→            block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))\n224→        }\n225→    }\n226→\n227→// Continuation that links the caller with uCont with walkable CoroutineStackFrame\n228→private class StackFrameContinuation\u003cT\u003e(\n229→    private val uCont: Continuation\u003cT\u003e, override val context: CoroutineContext\n230→) : Continuation\u003cT\u003e, CoroutineStackFrame {\n231→\n232→    override val callerFrame: CoroutineStackFrame?\n233→        get() \u003d uCont as? CoroutineStackFrame\n234→\n235→    override fun resumeWith(result: Result\u003cT\u003e) {\n236→        uCont.resumeWith(result)\n237→    }\n238→\n239→    override fun getStackTraceElement(): StackTraceElement? \u003d null\n240→}\n241→",
+      "tool_execution_time_ms": 8,
+      "failed": false
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Now let me look at the test file to understand the expected behavior better:"
+        }
+      ],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-645028562aba4b199f1b5c0ad444db6e",
+          "type": "function",
+          "function": {
+            "name": "read",
+            "arguments": "{\"file_path\": \"/project/kotlinx-coroutines-core/jvm/test/flow/CallbackFlowTest.kt\"}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 737
+    },
+    {
+      "role": "tool",
+      "name": "read",
+      "tool_call_id": "chatcmpl-tool-645028562aba4b199f1b5c0ad444db6e",
+      "content": "  1→package kotlinx.coroutines.flow\n  2→\n  3→import kotlinx.coroutines.testing.*\n  4→import kotlinx.coroutines.*\n  5→import kotlinx.coroutines.channels.*\n  6→import kotlinx.coroutines.testing.flow.*\n  7→import org.junit.Test\n  8→import kotlin.concurrent.*\n  9→import kotlin.test.*\n 10→\n 11→class CallbackFlowTest : TestBase() {\n 12→\n 13→    private class CallbackApi(val block: (SendChannel\u003cInt\u003e) -\u003e Unit) {\n 14→        var started \u003d false\n 15→        @Volatile\n 16→        var stopped \u003d false\n 17→        lateinit var thread: Thread\n 18→\n 19→        fun start(sink: SendChannel\u003cInt\u003e) {\n 20→            started \u003d true\n 21→            thread \u003d thread {\n 22→                while (!stopped) {\n 23→                    block(sink)\n 24→                }\n 25→            }\n 26→        }\n 27→\n 28→        fun stop() {\n 29→            stopped \u003d true\n 30→        }\n 31→    }\n 32→\n 33→    @Test(timeout \u003d 5_000L)\n 34→    fun testThrowingConsumer() \u003d runTest {\n 35→        var i \u003d 0\n 36→        val api \u003d CallbackApi {\n 37→            it.trySend(++i)\n 38→        }\n 39→\n 40→        val flow \u003d callbackFlow\u003cInt\u003e {\n 41→            api.start(channel)\n 42→            awaitClose {\n 43→                api.stop()\n 44→            }\n 45→        }\n 46→\n 47→        var receivedConsensus \u003d 0\n 48→        var isDone \u003d false\n 49→        var exception: Throwable? \u003d null\n 50→        val job \u003d flow\n 51→            .filter { it \u003e 10 }\n 52→            .launchIn(this) {\n 53→                onEach {\n 54→                    if (it \u003d\u003d 11) {\n 55→                        ++receivedConsensus\n 56→                    } else {\n 57→                        receivedConsensus \u003d 42\n 58→                    }\n 59→                    throw RuntimeException()\n 60→                }\n 61→                catch\u003cThrowable\u003e { exception \u003d it }\n 62→                finally { isDone \u003d true }\n 63→            }\n 64→        job.join()\n 65→        assertEquals(1, receivedConsensus)\n 66→        assertTrue(isDone)\n 67→        assertTrue { exception is RuntimeException }\n 68→        api.thread.join()\n 69→        assertTrue(api.started)\n 70→        assertTrue(api.stopped)\n 71→    }\n 72→\n 73→    @Test(timeout \u003d 5_000L)\n 74→    fun testThrowingSource() \u003d runBlocking {\n 75→        var i \u003d 0\n 76→        val api \u003d CallbackApi {\n 77→            if (i \u003c 5) {\n 78→                it.trySend(++i)\n 79→            } else {\n 80→                it.close(RuntimeException())\n 81→            }\n 82→        }\n 83→\n 84→        val flow \u003d callbackFlow\u003cInt\u003e {\n 85→            api.start(channel)\n 86→            awaitClose {\n 87→                api.stop()\n 88→            }\n 89→        }\n 90→\n 91→        var received \u003d 0\n 92→        var isDone \u003d false\n 93→        var exception: Throwable? \u003d null\n 94→        val job \u003d flow.launchIn(this) {\n 95→            onEach { ++received }\n 96→            catch\u003cThrowable\u003e { exception \u003d it }\n 97→            finally { isDone \u003d true }\n 98→        }\n 99→\n100→        job.join()\n101→        assertTrue(isDone)\n102→        assertTrue { exception is RuntimeException }\n103→        api.thread.join()\n104→        assertTrue(api.started)\n105→        assertTrue(api.stopped)\n106→    }\n107→\n108→\n109→    @Test\n110→    fun testMergeExample() \u003d runTest {\n111→        // Too slow on JS\n112→        withContext(Dispatchers.Default) {\n113→            val f1 \u003d (1..10_000).asFlow()\n114→            val f2 \u003d (10_001..20_000).asFlow()\n115→            assertEquals((1..20_000).toSet(), f1.merge(f2).toSet())\n116→        }\n117→    }\n118→\n119→    private fun Flow\u003cInt\u003e.merge(other: Flow\u003cInt\u003e): Flow\u003cInt\u003e \u003d channelFlow {\n120→        launch {\n121→            collect { send(it) }\n122→        }\n123→        other.collect { send(it) }\n124→    }\n125→}\n126→",
+      "tool_execution_time_ms": 3,
+      "failed": false
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Now let me look at the `whileSelect` function used in the timeout implementation:"
+        }
+      ],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-fe9aa9ef36854bd183b199bf7dcfa635",
+          "type": "function",
+          "function": {
+            "name": "grep",
+            "arguments": "{\"glob\": \"**/*.kt\", \"output_mode\": \"files_with_matches\", \"pattern\": \"fun whileSelect\"}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 1159
+    },
+    {
+      "role": "tool",
+      "name": "grep",
+      "tool_call_id": "chatcmpl-tool-fe9aa9ef36854bd183b199bf7dcfa635",
+      "content": "Found 1 file limit: 100, offset: 0\nkotlinx-coroutines-core/common/src/selects/WhileSelect.kt",
+      "tool_execution_time_ms": 83,
+      "failed": false
+    },
+    {
+      "role": "assistant",
+      "content": [],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-f61262e6259f4401803b7a04e7da9d5f",
+          "type": "function",
+          "function": {
+            "name": "read",
+            "arguments": "{\"file_path\": \"/project/kotlinx-coroutines-core/common/src/selects/WhileSelect.kt\"}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 1054
+    },
+    {
+      "role": "tool",
+      "name": "read",
+      "tool_call_id": "chatcmpl-tool-f61262e6259f4401803b7a04e7da9d5f",
+      "content": " 1→package kotlinx.coroutines.selects\n 2→\n 3→import kotlinx.coroutines.*\n 4→\n 5→/**\n 6→ * Loops while [select] expression returns `true`.\n 7→ *\n 8→ * The statement of the form:\n 9→ *\n10→ * ```\n11→ * whileSelect {\n12→ *     /*body*/\n13→ * }\n14→ * ```\n15→ *\n16→ * is a shortcut for:\n17→ *\n18→ * ```\n19→ * while(select\u003cBoolean\u003e {\n20→ *    /*body*/\n21→ * }) {}\n22→ *\n23→ * **Note: This is an experimental api.** It may be replaced with a higher-performance DSL for selection from loops.\n24→ */\n25→@ExperimentalCoroutinesApi\n26→public suspend inline fun whileSelect(crossinline builder: SelectBuilder\u003cBoolean\u003e.() -\u003e Unit) {\n27→    while(select(builder)) { /* do nothing */ }\n28→}\n29→",
+      "tool_execution_time_ms": 3,
+      "failed": false
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Now let me look at how `onReceiveCatching` handles exceptions:"
+        }
+      ],
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-1945790b40b44e24afba7d51966c85b7",
+          "type": "function",
+          "function": {
+            "name": "grep",
+            "arguments": "{\"glob\": \"**/*.kt\", \"output_mode\": \"content\", \"pattern\": \"fun onReceiveCatching\", \"-A\": 10}"
+          }
+        }
+      ],
+      "assistant_response_time_ms": 1709
+    },
+    {
+      "role": "tool",
+      "name": "grep",
+      "tool_call_id": "chatcmpl-tool-1945790b40b44e24afba7d51966c85b7",
+      "content": "No matches found.",
+      "tool_execution_time_ms": 120,
+      "failed": false
+    }
+  ],
+  "iterations": [
+    {
+      "iteration_number": 1,
+      "start_time_ms": 1767752407042,
+      "duration_ms": 6640,
+      "assistant_request": {
+        "start_time_ms": 1767752407044,
+        "end_time_ms": 1767752413653,
+        "time_to_first_token_ms": 1071,
+        "stream_duration_ms": 6609,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-b39ec16f18d2a3c2",
+          "tool_name": "read",
+          "input_json": "{\"file_path\": \"/project/kotlinx-coroutines-core/common/src/flow/operators/Delay.kt\"}",
+          "output_content": "  1→@file:JvmMultifileClass\n  2→@file:JvmName(\"FlowKt\")\n  3→\n  4→package kotlinx.coroutines.flow\n  5→\n  6→import kotlinx.coroutines.*\n  7→import kotlinx.coroutines.channels.*\n  8→import kotlinx.coroutines.flow.internal.*\n  9→import kotlinx.coroutines.selects.*\n 10→import kotlin.jvm.*\n 11→import kotlin.time.*\n 12→\n 13→/* Scaffolding for Knit code examples\n 14→\u003c!--- TEST_NAME FlowDelayTest --\u003e\n 15→\u003c!--- PREFIX .*-duration-.*\n 16→----- INCLUDE .*-duration-.*\n 17→----- INCLUDE .*\n 18→import kotlinx.coroutines.*\n 19→import kotlinx.coroutines.flow.*\n 20→import kotlin.time.Duration.Companion.milliseconds\n 21→\n 22→fun main() \u003d runBlocking {\n 23→----- SUFFIX .*\n 24→.toList().joinToString().let { println(it) } }\n 25→--\u003e\n 26→*/\n 27→\n 28→/**\n 29→ * Returns a flow that mirrors the original flow, but filters out values\n 30→ * that are followed by the newer values within the given [timeout][timeoutMillis].\n 31→ * The latest value is always emitted.\n 32→ *\n 33→ * Example:\n 34→ *\n 35→ * ```kotlin\n 36→ * flow {\n 37→ *     emit(1)\n 38→ *     delay(90)\n 39→ *     emit(2)\n 40→ *     delay(90)\n 41→ *     emit(3)\n 42→ *     delay(1010)\n 43→ *     emit(4)\n 44→ *     delay(1010)\n 45→ *     emit(5)\n 46→ * }.debounce(1000)\n 47→ * ```\n 48→ * \u003c!--- KNIT example-delay-01.kt --\u003e\n 49→ *\n 50→ * produces the following emissions\n 51→ *\n 52→ * ```text\n 53→ * 3, 4, 5\n 54→ * ```\n 55→ * \u003c!--- TEST --\u003e\n 56→ *\n 57→ * Note that the resulting flow does not emit anything as long as the original flow emits\n 58→ * items faster than every [timeoutMillis] milliseconds.\n 59→ */\n 60→@FlowPreview\n 61→public fun \u003cT\u003e Flow\u003cT\u003e.debounce(timeoutMillis: Long): Flow\u003cT\u003e {\n 62→    require(timeoutMillis \u003e\u003d 0L) { \"Debounce timeout should not be negative\" }\n 63→    if (timeoutMillis \u003d\u003d 0L) return this\n 64→    return debounceInternal { timeoutMillis }\n 65→}\n 66→\n 67→/**\n 68→ * Returns a flow that mirrors the original flow, but filters out values\n 69→ * that are followed by the newer values within the given [timeout][timeoutMillis].\n 70→ * The latest value is always emitted.\n 71→ *\n 72→ * A variation of [debounce] that allows specifying the timeout value dynamically.\n 73→ *\n 74→ * Example:\n 75→ *\n 76→ * ```kotlin\n 77→ * flow {\n 78→ *     emit(1)\n 79→ *     delay(90)\n 80→ *     emit(2)\n 81→ *     delay(90)\n 82→ *     emit(3)\n 83→ *     delay(1010)\n 84→ *     emit(4)\n 85→ *     delay(1010)\n 86→ *     emit(5)\n 87→ * }.debounce {\n 88→ *     if (it \u003d\u003d 1) {\n 89→ *         0L\n 90→ *     } else {\n 91→ *         1000L\n 92→ *     }\n 93→ * }\n 94→ * ```\n 95→ * \u003c!--- KNIT example-delay-02.kt --\u003e\n 96→ *\n 97→ * produces the following emissions\n 98→ *\n 99→ * ```text\n100→ * 1, 3, 4, 5\n101→ * ```\n102→ * \u003c!--- TEST --\u003e\n103→ *\n104→ * Note that the resulting flow does not emit anything as long as the original flow emits\n105→ * items faster than every [timeoutMillis] milliseconds.\n106→ *\n107→ * @param timeoutMillis [T] is the emitted value and the return value is timeout in milliseconds.\n108→ */\n109→@FlowPreview\n110→@OverloadResolutionByLambdaReturnType\n111→public fun \u003cT\u003e Flow\u003cT\u003e.debounce(timeoutMillis: (T) -\u003e Long): Flow\u003cT\u003e \u003d\n112→    debounceInternal(timeoutMillis)\n113→\n114→/**\n115→ * Returns a flow that mirrors the original flow, but filters out values\n116→ * that are followed by the newer values within the given [timeout].\n117→ * The latest value is always emitted.\n118→ *\n119→ * Example:\n120→ *\n121→ * ```kotlin\n122→ * flow {\n123→ *     emit(1)\n124→ *     delay(90.milliseconds)\n125→ *     emit(2)\n126→ *     delay(90.milliseconds)\n127→ *     emit(3)\n128→ *     delay(1010.milliseconds)\n129→ *     emit(4)\n130→ *     delay(1010.milliseconds)\n131→ *     emit(5)\n132→ * }.debounce(1000.milliseconds)\n133→ * ```\n134→ * \u003c!--- KNIT example-delay-duration-01.kt --\u003e\n135→ *\n136→ * produces the following emissions\n137→ *\n138→ * ```text\n139→ * 3, 4, 5\n140→ * ```\n141→ * \u003c!--- TEST --\u003e\n142→ *\n143→ * Note that the resulting flow does not emit anything as long as the original flow emits\n144→ * items faster than every [timeout] milliseconds.\n145→ */\n146→@FlowPreview\n147→public fun \u003cT\u003e Flow\u003cT\u003e.debounce(timeout: Duration): Flow\u003cT\u003e \u003d\n148→    debounce(timeout.toDelayMillis())\n149→\n150→/**\n151→ * Returns a flow that mirrors the original flow, but filters out values\n152→ * that are followed by the newer values within the given [timeout].\n153→ * The latest value is always emitted.\n154→ *\n155→ * A variation of [debounce] that allows specifying the timeout value dynamically.\n156→ *\n157→ * Example:\n158→ *\n159→ * ```kotlin\n160→ * flow {\n161→ *     emit(1)\n162→ *     delay(90.milliseconds)\n163→ *     emit(2)\n164→ *     delay(90.milliseconds)\n165→ *     emit(3)\n166→ *     delay(1010.milliseconds)\n167→ *     emit(4)\n168→ *     delay(1010.milliseconds)\n169→ *     emit(5)\n170→ * }.debounce {\n171→ *     if (it \u003d\u003d 1) {\n172→ *         0.milliseconds\n173→ *     } else {\n174→ *         1000.milliseconds\n175→ *     }\n176→ * }\n177→ * ```\n178→ * \u003c!--- KNIT example-delay-duration-02.kt --\u003e\n179→ *\n180→ * produces the following emissions\n181→ *\n182→ * ```text\n183→ * 1, 3, 4, 5\n184→ * ```\n185→ * \u003c!--- TEST --\u003e\n186→ *\n187→ * Note that the resulting flow does not emit anything as long as the original flow emits\n188→ * items faster than every [timeout] unit.\n189→ *\n190→ * @param timeout [T] is the emitted value and the return value is timeout in [Duration].\n191→ */\n192→@FlowPreview\n193→@JvmName(\"debounceDuration\")\n194→@OverloadResolutionByLambdaReturnType\n195→public fun \u003cT\u003e Flow\u003cT\u003e.debounce(timeout: (T) -\u003e Duration): Flow\u003cT\u003e \u003d\n196→    debounceInternal { emittedItem -\u003e\n197→        timeout(emittedItem).toDelayMillis()\n198→    }\n199→\n200→private fun \u003cT\u003e Flow\u003cT\u003e.debounceInternal(timeoutMillisSelector: (T) -\u003e Long): Flow\u003cT\u003e \u003d\n201→    scopedFlow { downstream -\u003e\n202→        // Produce the values using the default (rendezvous) channel\n203→        val values \u003d produce {\n204→            collect { value -\u003e send(value ?: NULL) }\n205→        }\n206→        // Now consume the values\n207→        var lastValue: Any? \u003d null\n208→        while (lastValue !\u003d\u003d DONE) {\n209→            var timeoutMillis \u003d 0L // will be always computed when lastValue !\u003d null\n210→            // Compute timeout for this value\n211→            if (lastValue !\u003d null) {\n212→                timeoutMillis \u003d timeoutMillisSelector(NULL.unbox(lastValue))\n213→                require(timeoutMillis \u003e\u003d 0L) { \"Debounce timeout should not be negative\" }\n214→                if (timeoutMillis \u003d\u003d 0L) {\n215→                    downstream.emit(NULL.unbox(lastValue))\n216→                    lastValue \u003d null // Consume the value\n217→                }\n218→            }\n219→            // assert invariant: lastValue !\u003d null implies timeoutMillis \u003e 0\n220→            assert { lastValue \u003d\u003d null || timeoutMillis \u003e 0 }\n221→            // wait for the next value with timeout\n222→            select\u003cUnit\u003e {\n223→                // Set timeout when lastValue exists and is not consumed yet\n224→                if (lastValue !\u003d null) {\n225→                    onTimeout(timeoutMillis) {\n226→                        downstream.emit(NULL.unbox(lastValue))\n227→                        lastValue \u003d null // Consume the value\n228→                    }\n229→                }\n230→                values.onReceiveCatching { value -\u003e\n231→                    value\n232→                        .onSuccess { lastValue \u003d it }\n233→                        .onFailure {\n234→                            it?.let { throw it }\n235→                            // If closed normally, emit the latest value\n236→                            if (lastValue !\u003d null) downstream.emit(NULL.unbox(lastValue))\n237→                            lastValue \u003d DONE\n238→                        }\n239→                }\n240→            }\n241→        }\n242→    }\n243→\n244→/**\n245→ * Returns a flow that emits only the latest value emitted by the original flow during the given sampling [period][periodMillis].\n246→ *\n247→ * Example:\n248→ *\n249→ * ```kotlin\n250→ * flow {\n251→ *     repeat(10) {\n252→ *         emit(it)\n253→ *         delay(110)\n254→ *     }\n255→ * }.sample(200)\n256→ * ```\n257→ * \u003c!--- KNIT example-delay-03.kt --\u003e\n258→ *\n259→ * produces the following emissions\n260→ *\n261→ * ```text\n262→ * 1, 3, 5, 7, 9\n263→ * ```\n264→ * \u003c!--- TEST --\u003e\n265→ *\n266→ * Note that the latest element is not emitted if it does not fit into the sampling window.\n267→ */\n268→@FlowPreview\n269→public fun \u003cT\u003e Flow\u003cT\u003e.sample(periodMillis: Long): Flow\u003cT\u003e {\n270→    require(periodMillis \u003e 0) { \"Sample period should be positive\" }\n271→    return scopedFlow { downstream -\u003e\n272→        val values \u003d produce(capacity \u003d Channel.CONFLATED) {\n273→            collect { value -\u003e send(value ?: NULL) }\n274→        }\n275→        var lastValue: Any? \u003d null\n276→        val ticker \u003d fixedPeriodTicker(periodMillis)\n277→        while (lastValue !\u003d\u003d DONE) {\n278→            select\u003cUnit\u003e {\n279→                values.onReceiveCatching { result -\u003e\n280→                    result\n281→                        .onSuccess { lastValue \u003d it }\n282→                        .onFailure {\n283→                            it?.let { throw it }\n284→                            ticker.cancel(ChildCancelledException())\n285→                            lastValue \u003d DONE\n286→                        }\n287→                }\n288→\n289→                // todo: shall be start sampling only when an element arrives or sample aways as here?\n290→                ticker.onReceive {\n291→                    val value \u003d lastValue ?: return@onReceive\n292→                    lastValue \u003d null // Consume the value\n293→                    downstream.emit(NULL.unbox(value))\n294→                }\n295→            }\n296→        }\n297→    }\n298→}\n299→\n300→/*\n301→ * TODO this design (and design of the corresponding operator) depends on #540\n302→ */\n303→internal fun CoroutineScope.fixedPeriodTicker(\n304→    delayMillis: Long,\n305→): ReceiveChannel\u003cUnit\u003e {\n306→    return produce(capacity \u003d 0) {\n307→        delay(delayMillis)\n308→        while (true) {\n309→            channel.send(Unit)\n310→            delay(delayMillis)\n311→        }\n312→    }\n313→}\n314→\n315→/**\n316→ * Returns a flow that emits only the latest value emitted by the original flow during the given sampling [period].\n317→ *\n318→ * Example:\n319→ *\n320→ * ```kotlin\n321→ * flow {\n322→ *     repeat(10) {\n323→ *         emit(it)\n324→ *         delay(110.milliseconds)\n325→ *     }\n326→ * }.sample(200.milliseconds)\n327→ * ```\n328→ * \u003c!--- KNIT example-delay-duration-03.kt --\u003e\n329→ *\n330→ * produces the following emissions\n331→ *\n332→ * ```text\n333→ * 1, 3, 5, 7, 9\n334→ * ```\n335→ * \u003c!--- TEST --\u003e\n336→ *\n337→ * Note that the latest element is not emitted if it does not fit into the sampling window.\n338→ */\n339→@FlowPreview\n340→public fun \u003cT\u003e Flow\u003cT\u003e.sample(period: Duration): Flow\u003cT\u003e \u003d sample(period.toDelayMillis())\n341→\n342→/**\n343→ * Returns a flow that will emit a [TimeoutCancellationException] if the upstream doesn\u0027t emit an item within the given time.\n344→ *\n345→ * Example:\n346→ *\n347→ * ```kotlin\n348→ * flow {\n349→ *     emit(1)\n350→ *     delay(100)\n351→ *     emit(2)\n352→ *     delay(100)\n353→ *     emit(3)\n354→ *     delay(1000)\n355→ *     emit(4)\n356→ * }.timeout(100.milliseconds).catch { exception -\u003e\n357→ *     if (exception is TimeoutCancellationException) {\n358→ *         // Catch the TimeoutCancellationException emitted above.\n359→ *         // Emit desired item on timeout.\n360→ *         emit(-1)\n361→ *     } else {\n362→ *         // Throw other exceptions.\n363→ *         throw exception\n364→ *     }\n365→ * }.onEach {\n366→ *     delay(300) // This will not cause a timeout\n367→ * }\n368→ * ```\n369→ * \u003c!--- KNIT example-timeout-duration-01.kt --\u003e\n370→ *\n371→ * produces the following emissions\n372→ *\n373→ * ```text\n374→ * 1, 2, 3, -1\n375→ * ```\n376→ * \u003c!--- TEST --\u003e\n377→ *\n378→ * Note that delaying on the downstream doesn\u0027t trigger the timeout.\n379→ *\n380→ * @param timeout Timeout duration. If non-positive, the flow is timed out immediately\n381→ */\n382→@FlowPreview\n383→public fun \u003cT\u003e Flow\u003cT\u003e.timeout(\n384→    timeout: Duration\n385→): Flow\u003cT\u003e \u003d timeoutInternal(timeout)\n386→\n387→private fun \u003cT\u003e Flow\u003cT\u003e.timeoutInternal(\n388→    timeout: Duration\n389→): Flow\u003cT\u003e \u003d scopedFlow { downStream -\u003e\n390→    if (timeout \u003c\u003d Duration.ZERO) throw TimeoutCancellationException(\"Timed out immediately\")\n391→    val values \u003d buffer(Channel.RENDEZVOUS).produceIn(this)\n392→    whileSelect {\n393→        values.onReceiveCatching { value -\u003e\n394→            value.onSuccess {\n395→                downStream.emit(it)\n396→            }.onClosed {\n397→                return@onReceiveCatching false\n398→            }\n399→            return@onReceiveCatching true\n400→        }\n401→        onTimeout(timeout) {\n402→            throw TimeoutCancellationException(\"Timed out waiting for $timeout\")\n403→        }\n404→    }\n405→}\n406→",
+          "start_time_ms": 1767752413653,
+          "end_time_ms": 1767752413678,
+          "duration_ms": 25,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 2,
+      "start_time_ms": 1767752413684,
+      "duration_ms": 1237,
+      "assistant_request": {
+        "start_time_ms": 1767752413684,
+        "end_time_ms": 1767752414736,
+        "time_to_first_token_ms": 982,
+        "stream_duration_ms": 1052,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-2e2e79355e874eb3ae640c9ddce375de",
+          "tool_name": "grep",
+          "input_json": "{\"pattern\": \"fun callbackFlow\", \"output_mode\": \"files_with_matches\"}",
+          "output_content": "Found 1 file limit: 100, offset: 0\nkotlinx-coroutines-core/api/kotlinx-coroutines-core.api",
+          "start_time_ms": 1767752414736,
+          "end_time_ms": 1767752414919,
+          "duration_ms": 183,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 3,
+      "start_time_ms": 1767752414921,
+      "duration_ms": 1100,
+      "assistant_request": {
+        "start_time_ms": 1767752414921,
+        "end_time_ms": 1767752415975,
+        "time_to_first_token_ms": 1051,
+        "stream_duration_ms": 1054,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-49b55ae8529245c7881b07bf296a15c8",
+          "tool_name": "grep",
+          "input_json": "{\"output_mode\": \"files_with_matches\", \"pattern\": \"callbackFlow\", \"type\": \"kt\"}",
+          "output_content": "unrecognized file type: kt",
+          "start_time_ms": 1767752415975,
+          "end_time_ms": 1767752416021,
+          "duration_ms": 46,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 4,
+      "start_time_ms": 1767752416022,
+      "duration_ms": 650,
+      "assistant_request": {
+        "start_time_ms": 1767752416022,
+        "end_time_ms": 1767752416596,
+        "time_to_first_token_ms": 569,
+        "stream_duration_ms": 574,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-05e8e75fda51460fa313db4e3f76d541",
+          "tool_name": "glob",
+          "input_json": "{\"pattern\": \"**/*callbackFlow*.kt\"}",
+          "output_content": "No files found",
+          "start_time_ms": 1767752416596,
+          "end_time_ms": 1767752416672,
+          "duration_ms": 76,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 5,
+      "start_time_ms": 1767752416673,
+      "duration_ms": 869,
+      "assistant_request": {
+        "start_time_ms": 1767752416673,
+        "end_time_ms": 1767752417431,
+        "time_to_first_token_ms": 755,
+        "stream_duration_ms": 758,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-0936de80620a4020a656ea3e5eb04689",
+          "tool_name": "grep",
+          "input_json": "{\"output_mode\": \"files_with_matches\", \"pattern\": \"callbackFlow\", \"glob\": \"**/*.kt\"}",
+          "output_content": "Found 12 files limit: 100, offset: 0\nui/kotlinx-coroutines-javafx/src/JavaFxConvert.kt\nreactive/kotlinx-coroutines-rx3/src/RxConvert.kt\nreactive/kotlinx-coroutines-rx2/src/RxConvert.kt\nkotlinx-coroutines-test/common/test/UnconfinedTestDispatcherTest.kt\nkotlinx-coroutines-core/jvm/test/flow/CallbackFlowTest.kt\nkotlinx-coroutines-core/common/test/flow/channels/ChannelFlowTest.kt\nkotlinx-coroutines-core/common/test/flow/channels/FlowCallbackTest.kt\nkotlinx-coroutines-core/common/test/channels/ProduceTest.kt\nkotlinx-coroutines-core/common/src/flow/Builders.kt\nkotlinx-coroutines-core/common/src/channels/Produce.kt\nkotlinx-coroutines-core/common/src/Delay.kt\nkotlinx-coroutines-core/common/src/CancellableContinuation.kt",
+          "start_time_ms": 1767752417431,
+          "end_time_ms": 1767752417541,
+          "duration_ms": 110,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 6,
+      "start_time_ms": 1767752417542,
+      "duration_ms": 1186,
+      "assistant_request": {
+        "start_time_ms": 1767752417542,
+        "end_time_ms": 1767752418724,
+        "time_to_first_token_ms": 1172,
+        "stream_duration_ms": 1182,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-5ae881ef65104606a40b3d606a71c4ed",
+          "tool_name": "read",
+          "input_json": "{\"file_path\": \"/project/kotlinx-coroutines-core/common/src/flow/Builders.kt\"}",
+          "output_content": "  1→@file:JvmMultifileClass\n  2→@file:JvmName(\"FlowKt\")\n  3→\n  4→package kotlinx.coroutines.flow\n  5→\n  6→import kotlinx.coroutines.*\n  7→import kotlinx.coroutines.channels.*\n  8→import kotlinx.coroutines.channels.Channel.Factory.BUFFERED\n  9→import kotlinx.coroutines.flow.internal.*\n 10→import kotlin.coroutines.*\n 11→import kotlin.jvm.*\n 12→import kotlinx.coroutines.flow.internal.unsafeFlow as flow\n 13→\n 14→/**\n 15→ * Creates a _cold_ flow from the given suspendable [block].\n 16→ * The flow being _cold_ means that the [block] is called every time a terminal operator is applied to the resulting flow.\n 17→ *\n 18→ * Example of usage:\n 19→ *\n 20→ * ```\n 21→ * fun fibonacci(): Flow\u003cBigInteger\u003e \u003d flow {\n 22→ *     var x \u003d BigInteger.ZERO\n 23→ *     var y \u003d BigInteger.ONE\n 24→ *     while (true) {\n 25→ *         emit(x)\n 26→ *         x \u003d y.also {\n 27→ *             y +\u003d x\n 28→ *         }\n 29→ *     }\n 30→ * }\n 31→ *\n 32→ * fibonacci().take(100).collect { println(it) }\n 33→ * ```\n 34→ *\n 35→ * Emissions from [flow] builder are [cancellable] by default \u0026mdash; each call to [emit][FlowCollector.emit]\n 36→ * also calls [ensureActive][CoroutineContext.ensureActive].\n 37→ *\n 38→ * `emit` should happen strictly in the dispatchers of the [block] in order to preserve the flow context.\n 39→ * For example, the following code will result in an [IllegalStateException]:\n 40→ *\n 41→ * ```\n 42→ * flow {\n 43→ *     emit(1) // Ok\n 44→ *     withContext(Dispatcher.IO) {\n 45→ *         emit(2) // Will fail with ISE\n 46→ *     }\n 47→ * }\n 48→ * ```\n 49→ *\n 50→ * If you want to switch the context of execution of a flow, use the [flowOn] operator.\n 51→ */\n 52→public fun \u003cT\u003e flow(@BuilderInference block: suspend FlowCollector\u003cT\u003e.() -\u003e Unit): Flow\u003cT\u003e \u003d SafeFlow(block)\n 53→\n 54→// Named anonymous object\n 55→private class SafeFlow\u003cT\u003e(private val block: suspend FlowCollector\u003cT\u003e.() -\u003e Unit) : AbstractFlow\u003cT\u003e() {\n 56→    override suspend fun collectSafely(collector: FlowCollector\u003cT\u003e) {\n 57→        collector.block()\n 58→    }\n 59→}\n 60→\n 61→/**\n 62→ * Creates a _cold_ flow that produces a single value from the given functional type.\n 63→ */\n 64→public fun \u003cT\u003e (() -\u003e T).asFlow(): Flow\u003cT\u003e \u003d flow {\n 65→    emit(invoke())\n 66→}\n 67→\n 68→/**\n 69→ * Creates a _cold_ flow that produces a single value from the given functional type.\n 70→ *\n 71→ * Example of usage:\n 72→ *\n 73→ * ```\n 74→ * suspend fun remoteCall(): R \u003d ...\n 75→ * fun remoteCallFlow(): Flow\u003cR\u003e \u003d ::remoteCall.asFlow()\n 76→ * ```\n 77→ */\n 78→public fun \u003cT\u003e (suspend () -\u003e T).asFlow(): Flow\u003cT\u003e \u003d flow {\n 79→    emit(invoke())\n 80→}\n 81→\n 82→/**\n 83→ * Creates a _cold_ flow that produces values from the given iterable.\n 84→ */\n 85→public fun \u003cT\u003e Iterable\u003cT\u003e.asFlow(): Flow\u003cT\u003e \u003d flow {\n 86→    forEach { value -\u003e\n 87→        emit(value)\n 88→    }\n 89→}\n 90→\n 91→/**\n 92→ * Creates a _cold_ flow that produces values from the given iterator.\n 93→ */\n 94→public fun \u003cT\u003e Iterator\u003cT\u003e.asFlow(): Flow\u003cT\u003e \u003d flow {\n 95→    forEach { value -\u003e\n 96→        emit(value)\n 97→    }\n 98→}\n 99→\n100→/**\n101→ * Creates a _cold_ flow that produces values from the given sequence.\n102→ */\n103→public fun \u003cT\u003e Sequence\u003cT\u003e.asFlow(): Flow\u003cT\u003e \u003d flow {\n104→    forEach { value -\u003e\n105→        emit(value)\n106→    }\n107→}\n108→\n109→/**\n110→ * Creates a flow that produces values from the specified `vararg`-arguments.\n111→ *\n112→ * Example of usage:\n113→ *\n114→ * ```\n115→ * flowOf(1, 2, 3)\n116→ * ```\n117→ */\n118→public fun \u003cT\u003e flowOf(vararg elements: T): Flow\u003cT\u003e \u003d flow {\n119→    for (element in elements) {\n120→        emit(element)\n121→    }\n122→}\n123→\n124→/**\n125→ * Creates a flow that produces the given [value].\n126→ */\n127→public fun \u003cT\u003e flowOf(value: T): Flow\u003cT\u003e \u003d flow {\n128→    /*\n129→     * Implementation note: this is just an \"optimized\" overload of flowOf(vararg)\n130→     * which significantly reduces the footprint of widespread single-value flows.\n131→     */\n132→    emit(value)\n133→}\n134→\n135→/**\n136→ * Returns an empty flow.\n137→ */\n138→public fun \u003cT\u003e emptyFlow(): Flow\u003cT\u003e \u003d EmptyFlow\n139→\n140→private object EmptyFlow : Flow\u003cNothing\u003e {\n141→    override suspend fun collect(collector: FlowCollector\u003cNothing\u003e) \u003d Unit\n142→}\n143→\n144→/**\n145→ * Creates a _cold_ flow that produces values from the given array.\n146→ * The flow being _cold_ means that the array components are read every time a terminal operator is applied\n147→ * to the resulting flow.\n148→ */\n149→public fun \u003cT\u003e Array\u003cT\u003e.asFlow(): Flow\u003cT\u003e \u003d flow {\n150→    forEach { value -\u003e\n151→        emit(value)\n152→    }\n153→}\n154→\n155→/**\n156→ * Creates a _cold_ flow that produces values from the array.\n157→ * The flow being _cold_ means that the array components are read every time a terminal operator is applied\n158→ * to the resulting flow.\n159→ */\n160→public fun IntArray.asFlow(): Flow\u003cInt\u003e \u003d flow {\n161→    forEach { value -\u003e\n162→        emit(value)\n163→    }\n164→}\n165→\n166→/**\n167→ * Creates a _cold_ flow that produces values from the given array.\n168→ * The flow being _cold_ means that the array components are read every time a terminal operator is applied\n169→ * to the resulting flow.\n170→ */\n171→public fun LongArray.asFlow(): Flow\u003cLong\u003e \u003d flow {\n172→    forEach { value -\u003e\n173→        emit(value)\n174→    }\n175→}\n176→\n177→/**\n178→ * Creates a flow that produces values from the range.\n179→ */\n180→public fun IntRange.asFlow(): Flow\u003cInt\u003e \u003d flow {\n181→    forEach { value -\u003e\n182→        emit(value)\n183→    }\n184→}\n185→\n186→/**\n187→ * Creates a flow that produces values from the range.\n188→ */\n189→public fun LongRange.asFlow(): Flow\u003cLong\u003e \u003d flow {\n190→    forEach { value -\u003e\n191→        emit(value)\n192→    }\n193→}\n194→\n195→/**\n196→ * Creates an instance of a _cold_ [Flow] with elements that are sent to a [SendChannel]\n197→ * provided to the builder\u0027s [block] of code via [ProducerScope]. It allows elements to be\n198→ * produced by code that is running in a different context or concurrently.\n199→ * The resulting flow is _cold_, which means that [block] is called every time a terminal operator\n200→ * is applied to the resulting flow.\n201→ *\n202→ * This builder ensures thread-safety and context preservation, thus the provided [ProducerScope] can be used\n203→ * concurrently from different contexts.\n204→ * The resulting flow completes as soon as the code in the [block] and all its children completes.\n205→ * Use [awaitClose] as the last statement to keep it running.\n206→ * A more detailed example is provided in the documentation of [callbackFlow].\n207→ *\n208→ * A channel with the [default][Channel.BUFFERED] buffer size is used. Use the [buffer] operator on the\n209→ * resulting flow to specify a user-defined value and to control what happens when data is produced faster\n210→ * than consumed, i.e. to control the back-pressure behavior.\n211→ *\n212→ * Adjacent applications of [channelFlow], [flowOn], [buffer], and [produceIn] are\n213→ * always fused so that only one properly configured channel is used for execution.\n214→ *\n215→ * Examples of usage:\n216→ *\n217→ * ```\n218→ * fun \u003cT\u003e Flow\u003cT\u003e.merge(other: Flow\u003cT\u003e): Flow\u003cT\u003e \u003d channelFlow {\n219→ *     // collect from one coroutine and send it\n220→ *     launch {\n221→ *         collect { send(it) }\n222→ *     }\n223→ *     // collect and send from this coroutine, too, concurrently\n224→ *     other.collect { send(it) }\n225→ * }\n226→ *\n227→ * fun \u003cT\u003e contextualFlow(): Flow\u003cT\u003e \u003d channelFlow {\n228→ *     // send from one coroutine\n229→ *     launch(Dispatchers.IO) {\n230→ *         send(computeIoValue())\n231→ *     }\n232→ *     // send from another coroutine, concurrently\n233→ *     launch(Dispatchers.Default) {\n234→ *         send(computeCpuValue())\n235→ *     }\n236→ * }\n237→ * ```\n238→ */\n239→public fun \u003cT\u003e channelFlow(@BuilderInference block: suspend ProducerScope\u003cT\u003e.() -\u003e Unit): Flow\u003cT\u003e \u003d\n240→    ChannelFlowBuilder(block)\n241→\n242→/**\n243→ * Creates an instance of a _cold_ [Flow] with elements that are sent to a [SendChannel]\n244→ * provided to the builder\u0027s [block] of code via [ProducerScope]. It allows elements to be\n245→ * produced by code that is running in a different context or concurrently.\n246→ *\n247→ * The resulting flow is _cold_, which means that [block] is called every time a terminal operator\n248→ * is applied to the resulting flow.\n249→ *\n250→ * This builder ensures thread-safety and context preservation, thus the provided [ProducerScope] can be used\n251→ * from any context, e.g. from a callback-based API.\n252→ * The resulting flow completes as soon as the code in the [block] completes.\n253→ * [awaitClose] should be used to keep the flow running, otherwise the channel will be closed immediately\n254→ * when block completes.\n255→ * [awaitClose] argument is called either when a flow consumer cancels the flow collection\n256→ * or when a callback-based API invokes [SendChannel.close] manually and is typically used\n257→ * to cleanup the resources after the completion, e.g. unregister a callback.\n258→ * Using [awaitClose] is mandatory in order to prevent memory leaks when the flow collection is cancelled,\n259→ * otherwise the callback may keep running even when the flow collector is already completed.\n260→ * To avoid such leaks, this method throws [IllegalStateException] if block returns, but the channel\n261→ * is not closed yet.\n262→ *\n263→ * A channel with the [default][Channel.BUFFERED] buffer size is used. Use the [buffer] operator on the\n264→ * resulting flow to specify a user-defined value and to control what happens when data is produced faster\n265→ * than consumed, i.e. to control the back-pressure behavior.\n266→ *\n267→ * Adjacent applications of [callbackFlow], [flowOn], [buffer], and [produceIn] are\n268→ * always fused so that only one properly configured channel is used for execution.\n269→ *\n270→ * Example of usage that converts a multi-shot callback API to a flow.\n271→ * For single-shot callbacks use [suspendCancellableCoroutine].\n272→ *\n273→ * ```\n274→ * fun flowFrom(api: CallbackBasedApi): Flow\u003cT\u003e \u003d callbackFlow {\n275→ *     val callback \u003d object : Callback { // Implementation of some callback interface\n276→ *         override fun onNextValue(value: T) {\n277→ *             // To avoid blocking you can configure channel capacity using\n278→ *             // either buffer(Channel.CONFLATED) or buffer(Channel.UNLIMITED) to avoid overfill\n279→ *             trySendBlocking(value)\n280→ *                 .onFailure { throwable -\u003e\n281→ *                     // Downstream has been cancelled or failed, can log here\n282→ *                 }\n283→ *         }\n284→ *         override fun onApiError(cause: Throwable) {\n285→ *             cancel(CancellationException(\"API Error\", cause))\n286→ *         }\n287→ *         override fun onCompleted() \u003d channel.close()\n288→ *     }\n289→ *     api.register(callback)\n290→ *     /*\n291→ *      * Suspends until either \u0027onCompleted\u0027/\u0027onApiError\u0027 from the callback is invoked\n292→ *      * or flow collector is cancelled (e.g. by \u0027take(1)\u0027 or because a collector\u0027s coroutine was cancelled).\n293→ *      * In both cases, callback will be properly unregistered.\n294→ *      */\n295→ *     awaitClose { api.unregister(callback) }\n296→ * }\n297→ * ```\n298→ *\n299→ * \u003e The callback `register`/`unregister` methods provided by an external API must be thread-safe, because\n300→ * \u003e `awaitClose` block can be called at any time due to asynchronous nature of cancellation, even\n301→ * \u003e concurrently with the call of the callback.\n302→ */\n303→public fun \u003cT\u003e callbackFlow(@BuilderInference block: suspend ProducerScope\u003cT\u003e.() -\u003e Unit): Flow\u003cT\u003e \u003d CallbackFlowBuilder(block)\n304→\n305→// ChannelFlow implementation that is the first in the chain of flow operations and introduces (builds) a flow\n306→private open class ChannelFlowBuilder\u003cT\u003e(\n307→    private val block: suspend ProducerScope\u003cT\u003e.() -\u003e Unit,\n308→    context: CoroutineContext \u003d EmptyCoroutineContext,\n309→    capacity: Int \u003d BUFFERED,\n310→    onBufferOverflow: BufferOverflow \u003d BufferOverflow.SUSPEND\n311→) : ChannelFlow\u003cT\u003e(context, capacity, onBufferOverflow) {\n312→    override fun create(context: CoroutineContext, capacity: Int, onBufferOverflow: BufferOverflow): ChannelFlow\u003cT\u003e \u003d\n313→        ChannelFlowBuilder(block, context, capacity, onBufferOverflow)\n314→\n315→    override suspend fun collectTo(scope: ProducerScope\u003cT\u003e) \u003d\n316→        block(scope)\n317→\n318→    override fun toString(): String \u003d\n319→        \"block[$block] -\u003e ${super.toString()}\"\n320→}\n321→\n322→private class CallbackFlowBuilder\u003cT\u003e(\n323→    private val block: suspend ProducerScope\u003cT\u003e.() -\u003e Unit,\n324→    context: CoroutineContext \u003d EmptyCoroutineContext,\n325→    capacity: Int \u003d BUFFERED,\n326→    onBufferOverflow: BufferOverflow \u003d BufferOverflow.SUSPEND\n327→) : ChannelFlowBuilder\u003cT\u003e(block, context, capacity, onBufferOverflow) {\n328→\n329→    override suspend fun collectTo(scope: ProducerScope\u003cT\u003e) {\n330→        super.collectTo(scope)\n331→        /*\n332→         * We expect user either call `awaitClose` from within a block (then the channel is closed at this moment)\n333→         * or being closed/cancelled externally/manually. Otherwise \"user forgot to call\n334→         * awaitClose and receives unhelpful ClosedSendChannelException exceptions\" situation is detected.\n335→         */\n336→        if (!scope.isClosedForSend) {\n337→            throw IllegalStateException(\n338→                \"\"\"\n339→                    \u0027awaitClose { yourCallbackOrListener.cancel() }\u0027 should be used in the end of callbackFlow block.\n340→                    Otherwise, a callback/listener may leak in case of external cancellation.\n341→                    See callbackFlow API documentation for the details.\n342→                \"\"\".trimIndent()\n343→            )\n344→        }\n345→    }\n346→\n347→    override fun create(context: CoroutineContext, capacity: Int, onBufferOverflow: BufferOverflow): ChannelFlow\u003cT\u003e \u003d\n348→        CallbackFlowBuilder(block, context, capacity, onBufferOverflow)\n349→}\n350→",
+          "start_time_ms": 1767752418724,
+          "end_time_ms": 1767752418727,
+          "duration_ms": 3,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 7,
+      "start_time_ms": 1767752418728,
+      "duration_ms": 1359,
+      "assistant_request": {
+        "start_time_ms": 1767752418728,
+        "end_time_ms": 1767752419976,
+        "time_to_first_token_ms": 847,
+        "stream_duration_ms": 1248,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-90916afea3ee400da8c508e1457a3941",
+          "tool_name": "grep",
+          "input_json": "{\"glob\": \"**/*.kt\", \"output_mode\": \"files_with_matches\", \"pattern\": \"class ChannelFlow\"}",
+          "output_content": "Found 4 files limit: 100, offset: 0\nkotlinx-coroutines-core/common/test/flow/channels/ChannelFlowTest.kt\nkotlinx-coroutines-core/common/src/flow/internal/Merge.kt\nkotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt\nkotlinx-coroutines-core/common/src/flow/Builders.kt",
+          "start_time_ms": 1767752419976,
+          "end_time_ms": 1767752420087,
+          "duration_ms": 111,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 8,
+      "start_time_ms": 1767752420087,
+      "duration_ms": 845,
+      "assistant_request": {
+        "start_time_ms": 1767752420087,
+        "end_time_ms": 1767752420924,
+        "time_to_first_token_ms": 834,
+        "stream_duration_ms": 837,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-a81d1897c8aa4ff4bd9abf7ea05c224b",
+          "tool_name": "read",
+          "input_json": "{\"file_path\": \"/project/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt\"}",
+          "output_content": "  1→package kotlinx.coroutines.flow.internal\n  2→\n  3→import kotlinx.coroutines.*\n  4→import kotlinx.coroutines.channels.*\n  5→import kotlinx.coroutines.flow.*\n  6→import kotlinx.coroutines.internal.*\n  7→import kotlin.coroutines.*\n  8→import kotlin.coroutines.intrinsics.*\n  9→import kotlin.jvm.*\n 10→\n 11→internal fun \u003cT\u003e Flow\u003cT\u003e.asChannelFlow(): ChannelFlow\u003cT\u003e \u003d\n 12→    this as? ChannelFlow ?: ChannelFlowOperatorImpl(this)\n 13→\n 14→/**\n 15→ * Operators that can fuse with **downstream** [buffer] and [flowOn] operators implement this interface.\n 16→ *\n 17→ * @suppress **This an internal API and should not be used from general code.**\n 18→ */\n 19→@InternalCoroutinesApi\n 20→public interface FusibleFlow\u003cT\u003e : Flow\u003cT\u003e {\n 21→    /**\n 22→     * This function is called by [flowOn] (with context) and [buffer] (with capacity) operators\n 23→     * that are applied to this flow. Should not be used with [capacity] of [Channel.CONFLATED]\n 24→     * (it shall be desugared to `capacity \u003d 0, onBufferOverflow \u003d DROP_OLDEST`).\n 25→     */\n 26→    public fun fuse(\n 27→        context: CoroutineContext \u003d EmptyCoroutineContext,\n 28→        capacity: Int \u003d Channel.OPTIONAL_CHANNEL,\n 29→        onBufferOverflow: BufferOverflow \u003d BufferOverflow.SUSPEND\n 30→    ): Flow\u003cT\u003e\n 31→}\n 32→\n 33→/**\n 34→ * Operators that use channels as their \"output\" extend this `ChannelFlow` and are always fused with each other.\n 35→ * This class servers as a skeleton implementation of [FusibleFlow] and provides other cross-cutting\n 36→ * methods like ability to [produceIn] the corresponding flow, thus making it\n 37→ * possible to directly use the backing channel if it exists (hence the `ChannelFlow` name).\n 38→ *\n 39→ * @suppress **This an internal API and should not be used from general code.**\n 40→ */\n 41→@InternalCoroutinesApi\n 42→public abstract class ChannelFlow\u003cT\u003e(\n 43→    // upstream context\n 44→    @JvmField public val context: CoroutineContext,\n 45→    // buffer capacity between upstream and downstream context\n 46→    @JvmField public val capacity: Int,\n 47→    // buffer overflow strategy\n 48→    @JvmField public val onBufferOverflow: BufferOverflow\n 49→) : FusibleFlow\u003cT\u003e {\n 50→    init {\n 51→        assert { capacity !\u003d Channel.CONFLATED } // CONFLATED must be desugared to 0, DROP_OLDEST by callers\n 52→    }\n 53→\n 54→    // shared code to create a suspend lambda from collectTo function in one place\n 55→    internal val collectToFun: suspend (ProducerScope\u003cT\u003e) -\u003e Unit\n 56→        get() \u003d { collectTo(it) }\n 57→\n 58→    internal val produceCapacity: Int\n 59→        get() \u003d if (capacity \u003d\u003d Channel.OPTIONAL_CHANNEL) Channel.BUFFERED else capacity\n 60→\n 61→    /**\n 62→     * When this [ChannelFlow] implementation can work without a channel (supports [Channel.OPTIONAL_CHANNEL]),\n 63→     * then it should return a non-null value from this function, so that a caller can use it without the effect of\n 64→     * additional [flowOn] and [buffer] operators, by incorporating its\n 65→     * [context], [capacity], and [onBufferOverflow] into its own implementation.\n 66→     */\n 67→    public open fun dropChannelOperators(): Flow\u003cT\u003e? \u003d null\n 68→\n 69→    public override fun fuse(context: CoroutineContext, capacity: Int, onBufferOverflow: BufferOverflow): Flow\u003cT\u003e {\n 70→        assert { capacity !\u003d Channel.CONFLATED } // CONFLATED must be desugared to (0, DROP_OLDEST) by callers\n 71→        // note: previous upstream context (specified before) takes precedence\n 72→        val newContext \u003d context + this.context\n 73→        val newCapacity: Int\n 74→        val newOverflow: BufferOverflow\n 75→        if (onBufferOverflow !\u003d BufferOverflow.SUSPEND) {\n 76→            // this additional buffer never suspends \u003d\u003e overwrite preceding buffering configuration\n 77→            newCapacity \u003d capacity\n 78→            newOverflow \u003d onBufferOverflow\n 79→        } else {\n 80→            // combine capacities, keep previous overflow strategy\n 81→            newCapacity \u003d when {\n 82→                this.capacity \u003d\u003d Channel.OPTIONAL_CHANNEL -\u003e capacity\n 83→                capacity \u003d\u003d Channel.OPTIONAL_CHANNEL -\u003e this.capacity\n 84→                this.capacity \u003d\u003d Channel.BUFFERED -\u003e capacity\n 85→                capacity \u003d\u003d Channel.BUFFERED -\u003e this.capacity\n 86→                else -\u003e {\n 87→                    // sanity checks\n 88→                    assert { this.capacity \u003e\u003d 0 }\n 89→                    assert { capacity \u003e\u003d 0 }\n 90→                    // combine capacities clamping to UNLIMITED on overflow\n 91→                    val sum \u003d this.capacity + capacity\n 92→                    if (sum \u003e\u003d 0) sum else Channel.UNLIMITED // unlimited on int overflow\n 93→                }\n 94→            }\n 95→            newOverflow \u003d this.onBufferOverflow\n 96→        }\n 97→        if (newContext \u003d\u003d this.context \u0026\u0026 newCapacity \u003d\u003d this.capacity \u0026\u0026 newOverflow \u003d\u003d this.onBufferOverflow)\n 98→            return this\n 99→        return create(newContext, newCapacity, newOverflow)\n100→    }\n101→\n102→    protected abstract fun create(context: CoroutineContext, capacity: Int, onBufferOverflow: BufferOverflow): ChannelFlow\u003cT\u003e\n103→\n104→    protected abstract suspend fun collectTo(scope: ProducerScope\u003cT\u003e)\n105→\n106→    /**\n107→     * Here we use ATOMIC start for a reason (#1825).\n108→     * NB: [produceImpl] is used for [flowOn].\n109→     * For non-atomic start it is possible to observe the situation,\n110→     * where the pipeline after the [flowOn] call successfully executes (mostly, its `onCompletion`)\n111→     * handlers, while the pipeline before does not, because it was cancelled during its dispatch.\n112→     * Thus `onCompletion` and `finally` blocks won\u0027t be executed and it may lead to a different kinds of memory leaks.\n113→     */\n114→    public open fun produceImpl(scope: CoroutineScope): ReceiveChannel\u003cT\u003e \u003d\n115→        scope.produce(context, produceCapacity, onBufferOverflow, start \u003d CoroutineStart.ATOMIC, block \u003d collectToFun)\n116→\n117→    override suspend fun collect(collector: FlowCollector\u003cT\u003e): Unit \u003d\n118→        coroutineScope {\n119→            collector.emitAll(produceImpl(this))\n120→        }\n121→\n122→    protected open fun additionalToStringProps(): String? \u003d null\n123→\n124→    // debug toString\n125→    override fun toString(): String {\n126→        val props \u003d ArrayList\u003cString\u003e(4)\n127→        additionalToStringProps()?.let { props.add(it) }\n128→        if (context !\u003d\u003d EmptyCoroutineContext) props.add(\"context\u003d$context\")\n129→        if (capacity !\u003d Channel.OPTIONAL_CHANNEL) props.add(\"capacity\u003d$capacity\")\n130→        if (onBufferOverflow !\u003d BufferOverflow.SUSPEND) props.add(\"onBufferOverflow\u003d$onBufferOverflow\")\n131→        return \"$classSimpleName[${props.joinToString(\", \")}]\"\n132→    }\n133→}\n134→\n135→// ChannelFlow implementation that operates on another flow before it\n136→internal abstract class ChannelFlowOperator\u003cS, T\u003e(\n137→    @JvmField protected val flow: Flow\u003cS\u003e,\n138→    context: CoroutineContext,\n139→    capacity: Int,\n140→    onBufferOverflow: BufferOverflow\n141→) : ChannelFlow\u003cT\u003e(context, capacity, onBufferOverflow) {\n142→    protected abstract suspend fun flowCollect(collector: FlowCollector\u003cT\u003e)\n143→\n144→    // Changes collecting context upstream to the specified newContext, while collecting in the original context\n145→    private suspend fun collectWithContextUndispatched(collector: FlowCollector\u003cT\u003e, newContext: CoroutineContext) {\n146→        val originalContextCollector \u003d collector.withUndispatchedContextCollector(coroutineContext)\n147→        // invoke flowCollect(originalContextCollector) in the newContext\n148→        return withContextUndispatched(newContext, block \u003d { flowCollect(it) }, value \u003d originalContextCollector)\n149→    }\n150→\n151→    // Slow path when output channel is required\n152→    protected override suspend fun collectTo(scope: ProducerScope\u003cT\u003e) \u003d\n153→        flowCollect(SendingCollector(scope))\n154→\n155→    // Optimizations for fast-path when channel creation is optional\n156→    override suspend fun collect(collector: FlowCollector\u003cT\u003e) {\n157→        // Fast-path: When channel creation is optional (flowOn/flowWith operators without buffer)\n158→        if (capacity \u003d\u003d Channel.OPTIONAL_CHANNEL) {\n159→            val collectContext \u003d coroutineContext\n160→            val newContext \u003d collectContext.newCoroutineContext(context) // compute resulting collect context\n161→            // #1: If the resulting context happens to be the same as it was -- fallback to plain collect\n162→            if (newContext \u003d\u003d collectContext)\n163→                return flowCollect(collector)\n164→            // #2: If we don\u0027t need to change the dispatcher we can go without channels\n165→            if (newContext[ContinuationInterceptor] \u003d\u003d collectContext[ContinuationInterceptor])\n166→                return collectWithContextUndispatched(collector, newContext)\n167→        }\n168→        // Slow-path: create the actual channel\n169→        super.collect(collector)\n170→    }\n171→\n172→    // debug toString\n173→    override fun toString(): String \u003d \"$flow -\u003e ${super.toString()}\"\n174→}\n175→\n176→/**\n177→ * Simple channel flow operator: [flowOn], [buffer], or their fused combination.\n178→ */\n179→internal class ChannelFlowOperatorImpl\u003cT\u003e(\n180→    flow: Flow\u003cT\u003e,\n181→    context: CoroutineContext \u003d EmptyCoroutineContext,\n182→    capacity: Int \u003d Channel.OPTIONAL_CHANNEL,\n183→    onBufferOverflow: BufferOverflow \u003d BufferOverflow.SUSPEND\n184→) : ChannelFlowOperator\u003cT, T\u003e(flow, context, capacity, onBufferOverflow) {\n185→    override fun create(context: CoroutineContext, capacity: Int, onBufferOverflow: BufferOverflow): ChannelFlow\u003cT\u003e \u003d\n186→        ChannelFlowOperatorImpl(flow, context, capacity, onBufferOverflow)\n187→\n188→    override fun dropChannelOperators(): Flow\u003cT\u003e \u003d flow\n189→\n190→    override suspend fun flowCollect(collector: FlowCollector\u003cT\u003e) \u003d\n191→        flow.collect(collector)\n192→}\n193→\n194→// Now if the underlying collector was accepting concurrent emits, then this one is too\n195→// todo: we might need to generalize this pattern for \"thread-safe\" operators that can fuse with channels\n196→private fun \u003cT\u003e FlowCollector\u003cT\u003e.withUndispatchedContextCollector(emitContext: CoroutineContext): FlowCollector\u003cT\u003e \u003d when (this) {\n197→    // SendingCollector \u0026 NopCollector do not care about the context at all and can be used as is\n198→    is SendingCollector, is NopCollector -\u003e this\n199→    // Otherwise just wrap into UndispatchedContextCollector interface implementation\n200→    else -\u003e UndispatchedContextCollector(this, emitContext)\n201→}\n202→\n203→private class UndispatchedContextCollector\u003cT\u003e(\n204→    downstream: FlowCollector\u003cT\u003e,\n205→    private val emitContext: CoroutineContext\n206→) : FlowCollector\u003cT\u003e {\n207→    private val countOrElement \u003d threadContextElements(emitContext) // precompute for fast withContextUndispatched\n208→    private val emitRef: suspend (T) -\u003e Unit \u003d { downstream.emit(it) } // allocate suspend function ref once on creation\n209→\n210→    override suspend fun emit(value: T): Unit \u003d\n211→        withContextUndispatched(emitContext, value, countOrElement, emitRef)\n212→}\n213→\n214→// Efficiently computes block(value) in the newContext\n215→internal suspend fun \u003cT, V\u003e withContextUndispatched(\n216→    newContext: CoroutineContext,\n217→    value: V,\n218→    countOrElement: Any \u003d threadContextElements(newContext), // can be precomputed for speed\n219→    block: suspend (V) -\u003e T\n220→): T \u003d\n221→    suspendCoroutineUninterceptedOrReturn { uCont -\u003e\n222→        withCoroutineContext(newContext, countOrElement) {\n223→            block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))\n224→        }\n225→    }\n226→\n227→// Continuation that links the caller with uCont with walkable CoroutineStackFrame\n228→private class StackFrameContinuation\u003cT\u003e(\n229→    private val uCont: Continuation\u003cT\u003e, override val context: CoroutineContext\n230→) : Continuation\u003cT\u003e, CoroutineStackFrame {\n231→\n232→    override val callerFrame: CoroutineStackFrame?\n233→        get() \u003d uCont as? CoroutineStackFrame\n234→\n235→    override fun resumeWith(result: Result\u003cT\u003e) {\n236→        uCont.resumeWith(result)\n237→    }\n238→\n239→    override fun getStackTraceElement(): StackTraceElement? \u003d null\n240→}\n241→",
+          "start_time_ms": 1767752420924,
+          "end_time_ms": 1767752420932,
+          "duration_ms": 8,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 9,
+      "start_time_ms": 1767752420932,
+      "duration_ms": 741,
+      "assistant_request": {
+        "start_time_ms": 1767752420932,
+        "end_time_ms": 1767752421669,
+        "time_to_first_token_ms": 634,
+        "stream_duration_ms": 737,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-645028562aba4b199f1b5c0ad444db6e",
+          "tool_name": "read",
+          "input_json": "{\"file_path\": \"/project/kotlinx-coroutines-core/jvm/test/flow/CallbackFlowTest.kt\"}",
+          "output_content": "  1→package kotlinx.coroutines.flow\n  2→\n  3→import kotlinx.coroutines.testing.*\n  4→import kotlinx.coroutines.*\n  5→import kotlinx.coroutines.channels.*\n  6→import kotlinx.coroutines.testing.flow.*\n  7→import org.junit.Test\n  8→import kotlin.concurrent.*\n  9→import kotlin.test.*\n 10→\n 11→class CallbackFlowTest : TestBase() {\n 12→\n 13→    private class CallbackApi(val block: (SendChannel\u003cInt\u003e) -\u003e Unit) {\n 14→        var started \u003d false\n 15→        @Volatile\n 16→        var stopped \u003d false\n 17→        lateinit var thread: Thread\n 18→\n 19→        fun start(sink: SendChannel\u003cInt\u003e) {\n 20→            started \u003d true\n 21→            thread \u003d thread {\n 22→                while (!stopped) {\n 23→                    block(sink)\n 24→                }\n 25→            }\n 26→        }\n 27→\n 28→        fun stop() {\n 29→            stopped \u003d true\n 30→        }\n 31→    }\n 32→\n 33→    @Test(timeout \u003d 5_000L)\n 34→    fun testThrowingConsumer() \u003d runTest {\n 35→        var i \u003d 0\n 36→        val api \u003d CallbackApi {\n 37→            it.trySend(++i)\n 38→        }\n 39→\n 40→        val flow \u003d callbackFlow\u003cInt\u003e {\n 41→            api.start(channel)\n 42→            awaitClose {\n 43→                api.stop()\n 44→            }\n 45→        }\n 46→\n 47→        var receivedConsensus \u003d 0\n 48→        var isDone \u003d false\n 49→        var exception: Throwable? \u003d null\n 50→        val job \u003d flow\n 51→            .filter { it \u003e 10 }\n 52→            .launchIn(this) {\n 53→                onEach {\n 54→                    if (it \u003d\u003d 11) {\n 55→                        ++receivedConsensus\n 56→                    } else {\n 57→                        receivedConsensus \u003d 42\n 58→                    }\n 59→                    throw RuntimeException()\n 60→                }\n 61→                catch\u003cThrowable\u003e { exception \u003d it }\n 62→                finally { isDone \u003d true }\n 63→            }\n 64→        job.join()\n 65→        assertEquals(1, receivedConsensus)\n 66→        assertTrue(isDone)\n 67→        assertTrue { exception is RuntimeException }\n 68→        api.thread.join()\n 69→        assertTrue(api.started)\n 70→        assertTrue(api.stopped)\n 71→    }\n 72→\n 73→    @Test(timeout \u003d 5_000L)\n 74→    fun testThrowingSource() \u003d runBlocking {\n 75→        var i \u003d 0\n 76→        val api \u003d CallbackApi {\n 77→            if (i \u003c 5) {\n 78→                it.trySend(++i)\n 79→            } else {\n 80→                it.close(RuntimeException())\n 81→            }\n 82→        }\n 83→\n 84→        val flow \u003d callbackFlow\u003cInt\u003e {\n 85→            api.start(channel)\n 86→            awaitClose {\n 87→                api.stop()\n 88→            }\n 89→        }\n 90→\n 91→        var received \u003d 0\n 92→        var isDone \u003d false\n 93→        var exception: Throwable? \u003d null\n 94→        val job \u003d flow.launchIn(this) {\n 95→            onEach { ++received }\n 96→            catch\u003cThrowable\u003e { exception \u003d it }\n 97→            finally { isDone \u003d true }\n 98→        }\n 99→\n100→        job.join()\n101→        assertTrue(isDone)\n102→        assertTrue { exception is RuntimeException }\n103→        api.thread.join()\n104→        assertTrue(api.started)\n105→        assertTrue(api.stopped)\n106→    }\n107→\n108→\n109→    @Test\n110→    fun testMergeExample() \u003d runTest {\n111→        // Too slow on JS\n112→        withContext(Dispatchers.Default) {\n113→            val f1 \u003d (1..10_000).asFlow()\n114→            val f2 \u003d (10_001..20_000).asFlow()\n115→            assertEquals((1..20_000).toSet(), f1.merge(f2).toSet())\n116→        }\n117→    }\n118→\n119→    private fun Flow\u003cInt\u003e.merge(other: Flow\u003cInt\u003e): Flow\u003cInt\u003e \u003d channelFlow {\n120→        launch {\n121→            collect { send(it) }\n122→        }\n123→        other.collect { send(it) }\n124→    }\n125→}\n126→",
+          "start_time_ms": 1767752421669,
+          "end_time_ms": 1767752421672,
+          "duration_ms": 3,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 10,
+      "start_time_ms": 1767752421673,
+      "duration_ms": 1242,
+      "assistant_request": {
+        "start_time_ms": 1767752421673,
+        "end_time_ms": 1767752422832,
+        "time_to_first_token_ms": 898,
+        "stream_duration_ms": 1159,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-fe9aa9ef36854bd183b199bf7dcfa635",
+          "tool_name": "grep",
+          "input_json": "{\"glob\": \"**/*.kt\", \"output_mode\": \"files_with_matches\", \"pattern\": \"fun whileSelect\"}",
+          "output_content": "Found 1 file limit: 100, offset: 0\nkotlinx-coroutines-core/common/src/selects/WhileSelect.kt",
+          "start_time_ms": 1767752422832,
+          "end_time_ms": 1767752422915,
+          "duration_ms": 83,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 11,
+      "start_time_ms": 1767752422915,
+      "duration_ms": 1058,
+      "assistant_request": {
+        "start_time_ms": 1767752422916,
+        "end_time_ms": 1767752423970,
+        "time_to_first_token_ms": 1047,
+        "stream_duration_ms": 1054,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-f61262e6259f4401803b7a04e7da9d5f",
+          "tool_name": "read",
+          "input_json": "{\"file_path\": \"/project/kotlinx-coroutines-core/common/src/selects/WhileSelect.kt\"}",
+          "output_content": " 1→package kotlinx.coroutines.selects\n 2→\n 3→import kotlinx.coroutines.*\n 4→\n 5→/**\n 6→ * Loops while [select] expression returns `true`.\n 7→ *\n 8→ * The statement of the form:\n 9→ *\n10→ * ```\n11→ * whileSelect {\n12→ *     /*body*/\n13→ * }\n14→ * ```\n15→ *\n16→ * is a shortcut for:\n17→ *\n18→ * ```\n19→ * while(select\u003cBoolean\u003e {\n20→ *    /*body*/\n21→ * }) {}\n22→ *\n23→ * **Note: This is an experimental api.** It may be replaced with a higher-performance DSL for selection from loops.\n24→ */\n25→@ExperimentalCoroutinesApi\n26→public suspend inline fun whileSelect(crossinline builder: SelectBuilder\u003cBoolean\u003e.() -\u003e Unit) {\n27→    while(select(builder)) { /* do nothing */ }\n28→}\n29→",
+          "start_time_ms": 1767752423970,
+          "end_time_ms": 1767752423973,
+          "duration_ms": 3,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 12,
+      "start_time_ms": 1767752423973,
+      "duration_ms": 1828,
+      "assistant_request": {
+        "start_time_ms": 1767752423973,
+        "end_time_ms": 1767752425681,
+        "time_to_first_token_ms": 1603,
+        "stream_duration_ms": 1708,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": [
+        {
+          "tool_id": "chatcmpl-tool-1945790b40b44e24afba7d51966c85b7",
+          "tool_name": "grep",
+          "input_json": "{\"glob\": \"**/*.kt\", \"output_mode\": \"content\", \"pattern\": \"fun onReceiveCatching\", \"-A\": 10}",
+          "output_content": "No matches found.",
+          "start_time_ms": 1767752425681,
+          "end_time_ms": 1767752425801,
+          "duration_ms": 120,
+          "success": true,
+          "error_message": null
+        }
+      ]
+    },
+    {
+      "iteration_number": 13,
+      "start_time_ms": 1767752425801,
+      "duration_ms": 7442,
+      "assistant_request": {
+        "start_time_ms": 1767752425801,
+        "end_time_ms": 0,
+        "time_to_first_token_ms": null,
+        "stream_duration_ms": -1767752425801,
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "tool_calls": []
+    }
+  ]
+}

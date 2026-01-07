@@ -1,0 +1,61 @@
+diff --git a/kotlinx-coroutines-core/common/src/EventLoop.common.kt b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+index 6bfcbf0cb..6cabe3765 100644
+--- a/kotlinx-coroutines-core/common/src/EventLoop.common.kt
++++ b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+@@ -282,6 +282,27 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+ 
+     final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
+ 
++    override fun dispatchYield(context: CoroutineContext, block: Runnable) {
++        // When yielding, check if there are delayed tasks ready to execute
++        // and process them first before adding the yielding continuation to the queue.
++        // This ensures that yield() actually yields to other coroutines that are ready to run.
++        val delayed = _delayed.value
++        if (delayed != null && !delayed.isEmpty) {
++            val now = nanoTime()
++            while (true) {
++                // Move ready delayed tasks to the main queue
++                delayed.removeFirstIf {
++                    if (it.timeToExecute(now)) {
++                        enqueueImpl(it)
++                    } else
++                        false
++                } ?: break
++            }
++        }
++        // Now enqueue the yielding continuation
++        enqueue(block)
++    }
++
+     open fun enqueue(task: Runnable) {
+         if (enqueueImpl(task)) {
+             // todo: we should unpark only when this delayed task became first in the queue
+diff --git a/kotlinx-coroutines-core/jvm/test/EventLoopsTest.kt b/kotlinx-coroutines-core/jvm/test/EventLoopsTest.kt
+index 9ab52fd22..8a5d72f1c 100644
+--- a/kotlinx-coroutines-core/jvm/test/EventLoopsTest.kt
++++ b/kotlinx-coroutines-core/jvm/test/EventLoopsTest.kt
+@@ -144,4 +144,23 @@ class EventLoopsTest : TestBase() {
+             waitingThread.value = null
+         }
+     }
++
++    /**
++     * Test for yield() with delayed tasks.
++     * See https://github.com/Kotlin/kotlinx.coroutines/issues/4162
++     */
++    @Test
++    fun testYieldWithDelayedTask() {
++        val results = mutableListOf<String>()
++        runBlocking {
++            launch(start = CoroutineStart.UNDISPATCHED) {
++                delay(1)
++                results.add("first")
++            }
++            Thread.sleep(1000)
++            yield()
++            results.add("second")
++        }
++        assertEquals(listOf("first", "second"), results, "yield() should yield to the delayed task")
++    }
+ }
+\ No newline at end of file

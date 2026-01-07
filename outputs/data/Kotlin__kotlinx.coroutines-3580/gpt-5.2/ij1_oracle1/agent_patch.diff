@@ -1,0 +1,77 @@
+diff --git a/kotlinx-coroutines-core/jdk8/src/future/Future.kt b/kotlinx-coroutines-core/jdk8/src/future/Future.kt
+index 4d9a01ac7..bd9a2662d 100644
+--- a/kotlinx-coroutines-core/jdk8/src/future/Future.kt
++++ b/kotlinx-coroutines-core/jdk8/src/future/Future.kt
+@@ -58,10 +58,10 @@ private class CompletableFutureCoroutine<T>(
+     }
+ 
+     override fun onCancelled(cause: Throwable, handled: Boolean) {
+-        if (!future.completeExceptionally(cause) && !handled) {
+-            // prevents loss of exception that was not handled by parent & could not be set to CompletableFuture
+-            handleCoroutineException(context, cause)
+-        }
++        // The returned CompletableFuture is the sole consumer of this coroutine's failure.
++        // If it is already completed externally (e.g. cancelled), we intentionally ignore the cause
++        // and do not report it to the global exception handler.
++        future.completeExceptionally(cause)
+     }
+ }
+ 
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureCancellationDoesNotReportToGlobalHandlerTest.kt b/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureCancellationDoesNotReportToGlobalHandlerTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/jdk8/future/FutureCancellationDoesNotReportToGlobalHandlerTest.kt
+@@ -0,0 +1,37 @@
++/*
++ * Copyright 2016-2021 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines.future
++
++import kotlinx.coroutines.*
++import org.junit.Test
++import kotlin.test.assertTrue
++
++class FutureCancellationDoesNotReportToGlobalHandlerTest : TestBase() {
++
++    @Test
++    fun testCancellationDoesNotReportUnhandledException() = runBlocking {
++        val started = CompletableDeferred<Unit>()
++        val proceed = CompletableDeferred<Unit>()
++        val finished = CompletableDeferred<Unit>()
++
++        val future = GlobalScope.future(Dispatchers.Default) {
++            try {
++                started.complete(Unit)
++                withContext(NonCancellable) { proceed.await() }
++                throw IllegalStateException("foo")
++} finally {
++                finished.complete(Unit)
++            }
++        }
++
++        started.await()
++        future.cancel(true)
++        proceed.complete(Unit)
++
++        withTimeout(5_000) { finished.await() }
++        assertTrue(future.isCancelled)
++    }
++}
++

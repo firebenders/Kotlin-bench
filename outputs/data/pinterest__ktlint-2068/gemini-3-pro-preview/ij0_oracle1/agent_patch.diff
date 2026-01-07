@@ -1,0 +1,156 @@
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/RuleExecutionContext.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/RuleExecutionContext.kt
+index fee8e1c7..1cb35adc 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/RuleExecutionContext.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/RuleExecutionContext.kt
+@@ -10,6 +10,7 @@ import com.pinterest.ktlint.rule.engine.core.api.Rule
+ import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
++import com.pinterest.ktlint.rule.engine.internal.rules.KtlintSuppressionRule
+ import com.pinterest.ktlint.rule.engine.internal.rulefilter.RuleExecutionRuleFilter
+ import com.pinterest.ktlint.rule.engine.internal.rulefilter.RunAfterRuleFilter
+ import com.pinterest.ktlint.rule.engine.internal.rulefilter.ruleProviders
+@@ -183,6 +184,8 @@ internal class RuleExecutionContext private constructor(
+                     .ruleProviders(
+                         RuleExecutionRuleFilter(editorConfig),
+                         RunAfterRuleFilter(),
++                    ).plus(
++                        RuleProvider { KtlintSuppressionRule() },
+                     )
+ 
+             return RuleExecutionContext(
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
+index 3a70af99..b740395b 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
+@@ -68,9 +68,13 @@ internal object SuppressionLocatorBuilder {
+ 
+     private fun toSuppressedRegionsLocator(hintsList: List<SuppressionHint>): SuppressionLocator =
+         { offset, ruleId ->
+-            hintsList
+-                .filter { offset in it.range }
+-                .any { hint -> hint.disabledRuleIds.isEmpty() || hint.disabledRuleIds.contains(ruleId) }
++            if (ruleId.value == "ktlint:suppression") {
++                false
++            } else {
++                hintsList
++                    .filter { offset in it.range }
++                    .any { hint -> hint.disabledRuleIds.isEmpty() || hint.disabledRuleIds.contains(ruleId) }
++            }
+         }
+ 
+     private fun collect(
+
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/InternalRule.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/InternalRule.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/InternalRule.kt
+@@ -0,0 +1,16 @@
++package com.pinterest.ktlint.rule.engine.internal.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.Rule
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++
++internal open class InternalRule(
++    ruleId: String,
++) : Rule(
++    ruleId = RuleId(ruleId),
++    about = About(
++        maintainer = "KtLint",
++        repositoryUrl = "https://github.com/pinterest/ktlint",
++        issueTrackerUrl = "https://github.com/pinterest/ktlint/issues",
++    ),
++)
++
+
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/KtlintSuppressionRule.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/KtlintSuppressionRule.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/rules/KtlintSuppressionRule.kt
+@@ -0,0 +1,78 @@
++package com.pinterest.ktlint.rule.engine.internal.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.psi.PsiComment
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
++import org.jetbrains.kotlin.psi.KtAnnotationEntry
++import org.jetbrains.kotlin.psi.KtLiteralStringTemplateEntry
++import org.jetbrains.kotlin.psi.KtStringTemplateExpression
++import org.jetbrains.kotlin.psi.psiUtil.startOffset
++
++internal class KtlintSuppressionRule : InternalRule("ktlint:suppression") {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.psi is PsiComment) {
++            visitComment(node, autoCorrect, emit)
++        }
++        if (node.psi is KtAnnotationEntry) {
++            visitAnnotationEntry(node, autoCorrect, emit)
++        }
++    }
++
++    private fun visitComment(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        val text = node.text
++        val startOffset = node.startOffset
++        if (text.contains("experimental:")) {
++            emit(startOffset, "Replace 'experimental' with 'standard' in ktlint directive", true)
++            if (autoCorrect) {
++                (node as LeafPsiElement).replaceWithText(text.replace("experimental:", "standard:"))
++            }
++        }
++        if (text.contains("ktlint-disable") || text.contains("ktlint-enable")) {
++            emit(startOffset, "Directive 'ktlint-disable/ktlint-enable' is deprecated. Use @Suppress instead.", false)
++        }
++    }
++
++    private fun visitAnnotationEntry(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        val annotationEntry = node.psi as KtAnnotationEntry
++        annotationEntry.valueArguments.forEach { argument ->
++            val expression = argument.getArgumentExpression()
++            if (expression is KtStringTemplateExpression) {
++                val entries = expression.entries
++                if (entries.size == 1 && entries[0] is KtLiteralStringTemplateEntry) {
++                    val value = entries[0].text
++                    if (value.contains("experimental:")) {
++                        emit(argument.asElement().startOffset, "Replace 'experimental' with 'standard' in suppression", true)
++                        if (autoCorrect) {
++                            val entryNode = entries[0].node
++                            if (entryNode is LeafPsiElement) {
++                                entryNode.replaceWithText(value.replace("experimental:", "standard:"))
++                            } else {
++                                entryNode.firstChildNode?.takeIf { it is LeafPsiElement }?.let {
++                                    (it as LeafPsiElement).replaceWithText(value.replace("experimental:", "standard:"))
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    companion object {
++        val KTLINT_SUPPRESSION_RULE_ID = RuleId("ktlint:suppression")
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

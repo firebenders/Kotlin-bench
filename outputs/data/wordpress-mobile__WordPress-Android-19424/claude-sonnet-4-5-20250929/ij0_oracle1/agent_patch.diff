@@ -1,0 +1,1852 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListFragment.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListFragment.kt
+index 2bed7dde292..7dbaa0fc707 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListFragment.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListFragment.kt
+@@ -18,8 +18,6 @@ import org.wordpress.android.fluxc.model.SiteModel
+ import org.wordpress.android.ui.ActionableEmptyView
+ import org.wordpress.android.ui.ViewPagerFragment
+ import org.wordpress.android.ui.posts.PostListType.SEARCH
+-import org.wordpress.android.ui.posts.PostListViewLayoutType.COMPACT
+-import org.wordpress.android.ui.posts.PostListViewLayoutType.STANDARD
+ import org.wordpress.android.ui.posts.adapters.PostListAdapter
+ import org.wordpress.android.ui.utils.UiHelpers
+ import org.wordpress.android.ui.utils.UiString
+@@ -61,8 +59,7 @@ class PostListFragment : ViewPagerFragment() {
+     private var actionableEmptyView: ActionableEmptyView? = null
+     private var progressLoadMore: ProgressBar? = null
+ 
+-    private lateinit var itemDecorationCompactLayout: RecyclerItemDecoration
+-    private lateinit var itemDecorationStandardLayout: RecyclerItemDecoration
++    private lateinit var itemDecoration: RecyclerItemDecoration
+ 
+     private lateinit var postListType: PostListType
+ 
+@@ -107,26 +104,6 @@ class PostListFragment : ViewPagerFragment() {
+ 
+         mainViewModel = ViewModelProvider(nonNullActivity, viewModelFactory)[PostListMainViewModel::class.java]
+ 
+-        mainViewModel.viewLayoutType.observe(viewLifecycleOwner, Observer { optionaLayoutType ->
+-            optionaLayoutType?.let { layoutType ->
+-                recyclerView?.removeItemDecoration(itemDecorationCompactLayout)
+-                recyclerView?.removeItemDecoration(itemDecorationStandardLayout)
+-
+-                when (layoutType) {
+-                    STANDARD -> {
+-                        recyclerView?.addItemDecoration(itemDecorationStandardLayout)
+-                    }
+-                    COMPACT -> {
+-                        recyclerView?.addItemDecoration(itemDecorationCompactLayout)
+-                    }
+-                }
+-
+-                if (postListAdapter.updateItemLayoutType(layoutType)) {
+-                    recyclerView?.scrollToPosition(0)
+-                }
+-            }
+-        })
+-
+         mainViewModel.authorSelectionUpdated.observe(viewLifecycleOwner) {
+             if (it != null) {
+                 if (viewModel.updateAuthorFilterIfNotSearch(it)) {
+@@ -196,15 +173,12 @@ class PostListFragment : ViewPagerFragment() {
+         actionableEmptyView = view.findViewById(R.id.actionable_empty_view)
+ 
+         val context = nonNullActivity
+-        itemDecorationStandardLayout = RecyclerItemDecoration(
++        itemDecoration = RecyclerItemDecoration(
+             0,
+             context.resources.getDimensionPixelSize(R.dimen.margin_medium)
+         )
+-        itemDecorationCompactLayout = RecyclerItemDecoration(
+-            0,
+-            context.resources.getDimensionPixelSize(R.dimen.list_divider_height)
+-        )
+         recyclerView?.layoutManager = LinearLayoutManager(context)
++        recyclerView?.addItemDecoration(itemDecoration)
+         recyclerView?.adapter = postListAdapter
+ 
+         swipeRefreshLayout?.let {
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
+index ebf15f43532..9d52a71ad1c 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
+@@ -135,23 +135,6 @@ sealed class PostListItemViewHolder(
+         }
+     }
+ 
+-    class Compact(
+-        parent: ViewGroup,
+-        imageManager: ImageManager,
+-        private val uiHelpers: UiHelpers
+-    ) : PostListItemViewHolder(R.layout.post_list_item_compact, parent, imageManager, uiHelpers) {
+-        private val moreButton: ImageButton = itemView.findViewById(R.id.more_button)
+-
+-        override fun onBind(item: PostListItemUiState) {
+-            setBasicValues(item.data)
+-
+-            itemView.setOnClickListener { item.onSelected.invoke() }
+-            uiHelpers.updateVisibility(moreButton, item.compactActions.actions.isNotEmpty())
+-            moreButton.expandTouchTargetArea(R.dimen.post_list_more_button_extra_padding)
+-            moreButton.setOnClickListener { onMoreClicked(item.compactActions.actions, moreButton) }
+-        }
+-    }
+-
+     protected fun setBasicValues(data: PostListItemUiStateData) {
+         uiHelpers.setTextOrHide(titleTextView, data.title)
+         updatePostInfoLabel(postInfoTextView, data.postInfo)
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewModel.kt
+index 57449b60722..3f483486cba 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewModel.kt
+@@ -38,10 +38,6 @@ import org.wordpress.android.ui.posts.PostListType.DRAFTS
+ import org.wordpress.android.ui.posts.PostListType.PUBLISHED
+ import org.wordpress.android.ui.posts.PostListType.SCHEDULED
+ import org.wordpress.android.ui.posts.PostListType.TRASHED
+-import org.wordpress.android.ui.posts.PostListViewLayoutType.COMPACT
+-import org.wordpress.android.ui.posts.PostListViewLayoutType.STANDARD
+-import org.wordpress.android.ui.posts.PostListViewLayoutTypeMenuUiState.CompactViewLayoutTypeMenuUiState
+-import org.wordpress.android.ui.posts.PostListViewLayoutTypeMenuUiState.StandardViewLayoutTypeMenuUiState
+ import org.wordpress.android.ui.prefs.AppPrefsWrapper
+ import org.wordpress.android.ui.uploads.UploadActionUseCase
+ import org.wordpress.android.ui.uploads.UploadStarter
+@@ -134,12 +130,6 @@ class PostListMainViewModel @Inject constructor(
+     private val _postUploadAction = SingleLiveEvent<PostUploadAction>()
+     val postUploadAction: LiveData<PostUploadAction> = _postUploadAction
+ 
+-    private val _viewLayoutType = MutableLiveData<PostListViewLayoutType>()
+-    val viewLayoutType: LiveData<PostListViewLayoutType> = _viewLayoutType
+-
+-    private val _viewLayoutTypeMenuUiState = MutableLiveData<PostListViewLayoutTypeMenuUiState>()
+-    val viewLayoutTypeMenuUiState: LiveData<PostListViewLayoutTypeMenuUiState> = _viewLayoutTypeMenuUiState
+-
+     private val _isSearchExpanded = MutableLiveData<Boolean>()
+     val isSearchExpanded: LiveData<Boolean> = _isSearchExpanded
+ 
+@@ -243,12 +233,6 @@ class PostListMainViewModel @Inject constructor(
+         this.site = site
+         this.editPostRepository = editPostRepository
+ 
+-        if (isSearchExpanded.value == true) {
+-            setViewLayoutAndIcon(COMPACT, false)
+-        } else {
+-            setUserPreferredViewLayoutType()
+-        }
+-
+         val authorFilterSelection: AuthorFilterSelection = if (isFilteringByAuthorSupported) {
+             prefs.postListAuthorSelection
+         } else {
+@@ -334,7 +318,6 @@ class PostListMainViewModel @Inject constructor(
+ 
+     fun onSearchExpanded(restorePreviousSearch: Boolean) {
+         if (isSearchExpanded.value != true) {
+-            setViewLayoutAndIcon(COMPACT, false)
+             AnalyticsUtils.trackWithSiteDetails(POST_LIST_SEARCH_ACCESSED, site)
+ 
+             if (!restorePreviousSearch) {
+@@ -347,7 +330,6 @@ class PostListMainViewModel @Inject constructor(
+     }
+ 
+     fun onSearchCollapsed(delay: Long = SEARCH_COLLAPSE_DELAY) {
+-        setUserPreferredViewLayoutType()
+         _isSearchExpanded.value = false
+         clearSearch()
+ 
+@@ -569,32 +551,6 @@ class PostListMainViewModel @Inject constructor(
+         )
+     }
+ 
+-    fun toggleViewLayout() {
+-        val currentLayoutType = viewLayoutType.value ?: PostListViewLayoutType.defaultValue
+-        val toggledValue = when (currentLayoutType) {
+-            STANDARD -> COMPACT
+-            COMPACT -> STANDARD
+-        }
+-        AnalyticsUtils.trackAnalyticsPostListToggleLayout(toggledValue)
+-        setViewLayoutAndIcon(toggledValue, true)
+-    }
+-
+-    private fun setViewLayoutAndIcon(layout: PostListViewLayoutType, storeIntoPreferences: Boolean = true) {
+-        _viewLayoutType.value = layout
+-        _viewLayoutTypeMenuUiState.value = when (layout) {
+-            STANDARD -> StandardViewLayoutTypeMenuUiState
+-            COMPACT -> CompactViewLayoutTypeMenuUiState
+-        }
+-        if (storeIntoPreferences) {
+-            prefs.postListViewLayoutType = layout
+-        }
+-    }
+-
+-    private fun setUserPreferredViewLayoutType() {
+-        val savedLayoutType = prefs.postListViewLayoutType
+-        setViewLayoutAndIcon(savedLayoutType, false)
+-    }
+-
+     fun onBottomSheetPublishButtonClicked() {
+         editPostRepository.getEditablePost()?.let {
+             postActionHandler.publishPost(it)
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewState.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewState.kt
+index 4b4e389d5c6..9379ad939be 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewState.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListMainViewState.kt
+@@ -14,18 +14,6 @@ data class PostListMainViewState(
+     val authorFilterItems: List<AuthorFilterListItemUIState>
+ )
+ 
+-sealed class PostListViewLayoutTypeMenuUiState(@DrawableRes val iconRes: Int, val title: UiString) {
+-    object StandardViewLayoutTypeMenuUiState : PostListViewLayoutTypeMenuUiState(
+-        iconRes = R.drawable.ic_view_post_compact_white_24dp,
+-        title = UiStringRes(R.string.post_list_toggle_item_layout_list_view)
+-    )
+-
+-    object CompactViewLayoutTypeMenuUiState : PostListViewLayoutTypeMenuUiState(
+-        iconRes = R.drawable.ic_view_post_full_white_24dp,
+-        title = UiStringRes(R.string.post_list_toggle_item_layout_cards_view)
+-    )
+-}
+-
+ sealed class AuthorFilterListItemUIState(
+     val id: Long,
+     val text: UiString,
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListViewLayoutType.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListViewLayoutType.kt
+index a0dca37c3b3..95eac4be97f 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListViewLayoutType.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListViewLayoutType.kt
+@@ -1,16 +1,5 @@
+ package org.wordpress.android.ui.posts
+ 
+-enum class PostListViewLayoutType(val id: Long) {
+-    STANDARD(id = 0),
+-    COMPACT(id = 1);
+-
+-    companion object {
+-        @JvmStatic
+-        val defaultValue = STANDARD
+-
+-        @JvmStatic
+-        fun fromId(id: Long): PostListViewLayoutType {
+-            return values().firstOrNull { it.id == id } ?: defaultValue
+-        }
+-    }
++enum class PostListViewLayoutType {
++    STANDARD
+ }
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/adapters/PostListAdapter.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/adapters/PostListAdapter.kt
+index 87d557146e4..fc7dd82d6ff 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/adapters/PostListAdapter.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/adapters/PostListAdapter.kt
+@@ -11,9 +11,6 @@ import org.wordpress.android.R
+ import org.wordpress.android.fluxc.model.LocalOrRemoteId.LocalId
+ import org.wordpress.android.fluxc.model.LocalOrRemoteId.RemoteId
+ import org.wordpress.android.ui.posts.PostListItemViewHolder
+-import org.wordpress.android.ui.posts.PostListViewLayoutType
+-import org.wordpress.android.ui.posts.PostListViewLayoutType.COMPACT
+-import org.wordpress.android.ui.posts.PostListViewLayoutType.STANDARD
+ import org.wordpress.android.ui.utils.UiHelpers
+ import org.wordpress.android.util.extensions.setVisible
+ import org.wordpress.android.util.image.ImageManager
+@@ -24,10 +21,8 @@ import org.wordpress.android.viewmodel.posts.PostListItemType.PostListItemUiStat
+ import org.wordpress.android.viewmodel.uistate.ProgressBarUiState
+ 
+ private const val VIEW_TYPE_POST = 0
+-private const val VIEW_TYPE_POST_COMPACT = 1
+ private const val VIEW_TYPE_ENDLIST_INDICATOR = 2
+ private const val VIEW_TYPE_LOADING = 3
+-private const val VIEW_TYPE_LOADING_COMPACT = 4
+ 
+ class PostListAdapter(
+     context: Context,
+@@ -35,23 +30,12 @@ class PostListAdapter(
+     private val uiHelpers: UiHelpers
+ ) : PagedListAdapter<PostListItemType, ViewHolder>(PostListDiffItemCallback) {
+     private val layoutInflater: LayoutInflater = LayoutInflater.from(context)
+-    private var itemLayoutType: PostListViewLayoutType = PostListViewLayoutType.defaultValue
+ 
+     override fun getItemViewType(position: Int): Int {
+         return when (getItem(position)) {
+             is EndListIndicatorItem -> VIEW_TYPE_ENDLIST_INDICATOR
+-            is PostListItemUiState -> {
+-                when (itemLayoutType) {
+-                    STANDARD -> VIEW_TYPE_POST
+-                    COMPACT -> VIEW_TYPE_POST_COMPACT
+-                }
+-            }
+-            is LoadingItem, null -> {
+-                when (itemLayoutType) {
+-                    STANDARD -> VIEW_TYPE_LOADING
+-                    COMPACT -> VIEW_TYPE_LOADING_COMPACT
+-                }
+-            }
++            is PostListItemUiState -> VIEW_TYPE_POST
++            is LoadingItem, null -> VIEW_TYPE_LOADING
+         }
+     }
+ 
+@@ -66,16 +50,9 @@ class PostListAdapter(
+                 val view = layoutInflater.inflate(R.layout.post_list_item_skeleton, parent, false)
+                 LoadingViewHolder(view)
+             }
+-            VIEW_TYPE_LOADING_COMPACT -> {
+-                val view = layoutInflater.inflate(R.layout.post_list_item_skeleton_compact, parent, false)
+-                LoadingViewHolder(view)
+-            }
+             VIEW_TYPE_POST -> {
+                 PostListItemViewHolder.Standard(parent, imageManager, uiHelpers)
+             }
+-            VIEW_TYPE_POST_COMPACT -> {
+-                PostListItemViewHolder.Compact(parent, imageManager, uiHelpers)
+-            }
+             else -> {
+                 // Fail fast if a new view type is added so the we can handle it
+                 throw IllegalStateException("The view type '$viewType' needs to be handled")
+@@ -104,15 +81,6 @@ class PostListAdapter(
+         }
+     }
+ 
+-    fun updateItemLayoutType(updatedItemLayoutType: PostListViewLayoutType): Boolean {
+-        if (updatedItemLayoutType == itemLayoutType) {
+-            return false
+-        }
+-        itemLayoutType = updatedItemLayoutType
+-        notifyDataSetChanged()
+-        return true
+-    }
+-
+     private class LoadingViewHolder(view: View) : ViewHolder(view) {
+         val editButton: View? = view.findViewById(R.id.skeleton_button_edit)
+         val viewButton: View? = view.findViewById(R.id.skeleton_button_view)
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefs.java b/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefs.java
+index c79843ddad5..77e51be1474 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefs.java
++++ b/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefs.java
+@@ -24,7 +24,6 @@ import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureRemovalPhase;
+ import org.wordpress.android.ui.mysite.SelectedSiteRepository;
+ import org.wordpress.android.ui.mysite.tabs.MySiteTabType;
+ import org.wordpress.android.ui.posts.AuthorFilterSelection;
+-import org.wordpress.android.ui.posts.PostListViewLayoutType;
+ import org.wordpress.android.ui.quickstart.QuickStartType;
+ import org.wordpress.android.ui.quickstart.QuickStartType.NewSiteQuickStartType;
+ import org.wordpress.android.ui.reader.tracker.ReaderTab;
+@@ -145,7 +144,6 @@ public class AppPrefs {
+         LAST_SELECTED_QUICK_START_TYPE,
+ 
+         POST_LIST_AUTHOR_FILTER,
+-        POST_LIST_VIEW_LAYOUT_TYPE,
+ 
+         // Widget settings
+         STATS_WIDGET_SELECTED_SITE_ID,
+@@ -1131,16 +1129,6 @@ public class AppPrefs {
+         setLong(DeletablePrefKey.POST_LIST_AUTHOR_FILTER, selection.getId());
+     }
+ 
+-    @NonNull public static PostListViewLayoutType getPostsListViewLayoutType() {
+-        long id = getLong(DeletablePrefKey.POST_LIST_VIEW_LAYOUT_TYPE,
+-                PostListViewLayoutType.getDefaultValue().getId());
+-        return PostListViewLayoutType.fromId(id);
+-    }
+-
+-    public static void setPostsListViewLayoutType(@NonNull PostListViewLayoutType type) {
+-        setLong(DeletablePrefKey.POST_LIST_VIEW_LAYOUT_TYPE, type.getId());
+-    }
+-
+     public static void setStatsWidgetSelectedSiteId(long siteId, int appWidgetId) {
+         prefs().edit().putLong(getSiteIdWidgetKey(appWidgetId), siteId).apply();
+     }
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefsWrapper.kt b/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefsWrapper.kt
+index 60c17a1f20d..50c21033b4c 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefsWrapper.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/prefs/AppPrefsWrapper.kt
+@@ -5,7 +5,6 @@ import org.wordpress.android.fluxc.store.QuickStartStore.QuickStartTask
+ import org.wordpress.android.models.ReaderTag
+ import org.wordpress.android.ui.jetpackoverlay.JetpackFeatureRemovalPhase
+ import org.wordpress.android.ui.posts.AuthorFilterSelection
+-import org.wordpress.android.ui.posts.PostListViewLayoutType
+ import org.wordpress.android.ui.prefs.AppPrefs.PrefKey
+ import org.wordpress.android.ui.prefs.AppPrefs.getBoolean
+ import org.wordpress.android.ui.quickstart.QuickStartType
+@@ -52,10 +51,6 @@ class AppPrefsWrapper @Inject constructor() {
+         get() = AppPrefs.getAuthorFilterSelection()
+         set(value) = AppPrefs.setAuthorFilterSelection(value)
+ 
+-    var postListViewLayoutType: PostListViewLayoutType
+-        get() = AppPrefs.getPostsListViewLayoutType()
+-        set(value) = AppPrefs.setPostsListViewLayoutType(value)
+-
+     var systemNotificationsEnabled: Boolean
+         get() = AppPrefs.getSystemNotificationsEnabled()
+         set(value) = AppPrefs.setSystemNotificationsEnabled(value)
+diff --git a/WordPress/src/main/java/org/wordpress/android/util/analytics/AnalyticsUtils.java b/WordPress/src/main/java/org/wordpress/android/util/analytics/AnalyticsUtils.java
+index 01434123b88..a0257c4686a 100644
+--- a/WordPress/src/main/java/org/wordpress/android/util/analytics/AnalyticsUtils.java
++++ b/WordPress/src/main/java/org/wordpress/android/util/analytics/AnalyticsUtils.java
+@@ -32,7 +32,6 @@ import org.wordpress.android.fluxc.store.SiteStore;
+ import org.wordpress.android.models.ReaderPost;
+ import org.wordpress.android.ui.PagePostCreationSourcesDetail;
+ import org.wordpress.android.ui.posts.EditPostActivity;
+-import org.wordpress.android.ui.posts.PostListViewLayoutType;
+ import org.wordpress.android.ui.posts.PostUtils;
+ import org.wordpress.android.util.AppLog;
+ import org.wordpress.android.util.FluxCUtils;
+@@ -642,12 +641,6 @@ public class AnalyticsUtils {
+         AnalyticsTracker.track(AnalyticsTracker.Stat.CREATED_ACCOUNT, properties);
+     }
+ 
+-    public static void trackAnalyticsPostListToggleLayout(PostListViewLayoutType viewLayoutType) {
+-        Map<String, String> properties = new HashMap<>();
+-        properties.put("post_list_view_layout_type", viewLayoutType.toString());
+-        AnalyticsTracker.track(AnalyticsTracker.Stat.POST_LIST_VIEW_LAYOUT_TOGGLED, properties);
+-    }
+-
+     private static Map<String, String> createNewsCardProperties(String origin, int version) {
+         Map<String, String> properties = new HashMap<>();
+         properties.put(NEWS_CARD_ORIGIN, origin);
+diff --git a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemType.kt b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemType.kt
+index 91dd1f3cd5f..b1155ade396 100644
+--- a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemType.kt
++++ b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemType.kt
+@@ -12,7 +12,6 @@ sealed class PostListItemType {
+     class PostListItemUiState(
+         val data: PostListItemUiStateData,
+         val actions: List<PostListItemAction>,
+-        val compactActions: PostListItemAction.MoreItem,
+         val onSelected: () -> Unit
+     ) : PostListItemType()
+ 
+diff --git a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+index c92ac3f9f84..abcc0b2067e 100644
+--- a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
++++ b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+@@ -115,7 +115,6 @@ class PostListItemUiStateHelper @Inject constructor(
+             ),
+         )
+         val defaultActions = createDefaultViewActions(buttonTypes, onButtonClicked)
+-        val compactActions = createCompactViewActions(buttonTypes, onButtonClicked)
+ 
+         val remotePostId = RemotePostId(RemoteId(post.remotePostId))
+         val localPostId = LocalPostId(LocalId(post.id))
+@@ -177,7 +176,6 @@ class PostListItemUiStateHelper @Inject constructor(
+         return PostListItemUiState(
+             data = itemUiData,
+             actions = defaultActions,
+-            compactActions = compactActions,
+             onSelected = onSelected
+         )
+     }
+@@ -500,14 +498,4 @@ class PostListItemUiStateHelper @Inject constructor(
+             buttonTypes.map(createSinglePostListItem)
+         }
+     }
+-
+-    private fun createCompactViewActions(
+-        buttonTypes: List<PostListButtonType>,
+-        onButtonClicked: (PostListButtonType) -> Unit
+-    ): PostListItemAction.MoreItem {
+-        val allItems = buttonTypes.map { buttonType: PostListButtonType ->
+-            PostListItemAction.SingleItem(buttonType, onButtonClicked)
+-        }
+-        return PostListItemAction.MoreItem(allItems, onButtonClicked)
+-    }
+ }
+diff --git a/WordPress/src/main/res/values-ar/strings.xml b/WordPress/src/main/res/values-ar/strings.xml
+index 292a6eb98af..0b3b83e1700 100644
+--- a/WordPress/src/main/res/values-ar/strings.xml
++++ b/WordPress/src/main/res/values-ar/strings.xml
+@@ -2075,8 +2075,6 @@ Language: ar
+     <string name="posts_draft_empty">ليس لديك أي مسودة مقالات</string>
+     <string name="posts_trashed_empty">ليس لديك أي مقالات تم وضعها في سلة المهملات</string>
+     <string name="button_move_to_draft">نقل إلى المسودة</string>
+-    <string name="post_list_toggle_item_layout_list_view">تبديل إلى عرض القائمة</string>
+-    <string name="post_list_toggle_item_layout_cards_view">تبديل إلى عرض البطاقات</string>
+     <string name="error_user_username_instead_of_email">يرجى تسجيل الدخول باستخدام اسم مستخدم WordPress.com الخاص بك بدلاً من عنوان بريدك الإلكتروني.</string>
+     <string name="notification_wpcom_username_needed">يرجى تسجيل الدخول باسم المستخدم وكلمة المرور الخاصة بك.</string>
+     <string name="stats_insights_posts">المقالات</string>
+diff --git a/WordPress/src/main/res/values-cs/strings.xml b/WordPress/src/main/res/values-cs/strings.xml
+index 05cae778c40..d0b4c8375dd 100644
+--- a/WordPress/src/main/res/values-cs/strings.xml
++++ b/WordPress/src/main/res/values-cs/strings.xml
+@@ -1884,8 +1884,6 @@ Language: cs_CZ
+     <string name="posts_scheduled_empty">Zatím nemáte žádné naplánované příspěvky</string>
+     <string name="posts_draft_empty">Nemáte žádné koncepční příspěvky</string>
+     <string name="posts_trashed_empty">Nemáte žádné příspěvky v koši</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Přepnout do zobrazení karet</string>
+-    <string name="post_list_toggle_item_layout_list_view">Přepnout na zobrazení seznamu</string>
+     <string name="button_move_to_draft">Přesunout do konceptu</string>
+     <string name="error_user_username_instead_of_email">Přihlaste se prosím pomocí svého uživatelského jména WordPress.com místo vaší e-mailové adresy.</string>
+     <string name="notification_wpcom_username_needed">Přihlaste se prosím pomocí svého uživatelského jména a hesla.</string>
+diff --git a/WordPress/src/main/res/values-de/strings.xml b/WordPress/src/main/res/values-de/strings.xml
+index 202efee1061..eb8ed9d9a7f 100644
+--- a/WordPress/src/main/res/values-de/strings.xml
++++ b/WordPress/src/main/res/values-de/strings.xml
+@@ -2076,8 +2076,6 @@ Language: de
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Wenn dieser Beitrag in den Papierkorb verschoben wird, werden ungespeicherte Änderungen verworfen. Bist du sicher, dass du fortfahren möchtest?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Lokale Änderungen</string>
+     <string name="button_move_to_draft">In Entwurf verschieben</string>
+-    <string name="post_list_toggle_item_layout_list_view">Zur Listenansicht wechseln</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Zur Kartenansicht wechseln</string>
+     <string name="posts_trashed_empty">Du hast keine Beiträge im Papierkorb</string>
+     <string name="posts_draft_empty">Du hast keine Beitragsentwürfe</string>
+     <string name="posts_scheduled_empty">Du hast keine geplanten Beiträge</string>
+diff --git a/WordPress/src/main/res/values-en-rAU/strings.xml b/WordPress/src/main/res/values-en-rAU/strings.xml
+index 618a801b954..1c3a3464be2 100644
+--- a/WordPress/src/main/res/values-en-rAU/strings.xml
++++ b/WordPress/src/main/res/values-en-rAU/strings.xml
+@@ -220,8 +220,6 @@ Language: en_AU
+     <string name="post_trashing">Post is being trashed</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Local changes</string>
+     <string name="button_move_to_draft">Move to Draft</string>
+-    <string name="post_list_toggle_item_layout_list_view">Switch to list view</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Switch to cards view</string>
+     <string name="posts_trashed_empty">You don\'t have any trashed posts</string>
+     <string name="posts_draft_empty">You don\'t have any draft posts</string>
+     <string name="posts_scheduled_empty">You don\'t have any scheduled posts</string>
+diff --git a/WordPress/src/main/res/values-en-rCA/strings.xml b/WordPress/src/main/res/values-en-rCA/strings.xml
+index 00740f29155..a3ce054ab40 100644
+--- a/WordPress/src/main/res/values-en-rCA/strings.xml
++++ b/WordPress/src/main/res/values-en-rCA/strings.xml
+@@ -1784,8 +1784,6 @@ Language: en_CA
+     <string name="dialog_confirm_trash_losing_local_changes_title">Local changes</string>
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Trashing this post will also discard unsaved changes, are you sure you want to continue?</string>
+     <string name="button_move_to_draft">Move to Draft</string>
+-    <string name="post_list_toggle_item_layout_list_view">Switch to list view</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Switch to cards view</string>
+     <string name="posts_trashed_empty">You don\'t have any trashed posts</string>
+     <string name="posts_draft_empty">You don\'t have any draft posts</string>
+     <string name="posts_scheduled_empty">You don\'t have any scheduled posts</string>
+diff --git a/WordPress/src/main/res/values-en-rGB/strings.xml b/WordPress/src/main/res/values-en-rGB/strings.xml
+index 08417c45c06..86b7e074f13 100644
+--- a/WordPress/src/main/res/values-en-rGB/strings.xml
++++ b/WordPress/src/main/res/values-en-rGB/strings.xml
+@@ -1941,13 +1941,11 @@ Language: en_GB
+     <string name="post_trashing">Post is being binned</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Local changes</string>
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Binning this post will also discard unsaved changes, are you sure you want to continue?</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Switch to cards view</string>
+     <string name="posts_trashed_empty">You don\'t have any binned posts</string>
+     <string name="posts_draft_empty">You don\'t have any draft posts</string>
+     <string name="posts_scheduled_empty">You don\'t have any scheduled posts</string>
+     <string name="posts_published_empty">You haven\'t published any posts yet</string>
+     <string name="button_move_to_draft">Move to Draft</string>
+-    <string name="post_list_toggle_item_layout_list_view">Switch to list view</string>
+     <string name="notification_wpcom_username_needed">Please log in with your username and password.</string>
+     <string name="error_user_username_instead_of_email">Please log in using your WordPress.com username instead of your e-mail address.</string>
+     <string name="stats_insights_total_words">Total words</string>
+diff --git a/WordPress/src/main/res/values-es-rCO/strings.xml b/WordPress/src/main/res/values-es-rCO/strings.xml
+index 7e227e4fc67..eeb7a584aab 100644
+--- a/WordPress/src/main/res/values-es-rCO/strings.xml
++++ b/WordPress/src/main/res/values-es-rCO/strings.xml
+@@ -1629,8 +1629,6 @@ Language: es_CO
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Al enviar esta entrada a la papelera también se descartarán los cambios sin guardar, ¿estás seguro de querer continuar?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Cambios locales</string>
+     <string name="button_move_to_draft">Mover a borradores</string>
+-    <string name="post_list_toggle_item_layout_list_view">Cambiar a la vista de lista</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Cambiar a la vista de tarjetas</string>
+     <string name="posts_trashed_empty">No tienes ninguna entrada en la papelera</string>
+     <string name="posts_draft_empty">No tienes ninguna entrada en borrador</string>
+     <string name="posts_scheduled_empty">No tienes ninguna entrada programada</string>
+diff --git a/WordPress/src/main/res/values-es-rMX/strings.xml b/WordPress/src/main/res/values-es-rMX/strings.xml
+index 019fcf330ed..1f1aba61309 100644
+--- a/WordPress/src/main/res/values-es-rMX/strings.xml
++++ b/WordPress/src/main/res/values-es-rMX/strings.xml
+@@ -872,8 +872,6 @@ Language: es_MX
+     <string name="post_trashing">La entrada se está enviando a la papelera</string>
+     <string name="stats_menu_remove">Quitar de la información</string>
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Al enviar esta entrada a la papelera también se descartarán los cambios sin guardar, ¿estás seguro de querer continuar?</string>
+-    <string name="post_list_toggle_item_layout_list_view">Cambiar a la vista de lista</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Cambiar a la vista de tarjetas</string>
+     <string name="posts_trashed_empty">No tienes ninguna entrada en la papelera</string>
+     <string name="posts_draft_empty">No tienes ninguna entrada en borrador</string>
+     <string name="posts_scheduled_empty">No tienes ninguna entrada programada</string>
+diff --git a/WordPress/src/main/res/values-es-rVE/strings.xml b/WordPress/src/main/res/values-es-rVE/strings.xml
+index c6470103cfc..35b72a3c9a5 100644
+--- a/WordPress/src/main/res/values-es-rVE/strings.xml
++++ b/WordPress/src/main/res/values-es-rVE/strings.xml
+@@ -1649,8 +1649,6 @@ Language: es_VE
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Al enviar esta entrada a la papelera también se descartarán los cambios sin guardar, ¿estás seguro de querer continuar?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Cambios locales</string>
+     <string name="button_move_to_draft">Mover a borradores</string>
+-    <string name="post_list_toggle_item_layout_list_view">Cambiar a la vista de lista</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Cambiar a la vista de tarjetas</string>
+     <string name="posts_trashed_empty">No tienes ninguna entrada en la papelera</string>
+     <string name="posts_draft_empty">No tienes ninguna entrada en borrador</string>
+     <string name="posts_scheduled_empty">No tienes ninguna entrada programada</string>
+diff --git a/WordPress/src/main/res/values-es/strings.xml b/WordPress/src/main/res/values-es/strings.xml
+index bd317d9c81c..2c304faf31d 100644
+--- a/WordPress/src/main/res/values-es/strings.xml
++++ b/WordPress/src/main/res/values-es/strings.xml
+@@ -2076,8 +2076,6 @@ Language: es
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Al enviar esta entrada a la papelera también se descartarán los cambios sin guardar, ¿estás seguro de querer continuar?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Cambios locales</string>
+     <string name="button_move_to_draft">Mover a borradores</string>
+-    <string name="post_list_toggle_item_layout_list_view">Cambiar a la vista de lista</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Cambiar a la vista de tarjetas</string>
+     <string name="posts_trashed_empty">No tienes ninguna entrada en la papelera</string>
+     <string name="posts_draft_empty">No tienes ninguna entrada en borrador</string>
+     <string name="posts_scheduled_empty">No tienes ninguna entrada programada</string>
+diff --git a/WordPress/src/main/res/values-fr-rCA/strings.xml b/WordPress/src/main/res/values-fr-rCA/strings.xml
+index 403627aaacf..bc045e543cb 100644
+--- a/WordPress/src/main/res/values-fr-rCA/strings.xml
++++ b/WordPress/src/main/res/values-fr-rCA/strings.xml
+@@ -2073,8 +2073,6 @@ Language: fr
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">La suppression de cet article effacera les modifications non enregistrées. Voulez-vous vraiment continuer ?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Changements locaux</string>
+     <string name="button_move_to_draft">Passer en brouillon</string>
+-    <string name="post_list_toggle_item_layout_list_view">Basculer vers la vue de la liste</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Basculer vers la vue des cartes</string>
+     <string name="posts_trashed_empty">Vous n\'avez pas d\'articles dans la corbeille</string>
+     <string name="posts_draft_empty">Vous n\'avez pas de brouillons d\'article</string>
+     <string name="posts_scheduled_empty">Vous n\'avez aucun article planifié</string>
+diff --git a/WordPress/src/main/res/values-fr/strings.xml b/WordPress/src/main/res/values-fr/strings.xml
+index 403627aaacf..bc045e543cb 100644
+--- a/WordPress/src/main/res/values-fr/strings.xml
++++ b/WordPress/src/main/res/values-fr/strings.xml
+@@ -2073,8 +2073,6 @@ Language: fr
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">La suppression de cet article effacera les modifications non enregistrées. Voulez-vous vraiment continuer ?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Changements locaux</string>
+     <string name="button_move_to_draft">Passer en brouillon</string>
+-    <string name="post_list_toggle_item_layout_list_view">Basculer vers la vue de la liste</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Basculer vers la vue des cartes</string>
+     <string name="posts_trashed_empty">Vous n\'avez pas d\'articles dans la corbeille</string>
+     <string name="posts_draft_empty">Vous n\'avez pas de brouillons d\'article</string>
+     <string name="posts_scheduled_empty">Vous n\'avez aucun article planifié</string>
+diff --git a/WordPress/src/main/res/values-gl/strings.xml b/WordPress/src/main/res/values-gl/strings.xml
+index cc724fb68df..5460cbd8749 100644
+--- a/WordPress/src/main/res/values-gl/strings.xml
++++ b/WordPress/src/main/res/values-gl/strings.xml
+@@ -2076,8 +2076,6 @@ Language: gl_ES
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Enviar á papeleira esta entrada descartará os cambios locais, estás seguro de querer continuar?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Cambios locais</string>
+     <string name="button_move_to_draft">Mover a borradores</string>
+-    <string name="post_list_toggle_item_layout_list_view">Cambiará vista de lista</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Cambiar á vista de tarxetas</string>
+     <string name="posts_trashed_empty">Non tes ningunha entrada na papeleira</string>
+     <string name="posts_draft_empty">Non tes ningunha entrada en borrador</string>
+     <string name="posts_scheduled_empty">Non tes ningunha entrada programada</string>
+diff --git a/WordPress/src/main/res/values-he/strings.xml b/WordPress/src/main/res/values-he/strings.xml
+index 9e9019d191e..8d01750d19f 100644
+--- a/WordPress/src/main/res/values-he/strings.xml
++++ b/WordPress/src/main/res/values-he/strings.xml
+@@ -2069,8 +2069,6 @@ Language: he_IL
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">העברת הפוסט לפח תבטל גם שינויים שלא נשמרו, האם ברצונך להמשיך?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">שינויים מקומיים</string>
+     <string name="button_move_to_draft">העברה לטיוטות</string>
+-    <string name="post_list_toggle_item_layout_list_view">החלפה לתצוגת רשימה</string>
+-    <string name="post_list_toggle_item_layout_cards_view">החלפה לתצוגת כרטיסים</string>
+     <string name="posts_trashed_empty">אין לך פוסטים שהועברו לפח</string>
+     <string name="posts_draft_empty">אין לך אף פוסט שנשמר כטיוטה</string>
+     <string name="posts_scheduled_empty">אין לך אף פוסט מתוזמן לפרסום</string>
+diff --git a/WordPress/src/main/res/values-id/strings.xml b/WordPress/src/main/res/values-id/strings.xml
+index 2430dba5234..8d23ca8d2df 100644
+--- a/WordPress/src/main/res/values-id/strings.xml
++++ b/WordPress/src/main/res/values-id/strings.xml
+@@ -2076,8 +2076,6 @@ Language: id
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Membuang pos ini juga akan menghapus perubahan yang belum disimpan, Anda yakin ingin melanjutkan?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Perubahan lokal</string>
+     <string name="button_move_to_draft">Pindahkan ke Konsep</string>
+-    <string name="post_list_toggle_item_layout_list_view">Beralih ke tampilan daftar</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Beralih ke tampilan kartu</string>
+     <string name="posts_trashed_empty">Anda tidak memiliki pos yang dibuang</string>
+     <string name="posts_draft_empty">Anda tidak memiliki pos konsep</string>
+     <string name="posts_scheduled_empty">Anda belum memiliki pos terjadwal</string>
+diff --git a/WordPress/src/main/res/values-it/strings.xml b/WordPress/src/main/res/values-it/strings.xml
+index 87b25c09a67..7e66ddb3fd6 100644
+--- a/WordPress/src/main/res/values-it/strings.xml
++++ b/WordPress/src/main/res/values-it/strings.xml
+@@ -2074,8 +2074,6 @@ Language: it
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">L\'eliminazione di questo articolo comporterà anche l\'eliminazione delle modifiche non salvate. Continuare?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Modifiche in locale</string>
+     <string name="button_move_to_draft">Sposta in bozze</string>
+-    <string name="post_list_toggle_item_layout_list_view">Passa alla vista a lista</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Passa alla vista a schede</string>
+     <string name="posts_trashed_empty">Non sono presenti articoli nel cestino</string>
+     <string name="posts_draft_empty">Non sono presenti articoli in bozze</string>
+     <string name="posts_scheduled_empty">Non sono presenti articoli programmati</string>
+diff --git a/WordPress/src/main/res/values-ja/strings.xml b/WordPress/src/main/res/values-ja/strings.xml
+index 197b3361ff3..11e389fb860 100644
+--- a/WordPress/src/main/res/values-ja/strings.xml
++++ b/WordPress/src/main/res/values-ja/strings.xml
+@@ -2070,8 +2070,6 @@ Language: ja_JP
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">この投稿をゴミ箱に移動すると保存されていない変更も破棄されます。続行してもよいですか ?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">ローカルの変更</string>
+     <string name="button_move_to_draft">下書きに移動</string>
+-    <string name="post_list_toggle_item_layout_list_view">リスト表示に切り替え</string>
+-    <string name="post_list_toggle_item_layout_cards_view">カード表示に切り替え</string>
+     <string name="posts_trashed_empty">ゴミ箱に移動済みの投稿はありません</string>
+     <string name="posts_draft_empty">投稿の下書きはありません</string>
+     <string name="posts_scheduled_empty">予約済み投稿はありません</string>
+diff --git a/WordPress/src/main/res/values-kmr/strings.xml b/WordPress/src/main/res/values-kmr/strings.xml
+index 3161c258891..9713eb52116 100644
+--- a/WordPress/src/main/res/values-kmr/strings.xml
++++ b/WordPress/src/main/res/values-kmr/strings.xml
+@@ -803,8 +803,6 @@ Language: ku_TR
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Jêbirina vê şandiyê ew ê guhertinên netomarkirî jî rake. Tu bi rastî jî dixwazî dewam bikî?</string>
+     <string name="posts_published_empty">Te hîn ti şandî neweşandiye</string>
+     <string name="button_move_to_draft">Veguhezîne Reşnivîsê</string>
+-    <string name="post_list_toggle_item_layout_list_view">Derbasî xuyanga lîsteyî bibe</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Derbasî xuyanga kartan bibe</string>
+     <string name="posts_trashed_empty">Şandiyên te yên hatine jêbirin tune ne</string>
+     <string name="posts_draft_empty">Ti şandiyên te yên reşnivîsî tune ne</string>
+     <string name="posts_scheduled_empty">Ti şandiyên te yên demsazkirî tune ne</string>
+diff --git a/WordPress/src/main/res/values-ko/strings.xml b/WordPress/src/main/res/values-ko/strings.xml
+index a4205c7c36f..6a2b2d7c156 100644
+--- a/WordPress/src/main/res/values-ko/strings.xml
++++ b/WordPress/src/main/res/values-ko/strings.xml
+@@ -2073,8 +2073,6 @@ Language: ko_KR
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">이 글을 휴지통에 버리면 로컬 변경 사항이 취소됩니다. 계속하시겠습니까?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">로컬 변경</string>
+     <string name="button_move_to_draft">임시글로 이동하기</string>
+-    <string name="post_list_toggle_item_layout_list_view">목록 보기로 전환</string>
+-    <string name="post_list_toggle_item_layout_cards_view">카드 보기로 전환</string>
+     <string name="posts_trashed_empty">휴지통에 버린 글이 없습니다.</string>
+     <string name="posts_draft_empty">임시글이 없습니다.</string>
+     <string name="posts_scheduled_empty">예약한 글이 없습니다.</string>
+diff --git a/WordPress/src/main/res/values-lv/strings.xml b/WordPress/src/main/res/values-lv/strings.xml
+index 507abb622f4..0079323f126 100644
+--- a/WordPress/src/main/res/values-lv/strings.xml
++++ b/WordPress/src/main/res/values-lv/strings.xml
+@@ -2027,8 +2027,6 @@ Language: lv
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Izmetot šo ziņu, tiks izmestas arī nesaglabātās izmaiņas. Vai tiešām vēlaties turpināt?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Vietējās izmaiņas</string>
+     <string name="button_move_to_draft">Pārvietot uz melnrakstu</string>
+-    <string name="post_list_toggle_item_layout_list_view">Pārslēgties uz saraksta skatu</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Pārslēgties uz karšu skatu</string>
+     <string name="posts_trashed_empty">Jums nav nevienas atkritnē ievietotas ziņas</string>
+     <string name="posts_draft_empty">Jums nav neviena ziņas melnraksta</string>
+     <string name="posts_scheduled_empty">Jums nav ieplānotu ziņu</string>
+diff --git a/WordPress/src/main/res/values-nb/strings.xml b/WordPress/src/main/res/values-nb/strings.xml
+index 9e72e47f3ee..d52bf96ee24 100644
+--- a/WordPress/src/main/res/values-nb/strings.xml
++++ b/WordPress/src/main/res/values-nb/strings.xml
+@@ -976,8 +976,6 @@ Language: nb_NO
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Å kaste dette innlegget vil også forkaste lokale endringer som ikke er lagret. Er du sikker på at du vil fortsette?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Lokale endringer</string>
+     <string name="button_move_to_draft">Flytt til kladd</string>
+-    <string name="post_list_toggle_item_layout_list_view">Bytt til listevisning</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Flytt til kortvisning</string>
+     <string name="posts_trashed_empty">Du har ingen kastede innlegg</string>
+     <string name="posts_draft_empty">Du har ingen kladder til innlegg</string>
+     <string name="posts_scheduled_empty">Du har ingen planlagte innlegg</string>
+diff --git a/WordPress/src/main/res/values-nl/strings.xml b/WordPress/src/main/res/values-nl/strings.xml
+index 4d9cb591876..2a3cef9cd4b 100644
+--- a/WordPress/src/main/res/values-nl/strings.xml
++++ b/WordPress/src/main/res/values-nl/strings.xml
+@@ -2042,8 +2042,6 @@ Language: nl
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Door dit bericht naar de prullenbak te verplaatsen, worden niet bewaarde wijzigingen genegeerd. Weet je zeker dat je wil doorgaan?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Lokale wijzigingen</string>
+     <string name="button_move_to_draft">Verplaatsen naar concept</string>
+-    <string name="post_list_toggle_item_layout_list_view">Overschakelen op lijstweergave</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Overschakelen op kaartweergave</string>
+     <string name="posts_trashed_empty">Je hebt geen verwijderde berichten</string>
+     <string name="posts_draft_empty">Je hebt geen conceptberichten</string>
+     <string name="posts_scheduled_empty">Je hebt geen geplande berichten</string>
+diff --git a/WordPress/src/main/res/values-pl/strings.xml b/WordPress/src/main/res/values-pl/strings.xml
+index 39fca999abe..2efab3be035 100644
+--- a/WordPress/src/main/res/values-pl/strings.xml
++++ b/WordPress/src/main/res/values-pl/strings.xml
+@@ -1643,12 +1643,10 @@ Language: pl
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Usunięcie tego wpisu anuluje niezapisane zmiany, czy jesteś pewien/pewna że chcesz kontynuować?</string>
+     <string name="stats_menu_move_down">Przenieś w dół</string>
+     <string name="button_move_to_draft">Przesuń do szkiców</string>
+-    <string name="post_list_toggle_item_layout_list_view">Przełącz na widok listy</string>
+     <string name="posts_trashed_empty">Nie masz żadnych usuniętych wpisów</string>
+     <string name="posts_draft_empty">Nie masz żadnych wpisów będących szkicami</string>
+     <string name="posts_scheduled_empty">Nie masz żadnych zaplanowanych wpisów</string>
+     <string name="posts_published_empty">Nie opublikowałeś jeszcze żadnych wpisów</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Przełącz na widok kart</string>
+     <string name="notification_wpcom_username_needed">Zaloguj się za pomocą swojej nazwy użytkownika i hasła.</string>
+     <string name="error_user_username_instead_of_email">Zaloguj się przy pomocy użytkonika WordPress.com zamiast swojego adresu email.</string>
+     <string name="stats_insights_average_words">Średnio słów/wpis</string>
+diff --git a/WordPress/src/main/res/values-pt-rBR/strings.xml b/WordPress/src/main/res/values-pt-rBR/strings.xml
+index 10d2cc1be47..e5ed2802eb3 100644
+--- a/WordPress/src/main/res/values-pt-rBR/strings.xml
++++ b/WordPress/src/main/res/values-pt-rBR/strings.xml
+@@ -1922,8 +1922,6 @@ Language: pt_BR
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Mover esse post para a lixeira também apagará as alterações não salvas. Você tem certeza de que deseja continuar?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Alterações locais</string>
+     <string name="button_move_to_draft">Mover para rascunho</string>
+-    <string name="post_list_toggle_item_layout_list_view">Mudar para visualização de lista</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Mudar para visualização de cartão</string>
+     <string name="posts_trashed_empty">Não há nenhum post na lixeira</string>
+     <string name="posts_draft_empty">Não há nenhum rascunho de post</string>
+     <string name="posts_scheduled_empty">Não há nenhum post agendado</string>
+diff --git a/WordPress/src/main/res/values-ro/strings.xml b/WordPress/src/main/res/values-ro/strings.xml
+index b53f53386b6..332727702ac 100644
+--- a/WordPress/src/main/res/values-ro/strings.xml
++++ b/WordPress/src/main/res/values-ro/strings.xml
+@@ -2076,8 +2076,6 @@ Language: ro
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Aruncarea acestui articol la gunoi va anula și modificările nesalvate, sigur vrei să continui?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Modificări locale</string>
+     <string name="button_move_to_draft">Mută în ciorne</string>
+-    <string name="post_list_toggle_item_layout_list_view">Comută la vizualizarea listei</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Comută la vizualizarea cardurilor</string>
+     <string name="posts_trashed_empty">Nu ai niciun articol aruncat la gunoi</string>
+     <string name="posts_draft_empty">Nu ai niciun articol în ciornă</string>
+     <string name="posts_scheduled_empty">Nu ai niciun articol programat</string>
+diff --git a/WordPress/src/main/res/values-ru/strings.xml b/WordPress/src/main/res/values-ru/strings.xml
+index bc28f032e04..828b87d71bd 100644
+--- a/WordPress/src/main/res/values-ru/strings.xml
++++ b/WordPress/src/main/res/values-ru/strings.xml
+@@ -2076,8 +2076,6 @@ Language: ru
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Удаление в корзину этой записи отменит несохраненные изменения, вы точно хотите продолжить?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Локальные изменения</string>
+     <string name="button_move_to_draft">Переместить в черновики</string>
+-    <string name="post_list_toggle_item_layout_list_view">Переключиться на просмотр списком</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Переключиться на просмотр плиткой</string>
+     <string name="posts_trashed_empty">У вас нет записей удаленных в корзину</string>
+     <string name="posts_draft_empty">У вас нет черновиков записей</string>
+     <string name="posts_scheduled_empty">У вас нет запланированных записей</string>
+diff --git a/WordPress/src/main/res/values-sq/strings.xml b/WordPress/src/main/res/values-sq/strings.xml
+index ab98955d28a..be9370e1143 100644
+--- a/WordPress/src/main/res/values-sq/strings.xml
++++ b/WordPress/src/main/res/values-sq/strings.xml
+@@ -2060,8 +2060,6 @@ Language: sq_AL
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Shpënia te hedhurinat e këtij postimi do të hedhë tej ndryshimet e paruajtura, jeni i sigurt se doni të vazhdohet?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Ndryshime vendore</string>
+     <string name="button_move_to_draft">Kaloje te Skica</string>
+-    <string name="post_list_toggle_item_layout_list_view">Kalo te pamja listë</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Kalo te pamja karta</string>
+     <string name="posts_trashed_empty">S’keni postime të shpëna te hedhurinat</string>
+     <string name="posts_draft_empty">S’keni ndonjë postim skicë</string>
+     <string name="posts_scheduled_empty">S’keni postime të planifikuara për botim</string>
+diff --git a/WordPress/src/main/res/values-sv/strings.xml b/WordPress/src/main/res/values-sv/strings.xml
+index ae6f3f390d1..f0cfd763628 100644
+--- a/WordPress/src/main/res/values-sv/strings.xml
++++ b/WordPress/src/main/res/values-sv/strings.xml
+@@ -2076,8 +2076,6 @@ Language: sv_SE
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Om du lägger detta inlägg i papperskorgen kommer redigering som inte sparats att kastas. Vill du fortsätta?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Lokala ändringar</string>
+     <string name="button_move_to_draft">Flytta till utkast</string>
+-    <string name="post_list_toggle_item_layout_list_view">Växla till listvy</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Växla till kortvy</string>
+     <string name="posts_trashed_empty">Du har inga inlägg i papperskorgen</string>
+     <string name="posts_draft_empty">Du har inte några utkast till inlägg</string>
+     <string name="posts_scheduled_empty">Du har inte några schemalagda inlägg</string>
+diff --git a/WordPress/src/main/res/values-tr/strings.xml b/WordPress/src/main/res/values-tr/strings.xml
+index 67192188116..9144c4ba02f 100644
+--- a/WordPress/src/main/res/values-tr/strings.xml
++++ b/WordPress/src/main/res/values-tr/strings.xml
+@@ -2076,8 +2076,6 @@ Language: tr
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Bu yazının çöpe taşınması, kaydedilmeyen değişiklikleri yok sayar. Devam etmek istediğinizden emin misiniz?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Yerel değişiklikler</string>
+     <string name="button_move_to_draft">Taslaklara taşı</string>
+-    <string name="post_list_toggle_item_layout_list_view">Liste görünümüne geç</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Kart görünümüne geç</string>
+     <string name="posts_trashed_empty">Silinmiş gönderiniz yok</string>
+     <string name="posts_draft_empty">Taslak gönderiniz yok</string>
+     <string name="posts_scheduled_empty">Takvime eklenmiş yazınız yok</string>
+diff --git a/WordPress/src/main/res/values-vi/strings.xml b/WordPress/src/main/res/values-vi/strings.xml
+index 36685a2468b..0fa7d9465db 100644
+--- a/WordPress/src/main/res/values-vi/strings.xml
++++ b/WordPress/src/main/res/values-vi/strings.xml
+@@ -1608,8 +1608,6 @@ Language: vi_VN
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">Mọi thay đổi chưa lưu sẽ mất nếu bạn cho bài này vào thùng rác, vẫn tiếp tục?</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">Thay đổi cục bộ</string>
+     <string name="button_move_to_draft">Chuyển về nháp</string>
+-    <string name="post_list_toggle_item_layout_list_view">Xem dạng danh sách</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Xem dạng thẻ</string>
+     <string name="posts_trashed_empty">Thùng rác trống</string>
+     <string name="posts_draft_empty">Bạn không có bài viết nháp</string>
+     <string name="posts_scheduled_empty">Bạn không có bài viết đã lên lịch</string>
+diff --git a/WordPress/src/main/res/values-zh-rCN/strings.xml b/WordPress/src/main/res/values-zh-rCN/strings.xml
+index 02570b00b72..9a5686b90ec 100644
+--- a/WordPress/src/main/res/values-zh-rCN/strings.xml
++++ b/WordPress/src/main/res/values-zh-rCN/strings.xml
+@@ -2069,8 +2069,6 @@ Language: zh_CN
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">将此文章放入回收站还将放弃未保存的更改，是否确定要继续？</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">本地更改</string>
+     <string name="button_move_to_draft">移动到草稿</string>
+-    <string name="post_list_toggle_item_layout_list_view">切换到列表视图</string>
+-    <string name="post_list_toggle_item_layout_cards_view">切换到卡片视图</string>
+     <string name="posts_trashed_empty">您未将任何文章放至回收站</string>
+     <string name="posts_draft_empty">您没有任何草稿文章</string>
+     <string name="posts_scheduled_empty">您没有任何预发布的文章</string>
+diff --git a/WordPress/src/main/res/values-zh-rHK/strings.xml b/WordPress/src/main/res/values-zh-rHK/strings.xml
+index 9fbd192629d..84ffe6aefca 100644
+--- a/WordPress/src/main/res/values-zh-rHK/strings.xml
++++ b/WordPress/src/main/res/values-zh-rHK/strings.xml
+@@ -2071,8 +2071,6 @@ Language: zh_TW
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">將這篇文章移至垃圾桶也會捨棄未儲存的變更，確定要繼續此操作？</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">本機變更</string>
+     <string name="button_move_to_draft">移至草稿</string>
+-    <string name="post_list_toggle_item_layout_list_view">切換至清單檢視</string>
+-    <string name="post_list_toggle_item_layout_cards_view">切換至卡片檢視</string>
+     <string name="posts_trashed_empty">你沒有任何已移至垃圾桶的文章</string>
+     <string name="posts_draft_empty">你沒有任何文章草稿</string>
+     <string name="posts_scheduled_empty">你沒有任何已安排時間的文章</string>
+diff --git a/WordPress/src/main/res/values-zh-rTW/strings.xml b/WordPress/src/main/res/values-zh-rTW/strings.xml
+index 9fbd192629d..84ffe6aefca 100644
+--- a/WordPress/src/main/res/values-zh-rTW/strings.xml
++++ b/WordPress/src/main/res/values-zh-rTW/strings.xml
+@@ -2071,8 +2071,6 @@ Language: zh_TW
+     <string name="dialog_confirm_trash_losing_unsaved_changes_message">將這篇文章移至垃圾桶也會捨棄未儲存的變更，確定要繼續此操作？</string>
+     <string name="dialog_confirm_trash_losing_local_changes_title">本機變更</string>
+     <string name="button_move_to_draft">移至草稿</string>
+-    <string name="post_list_toggle_item_layout_list_view">切換至清單檢視</string>
+-    <string name="post_list_toggle_item_layout_cards_view">切換至卡片檢視</string>
+     <string name="posts_trashed_empty">你沒有任何已移至垃圾桶的文章</string>
+     <string name="posts_draft_empty">你沒有任何文章草稿</string>
+     <string name="posts_scheduled_empty">你沒有任何已安排時間的文章</string>
+diff --git a/WordPress/src/main/res/values/strings.xml b/WordPress/src/main/res/values/strings.xml
+index bcf57458335..c84531ba733 100644
+--- a/WordPress/src/main/res/values/strings.xml
++++ b/WordPress/src/main/res/values/strings.xml
+@@ -120,6 +120,8 @@
+     <string name="me">Me</string>
+     <string name="everyone">Everyone</string>
+ 
++    <string name="experimental_badge">&lt;Experimental&gt;</string>
++
+     <!-- CAB -->
+     <string name="cab_selected">%d selected</string>
+ 
+@@ -174,11 +176,11 @@
+     <string name="media_upload_state_failed">Upload Failed</string>
+     <string name="media_upload_state_uploaded">Uploaded</string>
+ 
+-    <string name="media_encoder_quality_80">Low</string>
+-    <string name="media_encoder_quality_85">Medium</string>
+-    <string name="media_encoder_quality_90">High</string>
+-    <string name="media_encoder_quality_95">Very High</string>
+-    <string name="media_encoder_quality_100">Maximum</string>
++    <string name="media_encoder_quality_low">Low</string>
++    <string name="media_encoder_quality_medium">Medium</string>
++    <string name="media_encoder_quality_high">High</string>
++    <string name="media_encoder_quality_very_high">Very High</string>
++    <string name="media_encoder_quality_maximum">Maximum</string>
+     <string name="media_browse_for_items">Browse for items</string>
+ 
+     <!-- Edit Media -->
+@@ -278,9 +280,7 @@
+     <string name="posts_draft_empty">You don\'t have any draft posts</string>
+     <string name="posts_trashed_empty">You don\'t have any trashed posts</string>
+     <string name="multiple_status_label_delimiter" translatable="false">\u0020·\u0020</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Switch to cards view</string>
+-    <string name="post_list_toggle_item_layout_list_view">Switch to list view</string>
+-    <string name="post_list_toggle_author_filter">Filter by author</string>
++<string name="post_list_toggle_author_filter">Filter by author</string>
+     <string name="post_waiting_for_connection_publish">We\'ll publish the post when your device is back online.</string>
+     <string name="post_waiting_for_connection_pending">We\'ll submit your post for review when your device is back online.</string>
+     <string name="post_waiting_for_connection_scheduled">We\'ll schedule your post when your device is back online.</string>
+@@ -296,6 +296,7 @@
+     <string name="button_publish">Publish</string>
+     <string name="button_sync">Sync</string>
+     <string name="button_view">View</string>
++    <string name="button_read">Read</string>
+     <string name="button_preview">Preview</string>
+     <string name="button_insert">Insert</string>
+     <string name="button_stats">Stats</string>
+@@ -309,6 +310,8 @@
+     <string name="button_copy">Duplicate</string>
+     <string name="button_copy_link">Copy link</string>
+     <string name="button_promote_with_blaze">Promote with Blaze</string>
++    <string name="button_comments" translatable="false">@string/comments</string>
++    <string name="button_share" translatable="false">@string/share_desc</string>
+ 
+     <!-- post uploads -->
+     <string name="upload_failed_param">Upload failed for \"%s\"</string>
+@@ -372,6 +375,18 @@
+     <string name="snackbar_conflict_web_version_discarded">Web version discarded</string>
+     <string name="snackbar_conflict_undo">Undo</string>
+ 
++    <!-- Post Resolution Overlay -->
++    <string name="dialog_post_conflict_title">Resolve Conflict</string>
++    <string name="dialog_post_conflict_body">The post was modified on another device. Please select the version of the post to keep.</string>
++    <string name="dialog_post_conflict_body_for_page">The page was modified on another device. Please select the version of the page to keep.</string>
++    <string name="dialog_post_conflict_current_device">Current Device</string>
++    <string name="dialog_post_conflict_another_device">Another Device</string>
++    <string name="dialog_post_autosave_title">Autosave Available</string>
++    <string name="dialog_post_autosave_body">You\'ve made unsaved changes to this post from a different device. Please select the version of the post to keep.</string>
++    <string name="dialog_post_autosave_body_for_page">You\'ve made unsaved changes to this page from a different device. Please select the version of the page to keep.</string>
++    <string name="dialog_post_autosave_current_device" translatable="false">@string/dialog_post_conflict_current_device</string>
++    <string name="dialog_post_autosave_another_device" translatable="false">@string/dialog_post_conflict_another_device</string>
++
+     <!-- post autosave revision dialog -->
+     <string name="dialog_confirm_autosave_title">Which version would you like to edit?</string>
+     <string name="dialog_confirm_autosave_body_first_part">You recently made changes to this post but didn\'t save them. Choose a version to load:\n\n</string>
+@@ -943,6 +958,7 @@
+     <string name="debug_settings_missing_developed_feature" translatable="false">Don\'t see a feature you\'re working on? Check that your feature config file is annotated with the FeatureInDevelopment annotation.</string>
+     <string name="debug_settings_tools" translatable="false">Tools</string>
+     <string name="debug_settings_force_show_weekly_roundup" translatable="false">Force show Weekly Roundup notification</string>
++    <string name="debug_settings_debug_flags_screen" translatable="false">All shared preference flags</string>
+ 
+     <!-- Debug cookies -->
+     <string name="debug_cookies_title" translatable="false">Debug cookies</string>
+@@ -951,6 +967,15 @@
+     <string name="debug_cookies_cookie_name_hint" translatable="false">cookie_name</string>
+     <string name="debug_cookies_cookie_value_hint" translatable="false">cookie_value</string>
+ 
++    <!-- Design System -->
++    <string name="preference_design_system" translatable="false">Design System</string>
++    <string name="design_system_foundation" translatable="false">Foundation</string>
++    <string name="design_system_components" translatable="false">Components</string>
++    <string name="design_system_foundation_colors" translatable="false">Colors</string>
++    <string name="design_system_foundation_fonts" translatable="false">Fonts</string>
++    <string name="design_system_foundation_lengths" translatable="false">Lengths</string>
++    <string name="design_system_components_dsbutton" translatable="false">DSButton</string>
++
+     <!-- stats -->
+     <string name="stats">Stats</string>
+     <string name="stats_jetpack_connection_setup_info">To use Stats on your WordPress site, you\'ll need to install the Jetpack plugin.</string>
+@@ -998,6 +1023,9 @@
+     <string name="stats_site_positive_utc">Site timezone (UTC + %s)</string>
+     <string name="stats_site_negative_utc">Site timezone (UTC - %s)</string>
+     <string name="stats_data_not_recorded_for_period">File download stats were not recorded before June 28th 2019.</string>
++    <string name="stats_emails_latest_emails_label">Latest emails</string>
++    <string name="stats_emails_opens_label">Opens</string>
++    <string name="stats_emails_clicks_label">Clicks</string>
+ 
+     <!-- Number suffixes -->
+     <string name="negative_prefix">-%s</string>
+@@ -1295,6 +1323,7 @@
+     <string name="stats_view_total_likes">Total Likes</string>
+     <string name="stats_view_total_comments">Total Comments</string>
+     <string name="stats_view_total_followers">Total Followers</string>
++    <string name="stats_view_emails">Emails</string>
+ 
+     <!-- stats: followers -->
+     <string name="stats_followers_seconds_ago">seconds ago</string>
+@@ -1325,7 +1354,9 @@
+     <string name="stats_search_terms_unknown_search_terms">Unknown Search Terms</string>
+ 
+     <!-- Stats insights -->
++    <string name="stats_traffic">Traffic</string>
+     <string name="stats_insights">Insights</string>
++    <string name="stats_subscribers">Subscribers</string>
+     <string name="stats_insights_all_time">All-time posts, views, and visitors</string>
+     <string name="stats_insights_today">Today\'s Stats</string>
+     <string name="stats_insights_views_and_visitors">Views &amp; Visitors</string>
+@@ -1431,6 +1462,8 @@
+     <string name="stats_file_downloads_title_label">File</string>
+     <string name="stats_file_downloads_value_label">Downloads</string>
+     <string name="stats_follower_types_pie_chart_total_label">Totals</string>
++    <string name="stats_subscribers_subscribers">Subscribers</string>
++    <string name="stats_subscribers_emails">Emails</string>
+ 
+     <string name="stats_select_previous_period_description">Select previous period</string>
+     <string name="stats_select_next_period_description">Select next period</string>
+@@ -1494,6 +1527,7 @@
+     <string name="notifications_tab_title_comments">Comments</string>
+     <string name="notifications_tab_title_follows">Follows</string>
+     <string name="notifications_tab_title_likes">Likes</string>
++    <string name="notifications_unread_content_description">Unread</string>
+ 
+     <!-- Notification permission -->
+     <string name="notifications_permission_fix">Fix</string>
+@@ -1560,6 +1594,8 @@
+     <string name="notifications_tab_dialog_main_off_title">To see notifications on notifications tab for this site, turn Notifications for this site on.</string>
+     <string name="notifications_tab_dialog_main_off_message">Turning Notifications for this site off will disable notifications display on notifications tab for this site. You can fine-tune which kind of notification you see after turning Notifications for this site on.</string>
+ 
++    <string name="notifications_action_mark_all_as_read">Mark all as read</string>
++
+     <string name="main_switch_default_title_on">On</string>
+     <string name="main_switch_default_title_off">Off</string>
+ 
+@@ -1609,27 +1645,24 @@
+     <string name="like_title_singular">1 Like</string>
+     <string name="like_title_plural">%d Likes</string>
+     <string name="like_faces_error_loading_message">Error loading like data. %s.</string>
+-    <!-- Note for translators: the '&lt;a href=""&gt;' and '&lt;/a&gt;' must be kept without
+-    translations/modifications and are used to enclose the portion of the text
+-    that will be rendered as underlined. -->
+-    <string name="like_faces_you_like_text">&lt;a href=""&gt;You&lt;/a&gt; like this.</string>
+-    <string name="like_faces_you_plus_one_like_text">&lt;a href=""&gt;You and 1 blogger&lt;/a&gt; like this.</string>
+-    <string name="like_faces_you_plus_others_like_text">&lt;a href=""&gt;You and %1$s bloggers&lt;/a&gt; like this.</string>
+-    <string name="like_faces_one_blogger_likes_text">&lt;a href=""&gt;1 blogger&lt;/a&gt; likes this.</string>
+-    <string name="like_faces_others_like_text">&lt;a href=""&gt;%1$s bloggers&lt;/a&gt; like this.</string>
+ 
+     <!-- reader -->
+     <string name="reader">Reader</string>
+     <string name="reader_filter_cta">Filter</string>
+-    <string name="reader_filter_sites_title">Sites</string>
+-    <string name="reader_filter_tags_title">Topics</string>
+-    <string name="reader_filter_main_title">Following</string>
+-    <string name="reader_filter_empty_sites_list">See the newest posts from sites you follow</string>
+-    <string name="reader_filter_empty_tags_list">You can follow posts on a specific subject by adding a topic</string>
+-    <string name="reader_filter_self_hosted_empty_sites_list">Log in to WordPress.com to see the latest posts from sites you follow</string>
+-    <string name="reader_filter_self_hosted_empty_tagss_list">Log in to WordPress.com to see the latest posts from topics you follow</string>
+-    <string name="reader_filter_empty_sites_action">Follow a site</string>
+-    <string name="reader_filter_empty_tags_action">Add a topic</string>
++    <string name="reader_filter_by_blog_title">Filter by blog</string>
++    <string name="reader_filter_by_tag_title">Filter by tag</string>
++    <string name="reader_filter_empty_blogs_list">See the newest posts from blogs you\'re subscribed to</string>
++    <string name="reader_filter_self_hosted_empty_blogs_list">Log in to WordPress.com to see the latest posts from blogs you\'re subscribed to</string>
++    <string name="reader_filter_self_hosted_empty_tags_list">Log in to WordPress.com to see the latest posts from tags you\'re subscribed to</string>
++    <string name="reader_filter_empty_blogs_action">Subscribe to a blog</string>
++    <string name="reader_filter_empty_tags_add_action">Add a tag</string>
++    <string name="reader_filter_empty_blogs_list_title">No blog subscriptions</string>
++    <string name="reader_filter_empty_blogs_list_text">Subscribe to blogs in Discover and you’ll see their latest posts here. Or search for a blog that you like already.</string>
++    <string name="reader_filter_empty_tags_list_title">No tags</string>
++    <string name="reader_filter_empty_tags_list_follow_text">Follow a tag and you’ll be able to see the best posts from it here.</string>
++    <string name="reader_filter_empty_blogs_action_search">Search for a blog</string>
++    <string name="reader_filter_empty_tags_action_suggested">Suggested tags</string>
++    <string name="reader_filter_empty_tags_action_follow">Follow a tag</string>
+     <string name="reader_filter_self_hosted_empty_sites_tags_action">Log in to WordPress.com</string>
+     <string name="reader_dot_separator" translatable="false">\u0020\u2022\u0020</string>
+     <string name="reader_error_request_failed_title">There was a problem handling the request. Please try again later.</string>
+@@ -1637,16 +1670,16 @@
+     <string name="reader_expandable_tags_view_overflow_indicator_expand_title_new" translatable="false">+%1$s</string>
+     <string name="reader_expandable_tags_view_overflow_indicator_collapse_title">Hide</string>
+     <string name="reader_discover_interests_header">You might like</string>
+-    <string name="reader_discover_recommended_blogs_header">Sites to follow</string>
++    <string name="reader_discover_recommended_blogs_to_subscribe_header">Blogs to subscribe to</string>
+     <string name="reader_discover_recommended_header_new">You might like</string>
+     <string name="reader_post_details_header_by_author_name">By</string>
+     <string name="show_n_hidden_items_desc">%1$s more items</string>
+     <string name="reader_discover_empty_title">Welcome!</string>
+-    <string name="reader_discover_empty_subtitle">Follow topics to discover new blogs</string>
++    <string name="reader_discover_empty_subtitle_follow">Follow tags to discover new blogs</string>
+     <string name="reader_discover_no_posts_title">No recent posts</string>
+-    <string name="reader_discover_no_posts_subtitle">Try following more topics to broaden the search</string>
++    <string name="reader_discover_no_posts_follow_subtitle">Try following more tags to broaden the search</string>
+     <string name="reader_discover_empty_button_text">Get Started</string>
+-    <string name="reader_discover_no_posts_button_text">Follow topics</string>
++    <string name="reader_discover_no_posts_button_tags_text_follow">Follow tags</string>
+     <string name="reader_author_with_blog_name" translatable="false">%1$s ▸ %2$s</string>
+     <string name="reader_follow_comments_null_response">No response received</string>
+     <string name="reader_follow_comments_bad_format_response">Invalid response received</string>
+@@ -1666,6 +1699,52 @@
+     <string name="reader_marked_post_as_seen">Marked post as seen</string>
+     <string name="reader_marked_post_as_unseen">Marked post as unseen</string>
+     <string name="reader_error_changing_seen_status_of_unsupported_post">Can\'t toggle seen status of this post</string>
++    <string name="reader_search_content_description">Search</string>
++    <string name="reader_dropdown_menu_discover">Discover</string>
++    <string name="reader_dropdown_menu_subscriptions">Subscriptions</string>
++    <string name="reader_dropdown_menu_saved">Saved</string>
++    <string name="reader_dropdown_menu_liked">Liked</string>
++    <string name="reader_dropdown_menu_automattic">Automattic</string>
++    <string name="reader_dropdown_menu_lists">Lists</string>
++    <string name="reader_filter_chip_blog_zero">0 Blogs</string>
++    <string name="reader_filter_chip_blog_one">1 Blog</string>
++    <string name="reader_filter_chip_blog_other">%d Blogs</string>
++    <string name="reader_filter_chip_tag_zero">0 Tags</string>
++    <string name="reader_filter_chip_tag_one">1 Tag</string>
++    <string name="reader_filter_chip_tag_other">%d Tags</string>
++
++    <string name="reader_preferences_screen_preview_title">Reading Preferences</string>
++    <string name="reader_preferences_screen_preview_tags" translatable="false">reading,colors,fonts</string>
++    <string name="reader_preferences_screen_preview_text">Choose your colors, fonts and sizes. Preview your selection here, and read posts with your styles once you’re done.</string>
++
++    <!-- translators: %s is replaced with the string in reader_preferences_screen_preview_text_feedback_link, so please translate both in a way that the full final sentence make sense -->
++    <string name="reader_preferences_screen_preview_text_feedback">This is a new feature still in development. To help us improve it %s.</string>
++    <string name="reader_preferences_screen_preview_text_feedback_link">send your feedback</string>
++    <!-- translators: this is the accessibility label for this action and the verb should likely be translated in the infinitive, here's the usage context in English: "Double tap to 'send your feedback'." -->
++    <string name="reader_preferences_screen_preview_text_feedback_label">send your feedback</string>
++
++    <string name="reader_preferences_screen_theme_label">Color Scheme</string>
++    <string name="reader_preferences_theme_system">Default</string>
++    <string name="reader_preferences_theme_soft">Soft</string>
++    <string name="reader_preferences_theme_sepia">Sepia</string>
++    <string name="reader_preferences_theme_evening">Evening</string>
++    <string name="reader_preferences_theme_oled">OLED</string>
++    <string name="reader_preferences_theme_h4x0r">h4x0r</string>
++    <string name="reader_preferences_theme_candy">Candy</string>
++
++    <string name="reader_preferences_screen_font_family_label">Font</string>
++    <string name="reader_preferences_screen_font_family_preview" translatable="false">Aa</string>
++    <string name="reader_preferences_font_family_serif" translatable="false">Serif</string>
++    <string name="reader_preferences_font_family_sans" translatable="false">Sans</string>
++    <string name="reader_preferences_font_family_mono" translatable="false">Mono</string>
++
++    <string name="reader_preferences_screen_font_size_label">Font Size</string>
++    <string name="reader_preferences_font_size_extra_small">Extra small</string>
++    <string name="reader_preferences_font_size_small">Small</string>
++    <string name="reader_preferences_font_size_normal">Normal</string>
++    <string name="reader_preferences_font_size_large">Large</string>
++    <string name="reader_preferences_font_size_extra_large">Extra large</string>
++    <string name="reader_preferences_screen_font_size_preview" translatable="false">A</string>
+ 
+     <!-- editor -->
+     <string name="editor_post_saved_online">Post saved online</string>
+@@ -1681,6 +1760,8 @@
+     <string name="editor_uploading_draft">Your draft is uploading</string>
+     <string name="editor_post_converted_back_to_draft">Post converted back to draft</string>
+     <string name="editor_failed_to_insert_media_tap_to_retry">Failed to insert media.\nPlease tap to retry.</string>
++    <string name="editor_updating_content">Updating content</string>
++    <string name="editor_updating_content_failed">Failed to update content</string>
+ 
+     <!-- Post Settings -->
+     <string name="post_settings">Post settings</string>
+@@ -1760,6 +1841,7 @@
+     <string name="post_status_post_scheduled">Scheduled</string>
+     <string name="post_status_post_trashed">Trashed</string>
+     <string name="post_status_post_published">Published</string>
++    <string name="post_status_post_edited">Edited</string>
+ 
+     <string-array name="post_settings_statuses" translatable="false">
+         <item>@string/post_status_publish_post</item>
+@@ -1903,6 +1985,8 @@
+     <string name="local_post_autosave_revision_available">You\'ve made unsaved changes to this post</string>
+     <string name="local_page_is_conflicted" translatable="false">@string/local_post_is_conflicted</string>
+     <string name="local_page_autosave_revision_available">You\'ve made unsaved changes to this page</string>
++    <string name="page_upload_conflict_error">There is a revision of this page that is more recent</string>
++
+ 
+     <!-- Post Remote Preview -->
+     <string name="post_preview_saving_draft">Saving…</string>
+@@ -1969,6 +2053,8 @@
+     <string name="error_media_file_type_not_allowed">This file type is not allowed</string>
+     <string name="error_media_unexpected_empty_media_file_path">Unexpected empty file path for Media</string>
+     <string name="error_media_could_not_find_media_in_path">Could not find media file in path</string>
++    <string name="error_media_could_not_share_media_from_device">Unable to load the media for sharing. Please check the app\'s permissions
++        or use the app\'s media library.</string>
+     <string name="error_media_path_is_directory">The specified path is a directory instead of a Media file</string>
+     <string name="error_media_upload_failed_for_reason">Media upload failed.\n%1$s</string>
+     <string name="error_media_xmlrpc_not_allowed">Your action is not allowed</string>
+@@ -2044,7 +2130,7 @@
+     <string name="reader_save_for_later_display_name">Saved</string>
+     <string name="reader_discover_display_name">Discover</string>
+     <string name="reader_my_likes_display_name">Likes</string>
+-    <string name="reader_following_display_name">Following</string>
++    <string name="reader_subscribed_display_name">Subscribed</string>
+ 
+     <!-- timespan shown for posts/comments published within the past 60 seconds -->
+     <string name="timespan_now" tools:ignore="UnusedResources">now</string>
+@@ -2057,40 +2143,42 @@
+ 
+     <!-- activity titles -->
+     <string name="reader_title_applog">Application log</string>
+-    <string name="reader_title_blog_preview">Reader Site</string>
+-    <string name="reader_title_tag_preview">Topic</string>
++    <string name="reader_activity_title_blog_preview">Reader Blog</string>
++    <string name="reader_activity_title_tag_preview">Tag</string>
+     <string name="reader_title_post_detail">Reader Post</string>
+     <string name="reader_title_related_post_detail">Related Post</string>
+-    <string name="reader_title_subs">Manage Topics &amp; Sites</string>
++    <string name="reader_activity_title_manage_tags_blogs">Manage Tags &amp; Blogs</string>
+     <string name="reader_title_photo_viewer">%1$d of %2$d</string>
+     <string name="reader_title_comments" translatable="false">@string/comments</string>
+-    <string name="reader_title_interests">Follow topics</string>
++    <string name="reader_title_tags">Follow tags</string>
+ 
+     <!-- view pager titles -->
+-    <string name="reader_page_followed_tags">Followed topics</string>
+-    <string name="reader_page_followed_blogs">Followed sites</string>
++    <string name="reader_page_followed_tags_text_title">Followed tags</string>
++    <string name="reader_page_followed_blogs_title">Subscribed blogs</string>
+ 
+     <!-- menu text -->
+-    <string name="reader_menu_tags">Edit topics and sites</string>
+-    <string name="reader_menu_block_blog">Block this site</string>
++    <string name="reader_menu_tags_and_blogs">Edit tags and blogs</string>
++    <string name="reader_menu_block_this_blog">Block this blog</string>
+     <string name="reader_menu_report_post">Report this post</string>
+     <string name="reader_menu_report_user">Report this user</string>
+     <string name="reader_menu_mark_as_seen">Mark as seen</string>
+     <string name="reader_menu_mark_as_unseen">Mark as unseen</string>
+     <string name="reader_menu_block_user">Block user</string>
++    <string name="reader_menu_reading_preferences">Reading Preferences</string>
+ 
+     <!-- button text -->
+     <string name="reader_btn_share">Share</string>
+     <string name="reader_btn_follow">Follow</string>
+-    <string name="reader_btn_unfollow">Following</string>
++    <string name="reader_btn_subscribe">Subscribe</string>
++    <string name="reader_btn_subscribed">Subscribed</string>
+     <string name="reader_secondary_bookmark">Save</string>
+     <string name="reader_secondary_bookmarked">Saved</string>
+     <string name="reader_add_bookmark">Add to saved posts</string>
+     <string name="reader_remove_bookmark">Remove from saved posts</string>
+     <string name="reader_bookmark_snack_btn">View All</string>
+     <string name="reader_bookmark_snack_title">Post saved</string>
+-    <string name="reader_btn_notifications_off">Turn off site notifications</string>
+-    <string name="reader_btn_notifications_on">Turn on site notifications</string>
++    <string name="reader_btn_blog_notifications_off">Turn off blog notifications</string>
++    <string name="reader_btn_blog_notifications_on">Turn on blog notifications</string>
+     <string name="reader_btn_select_few_interests">Select a few to continue</string>
+     <string name="reader_btn_done">Done</string>
+     <string name="reader_btn_follow_comments">Follow conversation by email</string>
+@@ -2099,9 +2187,8 @@
+ 
+     <!-- accessibility content desciptions -->
+     <string name="reader_btn_remove_filter_content_description">Remove the current filter</string>
+-    <string name="reader_btn_select_filter_content_description">Select a Site or Tag to filter posts</string>
+-    <string name="reader_bottom_sheet_content_description">Select a Tag or Site, Pop Up Window</string>
+-    <string name="reader_choose_interests_content_description">Choose your topics</string>
++    <string name="reader_bottom_sheet_select_content_description">Select a Tag or Blog, Pop Up Window</string>
++    <string name="reader_choose_interests_tags_content_description">Choose your tags</string>
+ 
+     <string name="reader_followed_blog_notifications">Enable notifications for %1$s%2$s%3$s?</string>
+     <string name="reader_followed_blog_notifications_action">Enable</string>
+@@ -2110,27 +2197,27 @@
+     <!-- EditText hints -->
+     <string name="reader_hint_comment_on_post">Reply to post…</string>
+     <string name="reader_hint_comment_on_comment">Reply to comment…</string>
+-    <string name="reader_hint_add_tag_or_url">Enter a URL or topic to follow</string>
++    <string name="reader_hint_add_tag_or_url_follow">Enter a URL or tag to follow</string>
+     <string name="reader_hint_post_search">Search WordPress</string>
+-    <string name="reader_hint_search_followed_sites">Search followed sites</string>
++    <string name="reader_hint_search_subscribed_blogs">Search subscribed blogs</string>
+ 
+     <!-- TextView labels -->
+     <string name="reader_label_new_posts">New posts</string>
+     <string name="reader_label_new_posts_subtitle">Tap to show them</string>
+     <string name="reader_label_added_tag">Added %s</string>
+     <string name="reader_label_removed_tag">Removed %s</string>
+-    <string name="reader_label_followed_blog">Site followed</string>
++    <string name="reader_label_blog_subscribed">Blog subscribed</string>
+     <string name="reader_label_comments_closed">Comments are closed</string>
+     <string name="reader_label_view_original">View original article</string>
+-    <string name="reader_label_follow_count">%,d Followers</string>
+-    <string name="reader_label_followers_count">%s followers</string>
+-    <string name="reader_label_followers_count_single">1 follower</string>
++    <string name="reader_label_subscribe_count">%,d Subscribers</string>
++    <string name="reader_label_subscribers_count">%s subscribers</string>
++    <string name="reader_label_subscribers_count_single">1 subscriber</string>
+     <string name="reader_label_gap_marker">Load more posts</string>
+     <string name="reader_label_post_search_explainer">What would you like to find?</string>
+     <string name="reader_label_local_related_posts">More from %s</string>
+     <string name="reader_label_global_related_posts">More on WordPress.com</string>
+     <string name="reader_label_visit">Visit site</string>
+-    <string name="reader_label_choose_your_interests">Choose your topics</string>
++    <string name="reader_label_choose_interests">Choose your interests</string>
+     <string name="reader_view_comments">View comments</string>
+     <string name="reader_welcome_banner">Welcome to Reader. Discover millions of blogs at your fingertips.</string>
+     <string name="reader_label_toolbar_back">Back</string>
+@@ -2138,9 +2225,9 @@
+ 
+     <!-- reblog -->
+     <string name="reader_view_reblog">Reblog</string>
+-    <string name="reader_no_site_to_reblog_title">No available WordPress.com sites</string>
+-    <string name="reader_no_site_to_reblog_detail">Once you create a WordPress.com site, you can reblog content that you like to your own site.</string>
+-    <string name="reader_no_site_to_reblog_action">Manage Sites</string>
++    <string name="reader_no_blog_to_reblog_title">No available WordPress.com blogs</string>
++    <string name="reader_no_blog_to_reblog_detail">Once you create a WordPress.com blog, you can reblog content that you like to your own site.</string>
++    <string name="reader_no_blog_to_reblog_action">Manage Blogs</string>
+     <string name="reader_reblog_error">Reblog failed</string>
+     <string name="sitepicker_continue_flow">Continue</string>
+ 
+@@ -2161,20 +2248,20 @@
+ 
+     <!-- toast messages -->
+     <string name="reader_toast_err_comment_failed">Couldn\'t post your comment</string>
+-    <string name="reader_toast_err_tag_exists">You already follow this topic</string>
+-    <string name="reader_toast_err_tag_invalid">That isn\'t a valid topic</string>
+-    <string name="reader_toast_err_add_tag">Unable to add this topic</string>
+-    <string name="reader_toast_err_remove_tag">Unable to remove this topic</string>
++    <string name="reader_toast_err_tag_already_following">You\'re already following this tag</string>
++    <string name="reader_toast_err_tag_not_valid">That isn\'t a valid tag</string>
++    <string name="reader_toast_err_adding_tag">Unable to add this tag</string>
++    <string name="reader_toast_err_removing_tag">Unable to remove this tag</string>
+     <string name="reader_toast_err_share_intent">Unable to share</string>
+     <string name="reader_toast_err_view_image">Unable to view image</string>
+-    <string name="reader_toast_err_get_blog_info">Unable to show this site</string>
+-    <string name="reader_toast_err_already_follow_blog">You already follow this site</string>
+-    <string name="reader_toast_err_follow_blog">Unable to follow this site</string>
+-    <string name="reader_toast_err_follow_blog_not_found">This site could not be found</string>
+-    <string name="reader_toast_err_follow_blog_not_authorized">You are not authorized to access this site</string>
+-    <string name="reader_toast_err_unfollow_blog">Unable to unfollow this site</string>
+-    <string name="reader_toast_blog_blocked" tools:ignore="UnusedResources">Posts from this site will no longer be shown</string>
+-    <string name="reader_toast_err_block_blog" tools:ignore="UnusedResources">Unable to block this site</string>
++    <string name="reader_toast_err_show_blog">Unable to show this blog</string>
++    <string name="reader_toast_err_already_follow_this_blog">You are already subscribed to this blog</string>
++    <string name="reader_toast_err_unable_to_follow_blog">Unable to subscribe to this blog</string>
++    <string name="reader_toast_err_follow_blog_could_not_be_found">This blog could not be found</string>
++    <string name="reader_toast_err_follow_not_authorized_to_access_blog">You are not authorized to access this blog</string>
++    <string name="reader_toast_err_unable_to_unfollow_blog">Unable to unsubscribe from blog</string>
++    <string name="reader_toast_posts_from_this_blog_blocked">Posts from this blog will no longer be shown</string>
++    <string name="reader_toast_err_unable_to_block_blog">Unable to block this blog</string>
+     <string name="reader_toast_user_blocked">Posts from this user will no longer be shown</string>
+     <string name="reader_toast_err_generic">Unable to perform this action</string>
+     <string name="reader_toast_err_cannot_like_post">Failed to like this post</string>
+@@ -2198,19 +2285,20 @@
+     <string name="reader_empty_posts_no_connection" translatable="false">@string/no_network_title</string>
+     <string name="reader_empty_posts_request_failed">Unable to retrieve posts</string>
+     <string name="reader_self_hosted_select_filter">Use the filter button to find posts on specific subjects</string>
+-    <string name="reader_empty_posts_in_tag">No posts with this topic</string>
++    <string name="reader_no_posts_with_this_tag">No posts with this tag</string>
+     <string name="reader_empty_posts_in_tag_updating">Fetching posts…</string>
+-    <string name="reader_empty_posts_in_custom_list">The sites in this list haven\'t posted anything recently</string>
+-    <string name="reader_empty_followed_tags_subtitle">Add topics here to find posts about your favorite topics</string>
+-    <string name="reader_empty_followed_tags_title">No followed topics</string>
+-    <string name="reader_empty_recommended_blogs">No recommended sites</string>
+-    <string name="reader_empty_followed_blogs_title">No followed sites</string>
+-    <string name="reader_empty_followed_blogs_search_title">No sites matching your search</string>
+-    <string name="reader_empty_followed_blogs_description">When you follow sites, you\'ll see their content here</string>
++    <string name="reader_empty_blogs_posts_in_custom_list">The blogs in this list have not posted anything recently</string>
++    <string name="reader_empty_subscribed_tags_subtitle">Add tags here to find posts about your favorite topics</string>
++    <string name="reader_no_followed_tags_text_title">No followed tags</string>
++    <string name="reader_no_recommended_blogs_title">No recommended blogs</string>
++    <string name="reader_no_followed_blogs_title" translatable="false">@string/reader_filter_empty_blogs_list_title</string>
++    <string name="reader_no_followed_blogs_search_title">No blogs matching your search</string>
++    <string name="reader_no_followed_blogs_description" translatable="false">@string/reader_filter_empty_blogs_list_text</string>
++    <string name="reader_no_followed_blogs_description_subs">Subscribe to blogs in Discover or search for a blog that you like already.</string>
+     <string name="reader_empty_followed_blogs_no_recent_posts_title">No recent posts</string>
+-    <string name="reader_empty_followed_blogs_no_recent_posts_description">The sites you follow haven\'t posted anything recently</string>
+-    <string name="reader_empty_followed_blogs_button_discover">Discover sites</string>
+-    <string name="reader_empty_followed_blogs_button_followed">Go to following</string>
++    <string name="reader_empty_followed_blogs_subscribed_no_recent_posts_description">The blogs you\'re subscribed to haven\'t posted anything recently</string>
++    <string name="reader_no_followed_blogs_button_discover">Discover blogs</string>
++    <string name="reader_empty_followed_blogs_button_subscriptions">Go to subscriptions</string>
+     <string name="reader_empty_posts_liked_title">Nothing liked yet</string>
+     <string name="reader_empty_posts_liked_description">Posts that you like will appear here</string>
+     <string name="reader_empty_saved_posts_title">No posts saved — yet!</string>
+@@ -2222,7 +2310,7 @@
+     <string name="reader_comments_view_all">View all comments</string>
+     <string name="reader_comments_be_first_to_comment">Be the first to comment</string>
+     <string name="reader_comments_follow_conversation">Follow Conversation</string>
+-    <string name="reader_empty_posts_in_blog">This site is empty</string>
++    <string name="reader_no_posts_in_blog">This blog is empty</string>
+     <string name="reader_empty_search_title">No results found</string>
+     <string name="reader_empty_search_description">No results found for %s for your language</string>
+     <string name="reader_empty_search_request_failed">Unable to perform search</string>
+@@ -2325,7 +2413,7 @@
+     <string name="my_site_create_new_site">Create a new site for your business, magazine, or personal blog; or connect an existing WordPress installation.</string>
+     <string name="my_site_create_new_site_title">You don\'t have any sites</string>
+     <string name="my_site_add_new_site">Add new site</string>
+-    <string name="my_site_custom_domain_name">All WordPress.com plans include a custom domain name. Register your free premium domain now.</string>
++    <string name="my_site_custom_domain_name">All WordPress.com annual plans include a custom domain name. Register your free domain now.</string>
+     <string name="my_site_verify_your_email">Verify your email address - instructions sent to %s</string>
+     <string name="my_site_verify_your_email_without_email">Verify your email address - instructions sent to your email</string>
+     <string name="my_site_icon_dialog_title">Site Icon</string>
+@@ -2364,6 +2452,7 @@
+     <string name="my_site_todays_stat_card_likes" translatable="false">@string/stats_likes</string>
+     <string name="my_site_todays_stat_card_views" translatable="false">@string/stats_views</string>
+     <string name="my_site_todays_stat_card_visitors" translatable="false">@string/stats_visitors</string>
++    <string name="my_site_todays_stat_card_comments" translatable="false">@string/stats_comments</string>
+     <string name="my_site_todays_stats_get_more_views_message">Interested in building your audience? Check out our &lt;a href="%1$s"&gt;top tips&lt;/a&gt;.</string>
+     <string name="my_site_todays_stats_card_menu_hide_this" translatable="false">@string/my_site_dashboard_card_more_menu_hide_card</string>
+     <string name="my_site_todays_stats_menu_view_stats">View stats</string>
+@@ -2395,7 +2484,8 @@
+     <string name="my_site_blogging_prompt_card_menu_view_more">View more prompts</string>
+     <string name="my_site_blogging_prompt_card_menu_skip">Skip for today</string>
+     <string name="my_site_blogging_prompt_card_menu_remove">Turn off prompts</string>
+-    <string name="my_site_blogging_prompt_card_attribution_dayone">From &lt;b&gt;DayOne&lt;/b&gt;</string>
++    <string name="my_site_blogging_prompt_card_attribution_day_one">From &lt;b&gt;Day One&lt;/b&gt;</string>
++    <string name="my_site_blogging_prompt_card_attribution_bloganuary">From &lt;b&gt;Bloganuary&lt;/b&gt;</string>
+     <string name="my_site_blogging_prompt_card_menu_learn_more">Learn more</string>
+     <string name="my_site_blogging_prompt_card_skipped_snackbar">Skipped today\'s blogging prompt</string>
+     <string name="my_site_blogging_prompt_card_removed_snackbar_title">Blogging Prompts hidden</string>
+@@ -2410,7 +2500,7 @@
+     <!-- site picker -->
+     <string name="site_picker_title">Choose site</string>
+     <string name="site_picker_edit_visibility">Show/hide sites</string>
+-    <string name="site_picker_add_site">Add new site</string>
++    <string name="site_picker_add_a_site">Add a site</string>
+     <string name="site_picker_add_self_hosted">Add self-hosted site</string>
+     <string name="site_picker_create_wpcom">Create WordPress.com site</string>
+     <string name="site_picker_cant_hide_current_site">\"%s\" wasn\'t hidden because it\'s the current site</string>
+@@ -2418,6 +2508,10 @@
+     <string name="site_picker_remove_site_error">Error removing site, try again later</string>
+     <string name="site_picker_failed_selecting_added_site">Couldn\'t select newly added self-hosted site.</string>
+     <string name="site_picker_ask_site_select">Couldn\'t select site. Please try again.</string>
++    <string name="site_picker_edit_pins">Edit Pins</string>
++    <string name="site_picker_pinned_sites">Pinned Sites</string>
++    <string name="site_picker_all_sites">All Sites</string>
++    <string name="site_picker_recent_sites">Recent Sites</string>
+ 
+     <!-- Application logs view -->
+     <string name="logs_copied_to_clipboard">Application logs have been copied to the clipboard</string>
+@@ -2652,10 +2746,11 @@
+ 
+     <!-- Domain Registration -->
+     <string name="domains_title">Domains</string>
++    <string name="site_domain_title">Site Domain</string>
+     <string name="register_domain">Register Domain</string>
+     <string name="domains_suggestions_select_domain">Select domain</string>
+     <string name="domains_suggestions_empty_list">No suggestions found</string>
+-    <string name="domains_suggestions_intro_title">Choose a premium domain name</string>
++    <string name="domains_suggestions_intro_title">Choose a custom domain name</string>
+     <string name="domains_suggestions_intro_description">This is where people will find you on the internet.</string>
+     <string name="domain_suggestions_search_hint">Type a keyword for more ideas</string>
+     <string name="domain_suggestions_list_item_cost">%s&lt;span style="color:#50575e;"&gt; /year&lt;/span&gt;</string>
+@@ -2687,16 +2782,14 @@
+     <string name="domain_registration_state_picker_dialog_title">Select State</string>
+     <string name="domain_registration_registering_domain_name_progress_dialog_message">Registering domain name…</string>
+ 
+-    <string name="domains_primary_site_caption">Your free WordPress.com address is</string>
+-    <string name="domains_primary_site_more_menu_change_site_address">Change site address</string>
+-    <string name="domains_primary_site_address">%s</string>
+-    <string name="domains_primary_site_address_chip">Primary site address</string>
+-    <string name="domains_site_domains">Your site domains</string>
++    <string name="domains_site_domain">%s</string>
++    <string name="domains_primary_site_domain_chip">Primary domain</string>
++    <string name="domains_site_other_domains">Other domains for %s</string>
++    <string name="domains_free_domain">Your free WordPress.com domain</string>
+     <string name="domains_site_domain_expires">Expires on %s</string>
++    <string name="domains_site_domain_never_expires">Never expires</string>
+     <string name="domains_site_domain_expires_soon">&lt;span style="color:#d63638;"&gt;Expires on %s&lt;/span&gt;</string>
+     <string name="domains_add_a_domain">Add a domain</string>
+-    <string name="domains_redirected_domains_blurb">Your domains will redirect to your site at %s</string>
+-    <string name="domains_manage_domains">Manage Domains</string>
+     <string name="domains_paid_plan_claim_your_domain_title">Claim your free domain</string>
+     <string name="domains_paid_plan_claim_your_domain_caption">You have a free one-year domain registration included with your plan</string>
+     <string name="domains_paid_plan_add_your_domain_title">Add your domain</string>
+@@ -2704,9 +2797,48 @@
+     <string name="domains_free_plan_get_your_domain_title">Get your domain</string>
+     <string name="domains_free_plan_get_your_domain_caption">Domains purchased on this site will redirect visitors to &lt;b&gt;%s&lt;/b&gt;</string>
+     <string name="domains_search_for_a_domain_button">Search for a domain</string>
++    <string name="domains_upgrade_to_plan_caption">Get a free one-year domain registration or transfer with any annual paid plan.</string>
++    <string name="domains_upgrade_to_a_plan_button">Upgrade to a plan</string>
++    <string name="domains_just_search_for_a_domain_button">Just search for a domain</string>
+ 
+     <!-- Domain Management -->
+     <string name="domain_management_expires">Expires %1$s</string>
++    <string name="domain_management_my_domains_title">All Domains</string>
++    <string name="domain_management_purchase_a_domain">Purchase a domain</string>
++    <string name="domain_management_search_your_domains">Search your domains</string>
++    <string name="domain_management_open_domain_details">Open domain details</string>
++    <string name="domain_management_error_title">Couldn\'t retrieve your domains</string>
++    <string name="domain_management_error_subtitle">Check that you\'re online and pull to refresh.</string>
++    <string name="domain_management_empty_title">You don\'t have any domains</string>
++    <string name="domain_management_empty_subtitle">Tap below to find your perfect domain.</string>
++    <string name="domain_management_empty_find_domain">Find a domain</string>
++    <string name="domain_management_site_domains_button">All</string>
++    <string name="domain_management_clear_search">Clear search</string>
++
++    <!-- Domain Management - Purchase Domain Screen -->
++    <string name="purchase_domain_screen_title">Purchase Domain</string>
++    <string name="purchase_domain_screen_header_single_line">Choose how to use your domain</string>
++    <string name="purchase_domain_screen_header_double_line">Choose how to\nuse your domain</string>
++    <string name="purchase_domain_screen_description">Don\'t worry, you can easily add a site later.</string>
++    <string name="purchase_domain_screen_new_domain_card_title">Just buy a domain</string>
++    <string name="purchase_domain_screen_new_domain_card_description">Add a site later.</string>
++    <string name="purchase_domain_screen_new_domain_card_button">Get Domain</string>
++    <string name="purchase_domain_screen_existing_domain_card_title">Existing Wordpress.com site</string>
++    <string name="purchase_domain_screen_existing_domain_card_description">Use with a site you already started.</string>
++    <string name="purchase_domain_screen_existing_domain_card_button">Choose Site</string>
++    <string name="purchase_domain_screen_discount_notice">*A free domain for one year is included with all paid annual plans.</string>
++    <string name="purchase_domain_screen_error_title">Error</string>
++    <string name="purchase_domain_screen_error_subtitle">Something went wrong while adding the domain to the cart. Make sure you are online and retry.</string>
++    <string name="purchase_domain_screen_error_button_title">OK</string>
++
++    <!-- Domain Management - Search For A New Domain Screen -->
++    <string name="new_domain_search_screen_title">Search for a domain</string>
++    <string name="new_domain_search_screen_input_placeholder">Type to get more suggestions</string>
++    <string name="new_domain_search_screen_transfer_domain_description">Looking to transfer a domain you already own?</string>
++    <string name="new_domain_search_screen_transfer_domain_button">Transfer domain</string>
++    <string name="new_domain_search_screen_list_item_regular_price">%s / year</string>
++    <string name="new_domain_search_screen_list_item_sale_price">%s for the first year</string>
++    <string name="new_domain_search_screen_error_title">Couldn\'t retrieve domains</string>
+ 
+     <!-- Automated Transfer Eligibility Errors -->
+     <string name="plugin_install_site_ineligible_default_error">If you just registered a domain name, please wait until we finish setting it up and try again.\n\nIf not, looks like something went wrong and plugin feature might not be available for this site.</string>
+@@ -2789,6 +2921,11 @@
+     <string name="premium_upgrades_message">You have active premium upgrades on your site. Please cancel your upgrades prior to deleting your site.</string>
+     <string name="show_purchases">Show purchases</string>
+     <string name="checking_purchases">Checking purchases</string>
++    <string name="gravatar_info_title">Your WordPress.com profile is powered by Gravatar</string>
++    <string name="gravatar_info_description">Updating your avatar, name, and about info here will also update it across all sites that use Gravatar profiles.</string>
++    <string name="gravatar_info_learn_more_link">What is Gravatar?</string>
++    <string name="gravatar_info_sync_message">Updates might take some time to sync with your Gravatar profile.</string>
++    <string name="gravatar_info_sync_done_button">Done</string>
+ 
+     <!--Account Settings-->
+     <string name="account_settings">Account Settings</string>
+@@ -2933,12 +3070,6 @@
+     <string name="permission_camera">Camera</string>
+     <string name="permission_microphone">Microphone</string>
+ 
+-    <!-- Image Optimization promo -->
+-    <string name="turn_on">Turn on</string>
+-    <string name="leave_off">Leave off</string>
+-    <string name="image_optimization_promo_title">Turn on image optimization?</string>
+-    <string name="image_optimization_promo_desc">Image optimization shrinks images for quicker uploading.\n\nYou can change this any time in site settings.</string>
+-
+     <!-- Login -->
+     <!-- If any of these appear unused, be sure to check the same string in the login library -
+     it may be used there and keeping it here is required for translation. -->
+@@ -2976,7 +3107,7 @@
+     <string name="get_started" tools:ignore="UnusedResources" a8c-src-lib="login">Get Started</string>
+     <string name="next">Next</string>
+     <string name="check_email" tools:ignore="UnusedResources" a8c-src-lib="login">Check email</string>
+-    <string name="enter_verification_code" tools:ignore="UnusedResources" a8c-src-lib="login">Almost there! Please enter the verification code from your Authenticator app.</string>
++    <string name="enter_verification_code" tools:ignore="UnusedResources" a8c-src-lib="login">Almost there! Please enter the verification code for WordPress.com from your authenticator app.</string>
+     <string name="enter_verification_code_sms" tools:ignore="UnusedResources" a8c-src-lib="login">We sent a text message to the phone number ending in %s. Please enter the verification code in the SMS.</string>
+     <string name="login_text_otp" tools:ignore="UnusedResources" a8c-src-lib="login">Text me a code instead</string>
+     <string name="login_text_otp_another" tools:ignore="UnusedResources" a8c-src-lib="login">Text me another code instead</string>
+@@ -3215,7 +3346,7 @@
+     <string name="quick_start_dialog_enable_sharing_title" tools:ignore="UnusedResources">Enable post sharing</string>
+     <string name="quick_start_dialog_follow_sites_message" translatable="false">@string/quick_start_list_follow_site_subtitle</string>
+     <string name="quick_start_dialog_follow_sites_message_short_reader" tools:ignore="UnusedResources">Select %1$s Reader %2$s to find other sites.</string>
+-    <string name="quick_start_dialog_follow_sites_message_short_discover_and_settings">Use &lt;b&gt; Discover &lt;/b&gt; to find sites and tags. Try selecting %1$s Settings %2$s to add topics you like.</string>
++    <string name="quick_start_dialog_follow_sites_message_short_discover_and_subscriptions">Use &lt;b&gt;Discover&lt;/b&gt; to find sites and tags. Try selecting &lt;b&gt;Subscriptions&lt;/b&gt; to view subscribed content and manage your subscriptions.</string>
+     <string name="quick_start_dialog_follow_sites_message_short_discover">Use &lt;b&gt; Discover &lt;/b&gt; to find sites and tags.</string>
+     <string name="quick_start_dialog_upload_media_message_short_plus" tools:ignore="UnusedResources">Select %1$s plus %2$s to upload media. You can add it to your posts/ pages from any device.</string>
+     <string name="quick_start_dialog_follow_sites_title">Connect with other sites</string>
+@@ -3311,6 +3442,7 @@
+     <string name="pages_item_date_subtitle">%1$s ·</string>
+     <string name="pages_item_date_author">%1$s · %2$s</string>
+     <string name="pages_item_date_author_subtitle">%1$s · %2$s ·</string>
++    <string name="pages_item_subtitle">%1$s ·</string>
+     <string name="pages_copy_link">Copy link</string>
+ 
+     <string name="page_status_pending_review" translatable="false">@string/post_status_pending_review</string>
+@@ -3383,9 +3515,6 @@
+     <string name="create_page_fab_tooltip">Create a page</string>
+     <string name="create_post_story_fab_tooltip">Create a post or story</string>
+ 
+-    <string name="create_post_page_fab_tooltip_stories_enabled">Create a post, page or story</string>
+-    <string name="create_post_page_fab_tooltip_contributors_stories_enabled">Create a post or story</string>
+-
+     <!-- Site Creation -->
+     <string name="new_site_creation_screen_title_general">Create Site</string>
+     <string name="new_site_creation_screen_title_step_count">%1$d of %2$d</string>
+@@ -3558,84 +3687,10 @@
+     <string name="hpp_recommended_default_vertical">Blogging</string>
+     <string name="hpp_bottom_helper_text">Can\'t decide? You can change the theme at any time.</string>
+ 
+-    <!-- Stories -->
+-    <string name="dialog_edit_story_limited_title">Limited Story Editing</string>
+-    <string name="dialog_edit_story_limited_message">This story was edited on a different device and the ability to edit certain objects may be limited.</string>
+-    <string name="dialog_edit_story_unavailable_title">Can\'t edit Story</string>
+-    <string name="dialog_edit_story_unavailable_message">Unable to load media for this story. Check your internet connection and try again in a moment.</string>
+-    <string name="dialog_edit_story_unrecoverable_title">Can\'t edit Story</string>
+-    <string name="dialog_edit_story_unrecoverable_message">We couldn\'t find the media for this story on the site.</string>
+-    <string name="dialog_edit_story_unsupported_format_title">GIF files not supported</string>
+-    <string name="dialog_edit_story_unsupported_format_message">One or more slides have not been added to your Story because Stories don\'t support GIF files at the moment. Please choose a static image or video background instead.</string>
+-    <string name="toast_edit_story_update_in_progress_title">Story being saved, please wait…</string>
+-    <string name="capture_button_alt" tools:ignore="UnusedResources" a8c-src-lib="stories">Capture</string>
+-    <string name="flip_button_alt" tools:ignore="UnusedResources" a8c-src-lib="stories">Flip camera</string>
+-    <string name="flash_button_alt" tools:ignore="UnusedResources" a8c-src-lib="stories">Flash</string>
+-    <string name="stickers_button_alt" tools:ignore="UnusedResources" a8c-src-lib="stories">Stickers</string>
+-    <string name="text_button_alt" tools:ignore="UnusedResources" a8c-src-lib="stories">Text</string>
+-    <string name="sound_button_alt" tools:ignore="UnusedResources" a8c-src-lib="stories">Sound</string>
+-    <string name="label_control_flip_camera" tools:ignore="UnusedResources" a8c-src-lib="stories">Flip</string>
+-    <string name="label_control_flash" tools:ignore="UnusedResources" a8c-src-lib="stories">Flash</string>
+-    <string name="label_control_saving" tools:ignore="UnusedResources" a8c-src-lib="stories">Saving</string>
+-    <string name="label_control_saved" tools:ignore="UnusedResources" a8c-src-lib="stories">Saved</string>
+-    <string name="label_control_retry" tools:ignore="UnusedResources" a8c-src-lib="stories">Retry</string>
+-    <string name="label_snackbar_loop_frame_saved" tools:ignore="UnusedResources" a8c-src-lib="stories">Saved to photos</string>
+-    <string name="label_snackbar_share" tools:ignore="UnusedResources" a8c-src-lib="stories">SHARE</string>
+-    <string name="label_share_to" tools:ignore="UnusedResources" a8c-src-lib="stories">Share to</string>
+     <string name="label_close_button">Close</string>
+-    <string name="label_saved_icon" tools:ignore="UnusedResources" a8c-src-lib="stories">Saved</string>
+-    <string name="label_retry_icon" tools:ignore="UnusedResources" a8c-src-lib="stories">Retry</string>
+-    <string name="label_frame_image" tools:ignore="UnusedResources" a8c-src-lib="stories">Slide</string>
+-    <string name="label_frame_unselected_border" tools:ignore="UnusedResources" a8c-src-lib="stories">unselected</string>
+-    <string name="label_frame_selected_border" tools:ignore="UnusedResources" a8c-src-lib="stories">selected</string>
+-    <string name="label_frame_errored" tools:ignore="UnusedResources" a8c-src-lib="stories">errored</string>
+-    <string name="label_text_alignment_button" tools:ignore="UnusedResources" a8c-src-lib="stories">Change text alignment</string>
+-    <string name="label_text_color_button" tools:ignore="UnusedResources" a8c-src-lib="stories">Change text color</string>
+-    <string name="dialog_discard_page_title" tools:ignore="UnusedResources" a8c-src-lib="stories">Delete story slide?</string>
+-    <string name="dialog_discard_page_message" tools:ignore="UnusedResources" a8c-src-lib="stories">This slide will be removed from your story.</string>
+-    <string name="dialog_discard_errored_page_message" tools:ignore="UnusedResources" a8c-src-lib="stories">This slide has not been saved yet. If you delete this slide, you will lose any edits you have made.</string>
+-    <string name="dialog_discard_page_ok_button" tools:ignore="UnusedResources" a8c-src-lib="stories">Delete</string>
+-    <string name="dialog_discard_story_title" tools:ignore="UnusedResources" a8c-src-lib="stories">Discard story post?</string>
+-    <string name="dialog_discard_story_message" tools:ignore="UnusedResources" a8c-src-lib="stories">Your story post will not be saved as a draft.</string>
+-    <string name="dialog_discard_story_ok_button" tools:ignore="UnusedResources" a8c-src-lib="stories">Discard</string>
+-    <string name="pref_camera_selection" translatable="false" tools:ignore="UnusedResources" a8c-src-lib="stories">pref_camera_selection</string>
+-    <string name="pref_flash_mode_selection" translatable="false" tools:ignore="UnusedResources" a8c-src-lib="stories">pref_flash_mode_selection</string>
+-    <string name="story_saving_untitled" tools:ignore="UnusedResources" a8c-src-lib="stories">Untitled</string>
+-    <string name="story_saving_title" tools:ignore="UnusedResources" a8c-src-lib="stories">Saving "%1$s"…</string>
+-    <string name="story_saving_title_several" tools:ignore="UnusedResources" a8c-src-lib="stories">several stories</string>
+-    <string name="story_saving_subtitle_frames_remaining_singular" tools:ignore="UnusedResources" a8c-src-lib="stories">1 slide remaining</string>
+-    <string name="story_saving_subtitle_frames_remaining_plural" tools:ignore="UnusedResources" a8c-src-lib="stories">%1$d slides remaining</string>
+-    <string name="story_saving_snackbar_started">Uploading "%1$s"…</string>
+-    <string name="story_saving_snackbar_finished_successfully" tools:ignore="UnusedResources" a8c-src-lib="stories">"%1$s" published</string>
+-    <string name="story_saving_snackbar_finished_with_error">Unable to upload "%1$s"</string>
+-    <string name="story_saving_failed_title" tools:ignore="UnusedResources" a8c-src-lib="stories">Unable to upload "%1$s"</string>
+-    <string name="story_saving_failed_message_singular" tools:ignore="UnusedResources" a8c-src-lib="stories">1 slide requires action</string>
+-    <string name="story_saving_failed_message_plural" tools:ignore="UnusedResources" a8c-src-lib="stories">%1$d slides require action</string>
+-    <string name="story_saving_failed_quick_action_manage">Manage</string>
+-    <string name="dialog_story_saving_error_title_singular" tools:ignore="UnusedResources" a8c-src-lib="stories">Unable to save 1 slide</string>
+-    <string name="dialog_story_saving_error_title_plural" tools:ignore="UnusedResources" a8c-src-lib="stories">Unable to save %1$d slides</string>
+-    <string name="dialog_story_saving_error_message" tools:ignore="UnusedResources" a8c-src-lib="stories">Retry saving or delete the slides, then try publishing your story again.</string>
+-    <string name="dialog_insufficient_device_storage_error_title" tools:ignore="UnusedResources" a8c-src-lib="stories">Insufficient device storage</string>
+-    <string name="dialog_insufficient_device_storage_error_message" tools:ignore="UnusedResources" a8c-src-lib="stories">We need to save the story on your device before it can be published. Review your storage settings and remove files to free up space.</string>
+-    <string name="dialog_insufficient_device_storage_error_ok_button" tools:ignore="UnusedResources" a8c-src-lib="stories">View Storage</string>
+-    <string name="toast_story_page_not_found" tools:ignore="UnusedResources" a8c-src-lib="stories">Couldn\'t find Story slide</string>
+-    <string name="toast_capture_operation_in_progress" tools:ignore="UnusedResources" a8c-src-lib="stories">Operation in progress, try again</string>
+-    <string name="toast_error_saving_image" tools:ignore="UnusedResources" a8c-src-lib="stories">Error saving image</string>
+-    <string name="toast_error_saving_video" tools:ignore="UnusedResources" a8c-src-lib="stories">Video could not be saved</string>
+     <string name="camera_error" tools:ignore="UnusedResources">This device doesn\'t support Camera2 API.</string>
+     <string name="toast_error_playing_video" tools:ignore="UnusedResources">An error occurred while playing your video</string>
+ 
+-    <!-- Intro to Stories screen -->
+-    <string name="stories_intro_main_title">Introducing Story Posts</string>
+-    <string name="stories_intro_main_subtitle">A new way to create and publish engaging content on your site.</string>
+-    <string name="stories_intro_image_caption_first">How to create a story post</string>
+-    <string name="stories_intro_image_caption_second">Example story title</string>
+-    <string name="stories_intro_title_first">Now stories are for everyone</string>
+-    <string name="stories_intro_description_first">Combine photos, videos, and text to create engaging and tappable story posts that your visitors will love.</string>
+-    <string name="stories_intro_title_second">Story posts don\'t disappear</string>
+-    <string name="stories_intro_description_second">They\’re published as a new blog post on your site so your audience never misses out on a thing.</string>
+-    <string name="stories_intro_create_story_post_label">Create Story Post</string>
+-
+     <!-- Gutenberg Native -->
+     <!-- translators: %1$s: Select control font size name e.g. Small, %2$s: Select control font size e.g. 12px -->
+     <string name="gutenberg_native_1_s_2_s" tools:ignore="UnusedResources">%1$s (%2$s)</string>
+@@ -3999,21 +4054,7 @@ translators: %s: Select control option value e.g: "Auto, 25%". -->
+     <string name="gutenberg_native_you_can_edit_this_block_using_the_web_version_of_the_editor" tools:ignore="UnusedResources">You can edit this block using the web version of the editor.</string>
+     <string name="gutenberg_native_you_can_rearrange_blocks_by_tapping_a_block_and_then_tapping_the" tools:ignore="UnusedResources">You can rearrange blocks by tapping a block and then tapping the up and down arrows that appear on the bottom left side of the block to move it above or below other blocks.</string>
+ 
+-    <string name="toast_capture_operation_permission_needed" tools:ignore="UnusedResources" a8c-src-lib="stories">You need to grant the app audio recording permission in order to record video</string>
+-    <string name="typeface_label_nunito" tools:ignore="UnusedResources" a8c-src-lib="stories">Casual</string>
+-    <string name="typeface_label_libre_baskerville" tools:ignore="UnusedResources" a8c-src-lib="stories">Classic</string>
+-    <string name="typeface_label_oswald" tools:ignore="UnusedResources" a8c-src-lib="stories">Strong</string>
+-    <string name="typeface_label_pacifico" tools:ignore="UnusedResources" a8c-src-lib="stories">Playful</string>
+-    <string name="typeface_label_space_mono" tools:ignore="UnusedResources" a8c-src-lib="stories">Modern</string>
+-    <string name="typeface_label_shrikhand" tools:ignore="UnusedResources" a8c-src-lib="stories">Bold</string>
+-    <string name="delete_button_alt" tools:ignore="UnusedResources" a8c-src-lib="stories">Delete</string>
+-    <string name="label_next_button" tools:ignore="UnusedResources" a8c-src-lib="stories">Next</string>
+     <string name="label_done_button">Done</string>
+-    <string name="dialog_discard_story_title_edit" tools:ignore="UnusedResources" a8c-src-lib="stories">Discard changes?</string>
+-    <string name="dialog_discard_story_message_edit" tools:ignore="UnusedResources" a8c-src-lib="stories">Any changes made will not be saved.</string>
+-    <string name="dialog_discard_story_ok_button_edit" tools:ignore="UnusedResources" a8c-src-lib="stories">Discard</string>
+-    <string name="color_picker_label_text" tools:ignore="UnusedResources" a8c-src-lib="stories">Text</string>
+-    <string name="color_picker_label_background" tools:ignore="UnusedResources" a8c-src-lib="stories">Background</string>
+ 
+     <!-- Jetpack backup download -->
+     <string name="backup_download">Backup Download</string>
+@@ -4059,7 +4100,6 @@ translators: %s: Select control option value e.g: "Auto, 25%". -->
+     <string name="backup_download_complete_failed_icon_content_description">Cloud with X icon</string>
+ 
+     <string name="jetpack_icon_content_description">icon</string>
+-    <string name="label_control_upload" tools:ignore="UnusedResources" a8c-src-lib="stories">Upload</string>
+ 
+     <!-- Jetpack restore -->
+     <string name="restore">Restore</string>
+@@ -4189,9 +4229,14 @@ translators: %s: Select control option value e.g: "Auto, 25%". -->
+     <string name="weekly_roundup">Weekly Roundup</string>
+     <string name="weekly_roundup_notification_title">Weekly Roundup: %s</string>
+     <string name="weekly_roundup_notification_text_all">Last week you had %1$s views, %2$s likes, and %3$s comments.</string>
++    <string name="weekly_roundup_notification_text_views_like_comments">Last week you had %1$s views, 1 like, and %2$s comments.</string>
++    <string name="weekly_roundup_notification_text_views_likes_comment">Last week you had %1$s views, %2$s likes, and 1 comment.</string>
++    <string name="weekly_roundup_notification_text_views_like_comment">Last week you had %1$s views, 1 like, and 1 comment.</string>
+     <string name="weekly_roundup_notification_text_views_only">Last week you had %1$s views.</string>
+     <string name="weekly_roundup_notification_text_views_and_likes">Last week you had %1$s views and %2$s likes</string>
++    <string name="weekly_roundup_notification_text_views_and_like">Last week you had %1$s views and 1 like</string>
+     <string name="weekly_roundup_notification_text_views_and_comments">Last week you had %1$s views and %2$s comments</string>
++    <string name="weekly_roundup_notification_text_views_and_comment">Last week you had %1$s views and 1 comment</string>
+ 
+     <!-- About -->
+     <string name="about_blog">Blog</string>
+@@ -4431,6 +4476,8 @@ translators: %s: Select control option value e.g: "Auto, 25%". -->
+     <string name="jp_migration_delete_message">We recommend &lt;b&gt;uninstalling the WordPress app&lt;/b&gt; on your device to avoid data conflicts.</string>
+     <string name="jp_migration_got_it_button">Got it</string>
+     <string name="jp_migration_need_help_button">Need help?</string>
++    <string name="jp_migration_done_no_sites_message">It\'s time to continue your WordPress journey on the Jetpack app.</string>
++    <string name="jp_migration_lets_go_button">Let\'s go</string>
+ 
+     <!-- Open Web Links With Jetpack -->
+     <string name="preference_open_links_in_jetpack">Open links in Jetpack</string>
+@@ -4470,7 +4517,6 @@ translators: %s: Select control option value e.g: "Auto, 25%". -->
+     <string name="wp_jetpack_feature_removal_phase_new_users_notifications_description">Get notifications for new comments, likes, views, and more.</string>
+     <string name="wp_jetpack_feature_removal_phase_self_hosted_users_description">The Jetpack mobile app is designed to work in companion with the Jetpack plugin. Switch now to get access to stats, notifications, reader, and more.</string>
+     <string name="wp_jetpack_feature_removal_phase_self_hosted_users_title">Your site has the Jetpack plugin</string>
+-    <string name="wp_jetpack_feature_removal_static_posters_phase">Moving to the Jetpack app in a few days.</string>
+ 
+ 
+     <!-- Deep Linking Activity Aliases -->
+@@ -4487,7 +4533,7 @@ translators: %s: Select control option value e.g: "Auto, 25%". -->
+     <string name="wp_jetpack_deep_link_overlay_description">It looks like you have the Jetpack app installed.\n\nWould you like to open links in the Jetpack app in the future?\n\nYou can always change this in App Settings &gt; Open links in Jetpack</string>
+     <string name="wp_jetpack_deep_link_open_in_jetpack" translatable="false">@string/preference_open_links_in_jetpack</string>
+     <string name="wp_jetpack_deep_link_open_in_wordpress">Open links in WordPress</string>
+-    <string name="gutenberg_native_alternatively_you_can_detach_and_edit_this_block_separately_by_ta" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Alternatively, you can detach and edit this block separately by tapping “Detach pattern”.</string>
++    <string name="gutenberg_native_alternatively_you_can_detach_and_edit_this_block_separately_by_ta" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Alternatively, you can detach and edit this block separately by tapping “Detach”.</string>
+     <string name="gutenberg_native_s_converted_to_regular_block" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">%s converted to regular block</string>
+ 
+     <!-- Jetpack Feature Card -->
+@@ -4532,13 +4578,6 @@ translators: %s: Select control option value e.g: "Auto, 25%". -->
+     <string name="jetpack_full_plugin_install_onboarding_contact_support_button">Contact support</string>
+     <string name="jetpack_full_plugin_install_onboarding_dismiss_button_content_description">Close</string>
+ 
+-    <!-- Dashboard Card Domain Transfer-->
+-    <string name="domain_transfer_card_title">News</string>
+-    <string name="domain_transfer_card_sub_title">Reclaim Your Google Domains</string>
+-    <string name="domain_transfer_card_caption">As you may know, Google Domains has been sold to Squarespace. Transfer your domains to WordPress.com now, and we\'ll pay all transfer fees plus an extra year of your domain registration.</string>
+-    <string name="domain_transfer_card_cta">Transfer your domains</string>
+-    <string name="domain_transfer_card_more_menu_hide_this" translatable="false">@string/my_site_dashboard_card_more_menu_hide_card</string>
+-
+     <!-- Dashboard Card Plans-->
+     <string name="dashboard_card_plans_title">Free domain with annual plan</string>
+     <string name="dashboard_card_plans_sub_title">Get a free domain for the first year, remove ads on your site, and increase your storage.</string>
+@@ -4746,7 +4785,7 @@ translators: %s: Select control option value e.g: "Auto, 25%". -->
+ 
+     <string name="pages_no_site_something_went_wrong">Uh oh, something went wrong. Please try again later.</string>
+     <string name="gutenberg_native_block_cannot_be_rendered_because_it_is_deeply_nested_tap_here_for" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Block cannot be rendered because it is deeply nested. Tap here for more details.</string>
+-    <string name="gutenberg_native_blocks_nested_deeper_than_d_levels_may_not_render_properly_in_the" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Blocks nested deeper than %d levels may not render properly in the mobile editor. For this reason, we recommend flattening the content by ungrouping the block or editing the block using your web browser.</string>
++    <string name="gutenberg_native_blocks_nested_deeper_than_d_levels_may_not_render_properly_in_the" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Blocks nested deeper than %d levels may not render properly in the mobile editor.</string>
+     <string name="gutenberg_native_blocks_nested_deeper_than_d_levels_may_not_render_properly_in_the_09df8c78" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Blocks nested deeper than %d levels may not render properly in the mobile editor. For this reason, we recommend flattening the content by ungrouping the block or editing the block using the web editor.</string>
+     <string name="gutenberg_native_deeply_nested_block" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Deeply nested block</string>
+     <string name="gutenberg_native_synced_patterns" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Synced patterns</string>
+@@ -4754,5 +4793,77 @@ translators: %s: Select control option value e.g: "Auto, 25%". -->
+     <string name="gutenberg_native_ungroup_block" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Ungroup block</string>
+     <string name="gutenberg_native_warning_message" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Warning message</string>
+     <string name="account_and_settings">Account and Settings</string>
+-
++    <string name="gutenberg_native_alternatively_you_can_convert_the_content_to_blocks" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Alternatively, you can convert the content to blocks.</string>
++    <string name="gutenberg_native_s_block_converted_to_blocks" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">\'%s\' block converted to blocks</string>
++    <!--
++         Barcode Scanning
++    -->
++    <string name="barcode_scanning_title">Scan Barcode</string>
++    <string name="barcode_scanning_camera_permission_denied">Camera permission is required to scan the barcode.</string>
++    <string name="barcode_scanning_alert_dialog_title">Grant Camera Permission</string>
++    <string name="barcode_scanning_alert_dialog_rationale_message">Camera permission is required in order to scan the barcode</string>
++    <string name="barcode_scanning_alert_dialog_permanently_denied_message">You have permanently denied Camera permission. It is required in order to scan the barcode. Please enable it from the app settings</string>
++    <string name="barcode_scanning_alert_dialog_rationale_cta_label">Grant</string>
++    <string name="barcode_scanning_alert_dialog_dismiss_label">Cancel</string>
++    <string name="barcode_scanning_alert_dialog_permanently_denied_cta_label">Go to settings</string>
++
++    <string name="login_text_security_key" tools:ignore="UnusedResources" a8c-src-lib="login">Use a security key</string>
++    <string name="login_error_security_key" tools:ignore="UnusedResources" a8c-src-lib="login">There was some trouble with the Security key login</string>
++    <string name="notification_security_key_needed" tools:ignore="UnusedResources" a8c-src-lib="login">Please provide your security key to continue.</string>
++
++    <string name="gutenberg_native_alternatively_you_can_flatten_the_content_by_ungrouping_the_block" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Alternatively, you can flatten the content by ungrouping the block.</string>
++    <string name="gutenberg_native_for_this_reason_we_recommend_editing_the_block_using_the_web_edit" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">For this reason, we recommend editing the block using the web editor.</string>
++    <string name="gutenberg_native_for_this_reason_we_recommend_editing_the_block_using_your_web_bro" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">For this reason, we recommend editing the block using your web browser.</string>
++
++    <string name="media_cannot_be_started">We cannot open media at the moment. Please try again later</string>
++
++    <!-- Bloganuary -->
++    <string name="bloganuary_dashboard_nudge_title_december">Bloganuary is coming!</string>
++    <string name="bloganuary_dashboard_nudge_title_january">Bloganuary is here!</string>
++    <string name="bloganuary_dashboard_nudge_text">For the month of January, blogging prompts will come from Bloganuary — our community challenge to build a blogging habit for the new year.</string>
++    <string name="bloganuary_dashboard_nudge_learn_more" translatable="false">@string/learn_more</string>
++    <string name="bloganuary_dashboard_nudge_overlay_icon_content_description">Bloganuary</string>
++    <string name="bloganuary_dashboard_nudge_overlay_title">Join our month-long writing challenge</string>
++    <string name="bloganuary_dashboard_nudge_overlay_text_one">Receive a new prompt to inspire you each day.</string>
++    <string name="bloganuary_dashboard_nudge_overlay_text_two">Publish your response.</string>
++    <string name="bloganuary_dashboard_nudge_overlay_text_three">Read other bloggers’ responses to get inspiration and make new connections.</string>
++    <string name="bloganuary_dashboard_nudge_overlay_note_prompts_disabled">Bloganuary will use Daily Blogging Prompts to send you topics for the month of January. You have Blogging Prompts currently disabled.</string>
++    <string name="bloganuary_dashboard_nudge_overlay_note_prompts_enabled">Bloganuary will use Daily Blogging Prompts to send you topics for the month of January.</string>
++    <string name="bloganuary_dashboard_nudge_overlay_action_turn_on_prompts">Turn on blogging prompts</string>
++    <string name="bloganuary_dashboard_nudge_overlay_action_dismiss">Let’s go!</string>
++
++    <!-- State of the Word 2023 -->
++    <string name="wp_sotw_2023_dashboard_nudge_title" translatable="false">State of the Word 2023</string>
++    <string name="wp_sotw_2023_dashboard_nudge_text" translatable="false">Check out WordPress co-founder Matt Mullenweg’s annual keynote to stay on top of what’s coming in 2024 and beyond.</string>
++    <string name="wp_sotw_2023_dashboard_nudge_cta" translatable="false">Watch now</string>
++    <string name="gutenberg_native_file_type_not_supported_as_a_media_file" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">File type not supported as a media file.</string>
++    <string name="gutenberg_native_font_size_1_s" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Font Size, %1$s</string>
++    <string name="gutenberg_native_network_connection_lost_working_offline" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Network connection lost, working offline</string>
++    <string name="gutenberg_native_network_connection_re_established" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Network connection re-established</string>
++    <string name="gutenberg_native_working_offline" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Working Offline</string>
++    <string name="gutenberg_native_waiting_for_connection" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Waiting for connection</string>
++
++    <!-- Site Monitoring -->
++    <string name="site_monitoring">Site Monitoring</string>
++    <string name="site_monitoring_tab_title_metrics">Metrics</string>
++    <string name="site_monitoring_tab_title_php_logs">PHP Logs</string>
++    <string name="site_monitoring_tab_title_web_server_logs">Web Server Logs</string>
++    <string name="site_monitoring_cannot_be_started">We cannot open site monitoring at the moment. Please try again later</string>
++
++    <!-- Super Fast Media Upload QRCodeMediaLink -->
++    <string name="qrcode_media_deeplink_error">Site not found. Check that you are logged into the correct account.</string>
++    <string name="gutenberg_native_autoplay_may_cause_usability_issues_for_some_users" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Autoplay may cause usability issues for some users.</string>
++    <string name="gutenberg_native_edit_video_024aee6d" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Edit video</string>
++    <string name="gutenberg_native_video_caption_empty_663aab49" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Video caption. Empty</string>
++    <string name="gutenberg_native_video_caption_s_0141bd20" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Video caption. %s</string>
++    <string name="gutenberg_native_button_to_copy_error_details" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Button to copy error details</string>
++    <string name="gutenberg_native_button_to_copy_post_text" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Button to copy post text</string>
++    <string name="gutenberg_native_copy_error_details" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Copy error details</string>
++    <string name="gutenberg_native_copy_post_text" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Copy post text</string>
++    <string name="gutenberg_native_tap_here_to_copy_error_details" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Tap here to copy error details</string>
++    <string name="gutenberg_native_tap_here_to_copy_post_text" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Tap here to copy post text</string>
++    <string name="gutenberg_native_the_editor_has_encountered_an_unexpected_error" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">The editor has encountered an unexpected error</string>
++    <string name="gutenberg_native_you_can_copy_your_post_text_in_case_your_content_is_impacted_copy" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">You can copy your post text in case your content is impacted. Copy error details to debug and share with support.</string>
++    <string name="gutenberg_native_clear_selected_color" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Clear selected color</string>
++    <string name="gutenberg_native_link_label" tools:ignore="UnusedResources" a8c-src-lib="gutenberg">Link label</string>
+ </resources>
+diff --git a/fastlane/resources/values/strings.xml b/fastlane/resources/values/strings.xml
+index e40dc96e782..f0a2376310b 100644
+--- a/fastlane/resources/values/strings.xml
++++ b/fastlane/resources/values/strings.xml
+@@ -278,8 +278,6 @@
+     <string name="posts_draft_empty">You don\'t have any draft posts</string>
+     <string name="posts_trashed_empty">You don\'t have any trashed posts</string>
+     <string name="multiple_status_label_delimiter" translatable="false">\u0020·\u0020</string>
+-    <string name="post_list_toggle_item_layout_cards_view">Switch to cards view</string>
+-    <string name="post_list_toggle_item_layout_list_view">Switch to list view</string>
+     <string name="post_waiting_for_connection_publish">We\'ll publish the post when your device is back online.</string>
+     <string name="post_waiting_for_connection_pending">We\'ll submit your post for review when your device is back online.</string>
+     <string name="post_waiting_for_connection_scheduled">We\'ll schedule your post when your device is back online.</string>

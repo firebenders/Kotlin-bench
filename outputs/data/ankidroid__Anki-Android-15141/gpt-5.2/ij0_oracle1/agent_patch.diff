@@ -1,0 +1,189 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 0ff5e071b3..ee191a3bfa 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.6'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -226,12 +225,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -246,12 +245,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -362,7 +355,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+index c54e095351..fd1ccc7daa 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+@@ -1264,6 +1264,15 @@ abstract class AbstractFlashcardViewer :
+     protected open fun updateForNewCard() {
+         updateActionBar()
+ 
++        // Auto-advance settings are stored in deck options in modern Anki versions.
++        // Re-evaluate them on each card, as cards in a session may come from different decks.
++        try {
++            val preferences = baseContext.sharedPrefs()
++            automaticAnswer = AutomaticAnswer.createInstance(this, preferences, getColUnsafe, currentCard!!.did)
++        } catch (_: Exception) {
++            // Ignore and keep existing settings.
++        }
++
+         // Clean answer field
+         if (typeAnswer!!.validForEditText()) {
+             answerField!!.setText("")
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/AutomaticAnswer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/AutomaticAnswer.kt
+index f626cf7874..146315b77e 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/AutomaticAnswer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/AutomaticAnswer.kt
+@@ -225,6 +225,11 @@ class AutomaticAnswer(
+             val settings = AutomaticAnswerSettings.createInstance(preferences, col)
+             return AutomaticAnswer(target, settings)
+         }
++
++        fun createInstance(target: AutomaticallyAnswered, preferences: SharedPreferences, col: Collection, deckId: DeckId): AutomaticAnswer {
++            val settings = AutomaticAnswerSettings.createInstance(preferences, col, deckId)
++            return AutomaticAnswer(target, settings)
++        }
+     }
+ }
+ 
+@@ -269,13 +274,7 @@ class AutomaticAnswerSettings(
+             col: Collection,
+             selectedDid: DeckId
+         ): AutomaticAnswerSettings? {
+-            // Dynamic don't have review options; attempt to get deck-specific auto-advance options
+-            // but be prepared to go with all default if it's a dynamic deck
+-            if (col.decks.isDyn(selectedDid)) {
+-                return null
+-            }
+-
+-            val revOptions = col.decks.confForDid(selectedDid).getJSONObject("rev")
++            val revOptions = col.decks.confForDid(selectedDid).optJSONObject("rev") ?: return null
+ 
+             if (revOptions.optBoolean("useGeneralTimeoutSettings", true)) {
+                 // we want to use the general settings, no need for per-deck settings
+@@ -296,10 +295,14 @@ class AutomaticAnswerSettings(
+         }
+ 
+         fun createInstance(preferences: SharedPreferences, col: Collection): AutomaticAnswerSettings {
++            return createInstance(preferences, col, col.decks.selected())
++        }
++
++        fun createInstance(preferences: SharedPreferences, col: Collection, selectedDid: DeckId): AutomaticAnswerSettings {
+             // deck specific options take precedence over general (preference-based) options.
+             // the action can only be set via preferences (but is stored in the collection).
+             val action = getAction(col)
+-            return queryDeckSpecificOptions(action, col, col.decks.selected()) ?: queryFromPreferences(preferences, action)
++            return queryDeckSpecificOptions(action, col, selectedDid) ?: queryFromPreferences(preferences, action)
+         }
+ 
+         private fun getAction(col: Collection): AutomaticAnswerAction {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/BackendImportExport.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/BackendImportExport.kt
+index e7b76f015b..82d80cf75e 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/BackendImportExport.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/BackendImportExport.kt
+@@ -17,6 +17,7 @@
+ package com.ichi2.libanki
+ 
+ import anki.import_export.ExportLimit
++import anki.import_export.exportAnkiPackageOptions
+ import anki.search.SearchNode
+ import net.ankiweb.rsdroid.Backend
+ 
+@@ -107,7 +108,13 @@ fun Collection.exportAnkiPackage(
+     limit: ExportLimit,
+     legacy: Boolean = true
+ ) {
+-    backend.exportAnkiPackage(outPath, withScheduling, withMedia, legacy, limit)
++    val options = exportAnkiPackageOptions {
++        this.withScheduling = withScheduling
++        this.withMedia = withMedia
++        this.legacy = legacy
++        this.withDeckConfigs = true
++    }
++    backend.exportAnkiPackage(outPath, options, limit)
+ }
+ 
+ fun Collection.exportNotesCsv(
+diff --git a/build.gradle b/build.gradle
+index aeafc762f8..239fabadb6 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -9,7 +9,7 @@ buildscript {
+     ext.kotlin_version = '1.9.21'
+     ext.lint_version = '31.1.1'
+     ext.acra_version = '5.11.3'
+-    ext.ankidroid_backend_version = '0.1.32-anki23.10.1'
++    ext.ankidroid_backend_version = '0.1.34-anki23.12.1'
+     ext.hamcrest_version = '2.2'
+     ext.junit_version = '5.10.1'
+     ext.coroutines_version = '1.7.3'
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

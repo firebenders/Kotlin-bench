@@ -1,0 +1,166 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
+index 06a2f93e..54e81679 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
+@@ -5,6 +5,9 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
+ import com.pinterest.ktlint.rule.engine.core.api.Rule
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY_OFF
+ import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe
+@@ -12,14 +15,22 @@ import com.pinterest.ktlint.ruleset.standard.StandardRule
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+ 
+ public class FunctionReturnTypeSpacingRule :
+-    StandardRule("function-return-type-spacing"),
++    StandardRule(
++        id = "function-return-type-spacing",
++        usesEditorConfigProperties = setOf(MAX_LINE_LENGTH_PROPERTY),
++    ),
+     Rule.Experimental {
++    private var maxLineLength: Int = MAX_LINE_LENGTH_PROPERTY.defaultValue
++
++    override fun beforeFirstNode(editorConfig: EditorConfig) {
++        maxLineLength = editorConfig[MAX_LINE_LENGTH_PROPERTY]
++    }
++
+     override fun beforeVisitChildNodes(
+         node: ASTNode,
+         autoCorrect: Boolean,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+     ) {
+-        node.firstChildNode
+         node
+             .takeIf { node.elementType == FUN }
+             ?.let { node.findChildByType(COLON) }
+@@ -52,18 +63,77 @@ public class FunctionReturnTypeSpacingRule :
+         autoCorrect: Boolean,
+     ) {
+         require(node.elementType == COLON)
+-        node
+-            .nextLeaf()
+-            ?.takeIf { it.elementType == WHITE_SPACE }
+-            .let { whiteSpaceAfterColon ->
+-                if (whiteSpaceAfterColon?.text != " ") {
+-                    emit(node.startOffset, "Single space expected between colon and return type", true)
+-                    if (autoCorrect) {
+-                        node.upsertWhitespaceAfterMe(" ")
+-                    }
+-                }
+-            }
++
++        val whiteSpaceAfterColon =
++            node
++                .nextLeaf()
++                ?.takeIf { it.elementType == WHITE_SPACE }
++
++        if (whiteSpaceAfterColon?.text == " ") {
++            return
++        }
++
++        if (
++            whiteSpaceAfterColon != null &&
++                whiteSpaceAfterColon.text.contains('\n') &&
++                maxLineLength != MAX_LINE_LENGTH_PROPERTY_OFF &&
++                exceedsMaxLineLengthWhenReplacingWhitespaceAfterColonWithSingleSpace(
++                    colonNode = node,
++                    whiteSpaceAfterColon = whiteSpaceAfterColon,
++                )
++        ) {
++            // Allow placing the return type on the next line when keeping it on the same line would exceed the
++            // max_line_length.
++            return
++        }
++
++        emit(node.startOffset, "Single space expected between colon and return type", true)
++        if (autoCorrect) {
++            node.upsertWhitespaceAfterMe(" ")
++        }
+     }
++
++    private fun exceedsMaxLineLengthWhenReplacingWhitespaceAfterColonWithSingleSpace(
++        colonNode: ASTNode,
++        whiteSpaceAfterColon: ASTNode,
++    ): Boolean {
++        require(colonNode.elementType == COLON)
++        require(whiteSpaceAfterColon.elementType == WHITE_SPACE)
++
++        // Find the leaf containing the last newline before the function signature (or null when this is the first line
++        // of the file).
++        var prev = colonNode.prevLeaf()
++        var lastLeafContainingNewline: ASTNode? = null
++        var firstLeafInFile: ASTNode = colonNode
++        while (prev != null) {
++            firstLeafInFile = prev
++            if (prev.textContains('\n')) {
++                lastLeafContainingNewline = prev
++                break
++            }
++            prev = prev.prevLeaf()
++        }
++
++        val prefix = lastLeafContainingNewline?.text?.substringAfterLast('\n').orEmpty()
++        var leaf: ASTNode? = lastLeafContainingNewline?.nextLeaf() ?: firstLeafInFile
++
++        // Find the leaf containing the next newline after the whitespace after the colon. This newline determines the
++        // end of the joined line.
++        val endOfLineLeaf = whiteSpaceAfterColon.nextLeaf { it.textContains('\n') }
++
++        var joinedLineLength = prefix.length
++        while (leaf != null && leaf != endOfLineLeaf) {
++            joinedLineLength +=
++                if (leaf == whiteSpaceAfterColon) {
++                    1
++                } else {
++                    leaf.textLength
++                }
++            leaf = leaf.nextLeaf()
++        }
++
++        return joinedLineLength > maxLineLength
++}
+ }
+ 
+ public val FUNCTION_RETURN_TYPE_SPACING_RULE_ID: RuleId = FunctionReturnTypeSpacingRule().ruleId
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRuleMaxLineLengthTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRuleMaxLineLengthTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRuleMaxLineLengthTest.kt
+@@ -0,0 +1,24 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class FunctionReturnTypeSpacingRuleMaxLineLengthTest {
++    private val functionReturnTypeSpacingRuleAssertThat = assertThatRule { FunctionReturnTypeSpacingRule() }
++
++    @Test
++    fun `Given a function signature where joining the return type to the same line would exceed max_line_length then do not reformat`() {
++        val code =
++            """
++            fun abcdefghijklmnopqrs():
++                TTTTTTTTTTTT {
++            }
++            """.trimIndent()
++
++        functionReturnTypeSpacingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 30)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

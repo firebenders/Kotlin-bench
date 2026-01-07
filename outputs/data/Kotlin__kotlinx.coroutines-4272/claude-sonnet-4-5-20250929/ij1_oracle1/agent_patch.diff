@@ -1,0 +1,73 @@
+diff --git a/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt b/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
+index e00c1fdd6..47b2d62ce 100644
+--- a/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
++++ b/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
+@@ -218,10 +218,18 @@ internal suspend fun <T, V> withContextUndispatched(
+     countOrElement: Any = threadContextElements(newContext), // can be precomputed for speed
+     block: suspend (V) -> T
+ ): T =
+-    suspendCoroutineUninterceptedOrReturn { uCont ->
+-        withCoroutineContext(newContext, countOrElement) {
+-            block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))
++    suspendCoroutineUninterceptedOrReturn sc@ { uCont ->
++        val result = try {
++            withCoroutineContext(newContext, countOrElement) {
++                block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))
++            }
++        } catch (e: DispatchException) {
++            // Dispatcher threw an exception (e.g., Dispatchers.Main not available).
++            // Resume the continuation with the underlying cause to avoid silent hanging.
++            uCont.resumeWithException(e.cause)
++            return@sc COROUTINE_SUSPENDED
+         }
++        result
+     }
+ 
+ // Continuation that links the caller with uCont with walkable CoroutineStackFrame
+diff --git a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+index 511199701..b9797c289 100644
+--- a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
++++ b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+@@ -62,7 +62,8 @@ private inline fun <T> ScopeCoroutine<T>.undispatchedResult(
+     val result = try {
+         startBlock()
+     } catch (e: Throwable) {
+-        CompletedExceptionally(e)
++        val reportException = if (e is DispatchException) e.cause else e
++        CompletedExceptionally(reportException)
+     }
+     /*
+      * We're trying to complete our undispatched block here and have three code-paths:
+diff --git a/kotlinx-coroutines-core/common/test/flow/operators/FlowOnTest.kt b/kotlinx-coroutines-core/common/test/flow/operators/FlowOnTest.kt
+index bb0fabb86..06be1b2c9 100644
+--- a/kotlinx-coroutines-core/common/test/flow/operators/FlowOnTest.kt
++++ b/kotlinx-coroutines-core/common/test/flow/operators/FlowOnTest.kt
+@@ -355,4 +355,28 @@ class FlowOnTest : TestBase() {
+             }
+         }
+     }
++
++    @Test
++    fun testFlowOnWithThrowingDispatcher() = runTest {
++        // Create a dispatcher that throws an exception when isDispatchNeeded is called
++        val errorMessage = "Dispatcher not available"
++        val throwingDispatcher = object : CoroutineDispatcher() {
++            override fun isDispatchNeeded(context: CoroutineContext): Boolean {
++                throw IllegalStateException(errorMessage)
++            }
++            override fun dispatch(context: CoroutineContext, block: Runnable) {
++                throw IllegalStateException(errorMessage)
++            }
++        }
++
++        // Verify that the exception is properly propagated instead of hanging
++        val exception = assertFailsWith<IllegalStateException> {
++            flowOf(1, 2, 3)
++                .flowOn(throwingDispatcher)
++                .collect {
++                    expectUnreached()
++                }
++        }
++        assertEquals(errorMessage, exception.message)
++    }
+ }

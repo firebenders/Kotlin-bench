@@ -1,0 +1,104 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ad7358ba..daf4bf19 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -237,6 +237,7 @@ Previously the default value for `.editorconfig` property `max_line_length` was
+ 
+ ### Fixed
+ 
++* Fix false positive indentation for trailing lambdas in safe-call chains (for example `runCatching { ... }.getOrNull()?.let { ... }`) so they match IntelliJ IDEA formatting `indent`
+ * An enumeration class having a primary constructor and in which the list of enum entries is followed by a semicolon then do not remove the semicolon in case it is followed by code element `no-semi` ([#1733](https://github.com/pinterest/ktlint/issues/1733))
+ * Do not add the (first line of the) body expression on the same line as the function signature in case the max line length would be exceeded. `function-signature`. 
+ * Do not add the first line of a multiline body expression on the same line as the function signature in case function body expression wrapping property is set to `multiline`. `function-signature`. 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 2b2d53b9..ad95e88c 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -389,9 +389,15 @@ public class IndentationRule :
+         val rbrace = requireNotNull(
+             node.nextSibling { it.elementType == RBRACE },
+         ) { "Can not find matching rbrace" }
++        val currentIndentBeforeBrace = currentIndent()
++        val indentForFunctionLiteral =
++            node.functionLiteralIndent()
++                ?.takeIf { it.length > currentIndentBeforeBrace.length }
++        val outerNodeIndent = indentForFunctionLiteral ?: currentIndentBeforeBrace
+         startIndentContext(
+             fromAstNode = node,
+             toAstNode = rbrace,
++            nodeIndent = outerNodeIndent,
+             firstChildIndent = "",
+             lastChildIndent = "",
+         )
+@@ -410,13 +416,33 @@ public class IndentationRule :
+                 startIndentContext(
+                     fromAstNode = node,
+                     toAstNode = arrow.prevCodeLeaf()!!,
++                    nodeIndent = outerNodeIndent,
+                     childIndent = arrow.calculateIndentOfFunctionLiteralParameters(),
+                 )
+             }
+     }
+ 
++    private fun ASTNode.functionLiteralIndent(): String? =
++        takeIf { elementType == LBRACE && treeParent?.elementType == FUNCTION_LITERAL }
++            ?.indentOfLine()
++
++    private fun ASTNode.indentOfLine(): String {
++        var leaf = prevLeaf(includeEmpty = true)
++        while (leaf != null) {
++            if (leaf.elementType == WHITE_SPACE) {
++                val text = leaf.text
++                val lastNewLineIndex = text.lastIndexOf('\n')
++                if (lastNewLineIndex != -1) {
++                    return text.substring(lastNewLineIndex + 1)
++                }
++            }
++            leaf = leaf.prevLeaf(includeEmpty = true)
++        }
++        return ""
++    }
++
+     private fun ASTNode.calculateIndentOfFunctionLiteralParameters() =
+-        if (codeStyle == ktlint_official || isFirstParameterOfFunctionLiteralPrecededByNewLine()) {
++if (codeStyle == ktlint_official || isFirstParameterOfFunctionLiteralPrecededByNewLine()) {
+             // val fieldExample =
+             //      LongNameClass {
+             //              paramA,
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleRegressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleRegressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleRegressionTest.kt
+@@ -0,0 +1,23 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class IndentationRuleRegressionTest {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    @Test
++    fun `Given chained safe-call with trailing lambda then expect no indent violations`() {
++        val code =
++            """
++            private fun test(): Boolean? =
++                runCatching { true }
++                    .getOrNull()?.let { result ->
++                        !result
++                    }
++            """.trimIndent()
++
++        indentationRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

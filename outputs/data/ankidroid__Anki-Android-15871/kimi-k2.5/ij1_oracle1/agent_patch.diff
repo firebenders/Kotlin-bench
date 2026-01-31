@@ -1,0 +1,171 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index a95b57bcac..05c3928238 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.9.0'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -228,12 +227,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -248,12 +247,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -365,7 +358,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.5.1'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+index 7e4ff83970..eb086fb954 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+@@ -170,7 +170,7 @@ class TemplateManager {
+         @NeedsTest(
+             "TTS tags `fieldText` is correctly extracted when sources are parsed to file scheme"
+         )
+-        fun render(col: Collection): TemplateRenderOutput {
++        fun render(col: Collection, baseUrl: String? = null): TemplateRenderOutput {
+             val partial: PartiallyRenderedCard
+             try {
+                 partial = partiallyRender(col)
+@@ -189,14 +189,14 @@ class TemplateManager {
+                 mediaDir
+             )
+             val qout = col.backend.extractAvTags(text = qtext, questionSide = true)
+-            var qoutText = parseSourcesToFileScheme(qout.text, mediaDir)
++            var qoutText = parseSourcesToFileScheme(qout.text, mediaDir, baseUrl)
+ 
+             val atext = parseVideos(
+                 applyCustomFilters(partial.anodes, this, frontSide = qout.text),
+                 mediaDir
+             )
+             val aout = col.backend.extractAvTags(text = atext, questionSide = false)
+-            var aoutText = parseSourcesToFileScheme(aout.text, mediaDir)
++            var aoutText = parseSourcesToFileScheme(aout.text, mediaDir, baseUrl)
+ 
+             if (!_browser) {
+                 val svg = noteType.optBoolean("latexsvg", false)
+@@ -334,14 +334,20 @@ fun parseVideos(text: String, mediaDir: String): String {
+  * and loads faster than using HTTP.
+  *
+  * Only attribute values that don't have an Uri scheme (http, file, etc) are parsed.
++ *
++ * @param content The HTML content to parse
++ * @param mediaDir The media directory path
++ * @param baseUrl The base URL to use for media files. If null, `file:///` scheme is used.
++ *                Using the same base URL as the WebView allows JavaScript to access
++ *                contentDocument of embedded SVGs (fixes CORS issues).
+  */
+ @NotInLibAnki
+ @VisibleForTesting
+-fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
++fun parseSourcesToFileScheme(content: String, mediaDir: String, baseUrl: String? = null): String {
+     val doc = Jsoup.parseBodyFragment(content)
+     doc.outputSettings(OutputSettings().prettyPrint(false))
+ 
+-    fun replaceWithFileScheme(tag: String, attr: String): Boolean {
++    fun replaceSource(tag: String, attr: String): Boolean {
+         var madeChanges = false
+         for (elem in doc.select(tag)) {
+             val attrValue = elem.attr(attr)
+@@ -354,8 +360,16 @@ fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
+             }
+             if (attrUri.scheme != null) continue
+ 
+-            val path = Paths.get(mediaDir, attrUri.path).toString()
+-            val newUri = getFileUri(path)
++            val newUri = if (baseUrl != null) {
++                // Use the provided base URL (e.g., http://127.0.0.1:port/)
++                // This allows JavaScript to access contentDocument of embedded SVGs
++                // because they are served from the same origin
++                URI(baseUrl + attrUri.path)
++            } else {
++                // Use file:/// scheme for direct file access
++                val path = Paths.get(mediaDir, attrUri.path).toString()
++                getFileUri(path)
++            }
+ 
+             elem.attr(attr, newUri.toString())
+             madeChanges = true
+@@ -364,11 +378,11 @@ fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
+     }
+ 
+     val hasMadeChanges =
+-        replaceWithFileScheme("img", "src") ||
+-            replaceWithFileScheme("video", "src") ||
+-            replaceWithFileScheme("audio", "src") ||
+-            replaceWithFileScheme("source", "src") ||
+-            replaceWithFileScheme("object", "data")
++        replaceSource("img", "src") ||
++            replaceSource("video", "src") ||
++            replaceSource("audio", "src") ||
++            replaceSource("source", "src") ||
++            replaceSource("object", "data")
+ 
+     return if (hasMadeChanges) {
+         doc.body().html()
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index df05afef76..4d2ca9684e 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

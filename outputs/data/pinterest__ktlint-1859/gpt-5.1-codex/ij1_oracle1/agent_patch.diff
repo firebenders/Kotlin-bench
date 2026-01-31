@@ -1,0 +1,153 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 65486fb6..2875f5dc 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -254,6 +254,7 @@ Previously the default value for `.editorconfig` property `max_line_length` was
+ * Fix false positive when a single line statement containing a block having exactly the maximum line length is preceded by a blank line `wrapping` ([#1808](https://github.com/pinterest/ktlint/issues/1808))
+ * Fix false positive when a single line contains multiple dot qualified expressions and/or safe expressions `indent` ([#1830](https://github.com/pinterest/ktlint/issues/1830))
+ * When `.editorconfig` property `ij_kotlin_imports_layout` contains a `|` but no import exists that match any pattern before the first `|` then do not report a violation nor insert a blank line `import-ordering` ([#1845](https://github.com/pinterest/ktlint/issues/1845))
++* Apply the same spacing rules to the `..<` range-until operator as to the traditional `..` operator `range-spacing`
+ 
+ ### Changed
+ * Wrap the parameters of a function literal containing a multiline parameter list (only in `ktlint_official` code style) `parameter-list-wrapping` ([#1681](https://github.com/pinterest/ktlint/issues/1681)).
+diff --git a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ElementType.kt b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ElementType.kt
+index 1158353d..651d670a 100644
+--- a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ElementType.kt
++++ b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ElementType.kt
+@@ -213,8 +213,9 @@ public object ElementType {
+     public val SEMICOLON: IElementType = KtTokens.SEMICOLON
+     public val DOUBLE_SEMICOLON: IElementType = KtTokens.DOUBLE_SEMICOLON
+     public val RANGE: IElementType = KtTokens.RANGE
++    public val RANGE_UNTIL: IElementType = KtTokens.RANGE_UNTIL
+     public val EQ: IElementType = KtTokens.EQ
+-    public val MULTEQ: IElementType = KtTokens.MULTEQ
++public val MULTEQ: IElementType = KtTokens.MULTEQ
+     public val DIVEQ: IElementType = KtTokens.DIVEQ
+     public val PERCEQ: IElementType = KtTokens.PERCEQ
+     public val PLUSEQ: IElementType = KtTokens.PLUSEQ
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRule.kt
+index 05180372..1608926f 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeOperatorRule.kt
+@@ -1,6 +1,9 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.LT
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.RANGE
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.RANGE_UNTIL
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+@@ -14,32 +17,47 @@ public class SpacingAroundRangeOperatorRule : StandardRule("range-spacing") {
+         autoCorrect: Boolean,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+     ) {
+-        if (node.elementType == RANGE) {
++        if (node.elementType == RANGE || node.elementType == RANGE_UNTIL) {
++            val operatorSymbol = if (node.elementType == RANGE_UNTIL) "..<" else ".."
+             val prevLeaf = node.prevLeaf()
+             val nextLeaf = node.nextLeaf()
+             when {
+                 prevLeaf is PsiWhiteSpace && nextLeaf is PsiWhiteSpace -> {
+-                    emit(node.startOffset, "Unexpected spacing around \"..\"", true)
++                    emit(node.startOffset, "Unexpected spacing around \"$operatorSymbol\"", true)
+                     if (autoCorrect) {
+                         prevLeaf.node.treeParent.removeChild(prevLeaf.node)
+                         nextLeaf.node.treeParent.removeChild(nextLeaf.node)
+                     }
+                 }
+                 prevLeaf is PsiWhiteSpace -> {
+-                    emit(prevLeaf.node.startOffset, "Unexpected spacing before \"..\"", true)
++                    emit(prevLeaf.node.startOffset, "Unexpected spacing before \"$operatorSymbol\"", true)
+                     if (autoCorrect) {
+                         prevLeaf.node.treeParent.removeChild(prevLeaf.node)
+                     }
+                 }
+                 nextLeaf is PsiWhiteSpace -> {
+-                    emit(nextLeaf.node.startOffset, "Unexpected spacing after \"..\"", true)
++                    emit(nextLeaf.node.startOffset, "Unexpected spacing after \"$operatorSymbol\"", true)
+                     if (autoCorrect) {
+                         nextLeaf.node.treeParent.removeChild(nextLeaf.node)
+                     }
+                 }
+             }
++
++            if (node.elementType == RANGE) {
++                val lessThanLeaf =
++                    node
++                        .nextLeaf { it.elementType != WHITE_SPACE }
++                        ?.takeIf { it.elementType == LT }
++                val leafAfterLessThan = lessThanLeaf?.nextLeaf()
++                if (leafAfterLessThan is PsiWhiteSpace) {
++                    emit(leafAfterLessThan.startOffset, "Unexpected spacing after \"..<\"", true)
++                    if (autoCorrect) {
++                        leafAfterLessThan.treeParent.removeChild(leafAfterLessThan)
++                    }
++                }
++            }
+         }
+-    }
++}
+ }
+ 
+ public val SPACING_AROUND_RANGE_OPERATOR_RULE_ID: RuleId = SpacingAroundRangeOperatorRule().ruleId
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeUntilOperatorRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeUntilOperatorRuleTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/SpacingAroundRangeUntilOperatorRuleTest.kt
+@@ -0,0 +1,45 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++class SpacingAroundRangeUntilOperatorRuleTest {
++    private val spacingAroundRangeOperatorRuleAssertThat = assertThatRule { SpacingAroundRangeOperatorRule() }
++
++    @Test
++    fun `Given a range-until expression then remove unexpected spacing`() {
++val code =
++            """
++            @OptIn(ExperimentalStdlibApi::class)
++            fun foo(int: Int): String =
++                when (int) {
++                    in 10..<20 -> "A"
++                    in 20..< 30 -> "B"
++                    in 30 ..< 40 -> "C"
++                    in 40 ..<50 -> "D"
++                    else -> "unknown"
++                }
++            """.trimIndent()
++        val formattedCode =
++            """
++            @OptIn(ExperimentalStdlibApi::class)
++            fun foo(int: Int): String =
++                when (int) {
++                    in 10..<20 -> "A"
++                    in 20..<30 -> "B"
++                    in 30..<40 -> "C"
++                    in 40..<50 -> "D"
++                    else -> "unknown"
++                }
++            """.trimIndent()
++
++        spacingAroundRangeOperatorRuleAssertThat(code)
++            .hasLintViolations(
++                LintViolation(5, 17, "Unexpected spacing after \"..<\""),
++                LintViolation(6, 15, "Unexpected spacing around \"..<\""),
++                LintViolation(7, 14, "Unexpected spacing before \"..<\""),
++            ).isFormattedAs(formattedCode)
++}
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

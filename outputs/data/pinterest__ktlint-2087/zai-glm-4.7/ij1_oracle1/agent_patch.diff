@@ -1,3 +1,181 @@
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+index eec63c77..5a85ca91 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+@@ -133,84 +133,111 @@ public class KtLintRuleEngine(
+         LOGGER.debug { "Starting with formatting file '${code.fileNameOrStdin()}'" }
+ 
+         val hasUTF8BOM = code.content.startsWith(UTF8_BOM)
+-        val ruleExecutionContext = createRuleExecutionContext(this, code)
++        var currentCode = code
++        var lastFormattedCode: String? = null
++        var finalErrors: List<Pair<LintError, Boolean>> = emptyList()
++        val maxReruns = 3
+ 
+-        var tripped = false
+-        var mutated = false
+-        val errors = mutableSetOf<Pair<LintError, Boolean>>()
+-        val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+-        visitorProvider
+-            .visitor()
+-            .invoke { rule ->
+-                ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
+-                    tripped = true
+-                    if (canBeAutoCorrected) {
+-                        mutated = true
+-                        /**
+-                         * Rebuild the suppression locator after each change in the AST as the offsets of the
+-                         * suppression hints might have changed.
+-                         */
+-                        ruleExecutionContext.rebuildSuppressionLocator()
+-                    }
+-                    val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+-                    errors.add(
+-                        Pair(
+-                            LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
+-                            // It is assumed that a rule that emits that an error can be autocorrected, also
+-                            // does correct the error.
+-                            canBeAutoCorrected,
+-                        ),
+-                    )
+-                    // In trace mode report the violation immediately. The order in which violations are actually found might be different
+-                    // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
+-                    // violations are being solved.
+-                    LOGGER.trace {
+-                        "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
+-                            canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
+-                    }
+-                }
+-            }
+-        if (tripped) {
++        repeat(maxReruns + 1) { runIndex ->
++            val ruleExecutionContext = createRuleExecutionContext(this, currentCode)
++
++            var tripped = false
++            var mutated = false
++            val errors = mutableSetOf<Pair<LintError, Boolean>>()
++            val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+             visitorProvider
+                 .visitor()
+                 .invoke { rule ->
+-                    ruleExecutionContext.executeRule(
+-                        rule,
+-                        false,
+-                    ) { offset, errorMessage, canBeAutoCorrected ->
++                    ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
++                        tripped = true
++                        if (canBeAutoCorrected) {
++                            mutated = true
++                            /**
++                             * Rebuild the suppression locator after each change in the AST as the offsets of the
++                             * suppression hints might have changed.
++                             */
++                            ruleExecutionContext.rebuildSuppressionLocator()
++                        }
+                         val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+                         errors.add(
+                             Pair(
+                                 LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
+-                                // It is assumed that a rule only corrects an error after it has emitted an
+-                                // error and indicating that it actually can be autocorrected.
+-                                false,
++                                // It is assumed that a rule that emits that an error can be autocorrected, also
++                                // does correct the error.
++                                canBeAutoCorrected,
+                             ),
+                         )
++                        // In trace mode report the violation immediately. The order in which violations are actually found might be different
++                        // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
++                        // violations are being solved.
++                        LOGGER.trace {
++                            "Format violation: ${currentCode.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
++                                canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
++                        }
+                     }
+                 }
+-        }
++            if (tripped) {
++                visitorProvider
++                    .visitor()
++                    .invoke { rule ->
++                        ruleExecutionContext.executeRule(
++                            rule,
++                            false,
++                        ) { offset, errorMessage, canBeAutoCorrected ->
++                            val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
++                            errors.add(
++                                Pair(
++                                    LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
++                                    // It is assumed that a rule only corrects an error after it has emitted an
++                                    // error and indicating that it actually can be autocorrected.
++                                    false,
++                                ),
++                            )
++                        }
++                    }
++            }
+ 
+-        errors
+-            .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
+-            .forEach { (e, corrected) -> callback(e, corrected) }
++            // Store the errors from the last run for the callback
++            finalErrors = errors.sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
+ 
+-        if (!mutated) {
+-            return code.content
+-        }
++            if (!mutated) {
++                // No mutations in this run, we're done
++                lastFormattedCode = currentCode.content
++                return@repeat
++            }
++
++            val formattedCode =
++                ruleExecutionContext
++                    .rootNode
++                    .text
++                    .replace("\n", ruleExecutionContext.determineLineSeparator(currentCode.content))
++            val result =
++                if (hasUTF8BOM) {
++                    UTF8_BOM + formattedCode
++                } else {
++                    formattedCode
++                }
+ 
+-        val formattedCode =
+-            ruleExecutionContext
+-                .rootNode
+-                .text
+-                .replace("\n", ruleExecutionContext.determineLineSeparator(code.content))
+-        return if (hasUTF8BOM) {
+-            UTF8_BOM + formattedCode
+-        } else {
+-            formattedCode
+-        }.also {
+-            LOGGER.debug("Finished with formatting file '${code.fileNameOrStdin()}'")
++            // Check if there are any remaining auto-correctable errors
++            val hasRemainingAutoCorrectableErrors = errors.any { (e, _) -> e.canBeAutoCorrected }
++
++            // Don't rerun if:
++            // - This is the last allowed run (maxReruns), OR
++            // - No more auto-correctable errors remain
++            if (runIndex >= maxReruns || !hasRemainingAutoCorrectableErrors) {
++                lastFormattedCode = result
++                return@repeat
++            }
++
++            // Prepare for next run with the formatted code
++            currentCode = Code.fromSnippet(content = result, script = code.script)
+         }
++
++        // Call callback with lint violations from the last format run
++        finalErrors.forEach { (e, corrected) -> callback(e, corrected) }
++
++        LOGGER.debug("Finished with formatting file '${code.fileNameOrStdin()}'")
++        return requireNotNull(lastFormattedCode) { "Formatted code should not be null" }
+     }
+ 
+     private fun RuleExecutionContext.determineLineSeparator(fileContent: String): String {
 
 diff --git a/local.properties b/local.properties
 new file mode 100644

@@ -1,0 +1,334 @@
+diff --git a/core/common/src/Clock.kt b/core/common/src/Clock.kt
+index 7849d67..36b08ae 100644
+--- a/core/common/src/Clock.kt
++++ b/core/common/src/Clock.kt
+@@ -8,18 +8,39 @@ package kotlinx.datetime
+ import kotlin.time.*
+ 
+ /**
+- * A source of [Instant] values.
++ * A source of [Instant] values such as the system wall clock or a deterministic test clock.
+  *
+- * See [Clock.System][Clock.System] for the clock instance that queries the operating system.
++ * `Clock` abstracts how "now" is obtained so that code can depend on time without reaching for global state. You can
++ * inject a custom implementation in tests, wrap the system time, or proxy a remote time service.
++ *
++ * Unlike [kotlin.time.TimeSource], a `Clock` returns absolute instants that can be converted to human-readable
++ * [LocalDateTime] values via [TimeZone] conversions. Consecutive readings are not guaranteed to be monotonic because the
++ * underlying time source may be adjusted by the operating system, NTP, or virtualization platforms. If you need
++ * monotonic elapsed time measurements, convert the clock to a [TimeSource] with [asTimeSource] or use
++ * [kotlin.time.TimeSource.Monotonic].
++ *
++ * Example:
++ * ```
++ * val invoiceDue = clock.now() + 30.days
++ * val dueDate = invoiceDue.toLocalDateTime(TimeZone.currentSystemDefault())
++ * ```
+  */
+ public interface Clock {
+     /**
+-     * Returns the [Instant] corresponding to the current time, according to this clock.
++     * Returns the [Instant] corresponding to the current time according to this clock.
++     *
++     * Two sequential calls may return the same value or even move backwards if the underlying clock is adjusted. Prefer
++     * injecting a clock rather than calling [Clock.System] directly so the observed flow of time can be controlled in
++     * tests.
+      */
+     public fun now(): Instant
+ 
+     /**
+-     * The [Clock] instance that queries the operating system as its source of knowledge of time.
++     * The [Clock] implementation that queries the operating system as its source of truth.
++     *
++     * It reports the platform's wall-clock time (including any leap-second smearing or manual adjustments performed by
++     * the OS). This makes it ideal for user-facing features such as showing "now" or computing deadlines, but unsuitable
++     * for precise elapsed-time measurements.
+      */
+     public object System : Clock {
+         override fun now(): Instant = @Suppress("DEPRECATION_ERROR") Instant.now()
+@@ -31,17 +52,25 @@ public interface Clock {
+ }
+ 
+ /**
+- * Returns the current date at the given [time zone][timeZone], according to [this Clock][this].
++ * Returns the current civil date in the provided [timeZone], according to this [Clock].
++ *
++ * This is equivalent to `now().toLocalDateTime(timeZone).date`, but keeps the conversion close to the clock so custom
++ * clock implementations continue to work as expected in tests.
+  */
+ public fun Clock.todayIn(timeZone: TimeZone): LocalDate =
+     now().toLocalDateTime(timeZone).date
+ 
+ /**
+- * Returns a [TimeSource] that uses this [Clock] to mark a time instant and to find the amount of time elapsed since that mark.
++ * Returns a [TimeSource] backed by this [Clock], allowing you to measure elapsed [Duration]s relative to instants
++ * produced by the clock.
++ *
++ * This is helpful when your business logic already depends on an injectable clock but you also need monotonic
++ * measurements (e.g., timeouts). The resulting [TimeSource.WithComparableMarks] keeps track of the originating clock so
++ * marks from different clocks cannot be mixed accidentally.
+  */
+ @ExperimentalTime
+ public fun Clock.asTimeSource(): TimeSource.WithComparableMarks = object : TimeSource.WithComparableMarks {
+-    override fun markNow(): ComparableTimeMark = InstantTimeMark(now(), this@asTimeSource)
++override fun markNow(): ComparableTimeMark = InstantTimeMark(now(), this@asTimeSource)
+ }
+ 
+ @ExperimentalTime
+diff --git a/core/common/src/DayOfWeek.kt b/core/common/src/DayOfWeek.kt
+index 496d61b..fcf3365 100644
+--- a/core/common/src/DayOfWeek.kt
++++ b/core/common/src/DayOfWeek.kt
+@@ -6,10 +6,30 @@
+ package kotlinx.datetime
+ 
+ /**
+- * The enumeration class representing the days of the week.
++ * Represents one of the seven days in an ISO-8601 week (Monday = 1 .. Sunday = 7).
++ *
++ * A [DayOfWeek] models a civil-week concept rather than a moment in time. The value you observe is derived from a
++ * local calendar date (for example via [LocalDate.dayOfWeek] or [LocalDateTime.dayOfWeek]) and therefore depends on the
++ * time zone that was used to obtain that date, but afterwards it is a stable, time-zone-independent enum constant that
++ * can be safely persisted or transferred between systems.
++ *
++ * ## Acquiring a value
++ * - Inspect an existing date/time via [LocalDate.dayOfWeek], [LocalDateTime.dayOfWeek], or by querying
++ *   `Clock.todayIn(timeZone)` and taking its [LocalDate].
++ * - Convert from ISO-8601 weekday numbers using [isoDayNumber] or the [DayOfWeek] factory function.
++ *
++ * ## Usage example
++ * ```
++ * fun nextBusinessDay(from: LocalDate): LocalDate =
++ *     generateSequence(from) { it.plus(1, DateTimeUnit.DAY) }
++ *         .first { it.dayOfWeek !in setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY) }
++ * ```
++ *
++ * This keeps application code explicit about what happens on weekends or custom schedules while still staying in the
++ * calendar domain.
+  */
+ public expect enum class DayOfWeek {
+-    MONDAY,
++MONDAY,
+     TUESDAY,
+     WEDNESDAY,
+     THURSDAY,
+@@ -19,14 +39,19 @@ public expect enum class DayOfWeek {
+ }
+ 
+ /**
+- * The ISO-8601 number of the given day of the week. Monday is 1, Sunday is 7.
++ * The ISO-8601 number (1 for Monday .. 7 for Sunday) of this day in the week.
++ *
++ * Use this when serializing day-of-week values to formats that store weekdays as numbers, or when interoperating with
++ * systems that follow ISO-8601 semantics.
+  */
+ public val DayOfWeek.isoDayNumber: Int get() = ordinal + 1
+ 
+ /**
+  * Returns the [DayOfWeek] instance for the given ISO-8601 week day number. Monday is 1, Sunday is 7.
++ *
++ * @throws IllegalArgumentException if [isoDayNumber] is outside the `1..7` range.
+  */
+ public fun DayOfWeek(isoDayNumber: Int): DayOfWeek {
+-    require(isoDayNumber in 1..7) { "Expected ISO day-of-week number in 1..7, got $isoDayNumber" }
++require(isoDayNumber in 1..7) { "Expected ISO day-of-week number in 1..7, got $isoDayNumber" }
+     return DayOfWeek.entries[isoDayNumber - 1]
+ }
+diff --git a/core/common/src/Instant.kt b/core/common/src/Instant.kt
+index 659fe5b..156e4b7 100644
+--- a/core/common/src/Instant.kt
++++ b/core/common/src/Instant.kt
+@@ -31,6 +31,14 @@ import kotlin.time.*
+  * - [Instant.parse] parses an ISO-8601 string.
+  * - [Instant.fromEpochMilliseconds] and [Instant.fromEpochSeconds] construct the instant values from the amount of time
+  *   since `1970-01-01T00:00:00Z` (the Unix epoch).
++ *
++ * ## Usage notes
++ * - Adding or subtracting a [Duration] manipulates the absolute timeline. For example, `instant + 1.days` always adds
++ *   exactly 86_400 SI seconds, regardless of how long the corresponding civil day is in any time zone. To perform
++ *   calendar-aware arithmetic, convert the instant to a [LocalDateTime] in a [TimeZone] or use the [DateTimePeriod]
++ *   overloads that accept a time zone.
++ * - Platform-specific extension functions let you interoperate with native date/time types (e.g. `Instant.toJavaInstant()`
++ *   on the JVM or `Instant.toNSDate()` on Darwin). They are declared in the respective source sets.
+  */
+ @Serializable(with = InstantIso8601Serializer::class)
+ public expect class Instant : Comparable<Instant> {
+@@ -73,6 +81,10 @@ public expect class Instant : Comparable<Instant> {
+      * If the [duration] is positive, the returned instant is later than this instant.
+      * If the [duration] is negative, the returned instant is earlier than this instant.
+      *
++     * Timeline arithmetic always happens in exact SI seconds. In particular, `instant + 1.days` adds 86_400 seconds even
++     * if the civil day at some location is shorter or longer because of daylight saving. To add calendar units relative
++     * to a [TimeZone], convert to [LocalDateTime] or use [plus] with a [DateTimePeriod].
++     *
+      * The return value is clamped to the platform-specific boundaries for [Instant] if the result exceeds them.
+      */
+     public operator fun plus(duration: Duration): Instant
+@@ -83,6 +95,9 @@ public expect class Instant : Comparable<Instant> {
+      * If the [duration] is positive, the returned instant is earlier than this instant.
+      * If the [duration] is negative, the returned instant is later than this instant.
+      *
++     * As with [plus], this operation manipulates the absolute timeline measured in seconds. Subtracting `1.days`
++     * removes 86_400 seconds regardless of how long that civil day was in any location.
++     *
+      * The return value is clamped to the platform-specific boundaries for [Instant] if the result exceeds them.
+      */
+     public operator fun minus(duration: Duration): Instant
+@@ -215,6 +230,9 @@ public fun String.toInstant(): Instant = Instant.parse(this)
+  * Returns an instant that is the result of adding components of [DateTimePeriod] to this instant. The components are
+  * added in the order from the largest units to the smallest, i.e. from years to nanoseconds.
+  *
++ * Use this overload when the addition must respect calendar rules in a particular [timeZone] (for example, "next month
++ * at 09:00 in Berlin").
++ *
+  * @throws DateTimeArithmeticException if this value or the results of intermediate computations are too large to fit in
+  * [LocalDateTime].
+  */
+@@ -224,11 +242,14 @@ public expect fun Instant.plus(period: DateTimePeriod, timeZone: TimeZone): Inst
+  * Returns an instant that is the result of subtracting components of [DateTimePeriod] from this instant. The components
+  * are subtracted in the order from the largest units to the smallest, i.e. from years to nanoseconds.
+  *
++ * This is the calendar-aware counterpart to subtracting a [Duration], ensuring that operations such as "minus one
++ * month" behave in the context of the provided [timeZone].
++ *
+  * @throws DateTimeArithmeticException if this value or the results of intermediate computations are too large to fit in
+  * [LocalDateTime].
+  */
+ public fun Instant.minus(period: DateTimePeriod, timeZone: TimeZone): Instant =
+-    /* An overflow can happen for any component, but we are only worried about nanoseconds, as having an overflow in
++/* An overflow can happen for any component, but we are only worried about nanoseconds, as having an overflow in
+     any other component means that `plus` will throw due to the minimum value of the numeric type overflowing the
+     platform-specific limits. */
+     if (period.totalNanoseconds != Long.MIN_VALUE) {
+diff --git a/core/common/src/TimeZone.kt b/core/common/src/TimeZone.kt
+index c0af7d8..c4ad8b0 100644
+--- a/core/common/src/TimeZone.kt
++++ b/core/common/src/TimeZone.kt
+@@ -12,12 +12,33 @@ import kotlinx.datetime.serializers.*
+ import kotlinx.serialization.Serializable
+ 
+ /**
+- * A time zone, provides the conversion between [Instant] and [LocalDateTime] values
+- * using a collection of rules specifying which [LocalDateTime] value corresponds to each [Instant].
++ * Describes how to convert between [Instant] values on the global timeline and human-readable [LocalDateTime] values
++ * for a particular geographic region or a fixed [UtcOffset].
++ *
++ * A time zone encapsulates the daylight-saving and historical transition rules (usually sourced from the IANA Time Zone
++ * Database) that tell which local time corresponds to every instant. Use it whenever you need to present an instant to
++ * a user, convert user input back into an instant, or compare civil times that depend on a location.
++ *
++ * ## Acquiring a time zone
++ * - Follow the host/device settings with [TimeZone.currentSystemDefault].
++ * - Resolve a region such as `"Europe/Berlin"` or a custom offset like `"UTC+02:30"` with [TimeZone.of].
++ * - Enumerate [availableZoneIds] to inspect which region identifiers the current platform bundle ships with.
++ * - Construct a [FixedOffsetTimeZone] directly when a protocol carries a concrete [UtcOffset].
++ *
++ * ## Usage example
++ * ```
++ * val instant = Clock.System.now()
++ * val berlin = TimeZone.of("Europe/Berlin")
++ * val civilTime = instant.toLocalDateTime(berlin)
++ * val instantAgain = civilTime.toInstant(berlin)
++ * ```
++ *
++ * On supported platforms there are extension converters to native types (for example, `TimeZone.toJavaZoneId()` on the
++ * JVM and `TimeZone.toNSTimeZone()` on Darwin) so that the same zone data can be shared with platform APIs.
+  */
+ @Serializable(with = TimeZoneSerializer::class)
+ public expect open class TimeZone {
+-    /**
++/**
+      * Returns the identifier string of the time zone.
+      *
+      * This identifier can be used later for finding this time zone with [TimeZone.of] function.
+@@ -30,36 +51,46 @@ public expect open class TimeZone {
+         /**
+          * Queries the current system time zone.
+          *
+-         * If the current system time zone changes, this function can reflect this change on the next invocation.
++         * The result reflects the host configuration (for example "Europe/Berlin" or a custom offset). Cached values
++         * may become stale if the user or operating system changes the setting; call this function again to observe the
++         * new zone.
+          */
+         public fun currentSystemDefault(): TimeZone
+ 
+         /**
+-         * Returns the time zone with the fixed UTC+0 offset.
++         * Returns the fixed-offset time zone with zero offset from UTC.
++         *
++         * This is equivalent to `FixedOffsetTimeZone(UtcOffset.ZERO)` and is convenient when you want to explicitly
++         * opt out of daylight-saving rules.
+          */
+         public val UTC: FixedOffsetTimeZone
+ 
+         /**
+          * Returns the time zone identified by the provided [zoneId].
+          *
+-         * The supported variants of time zone identifiers:
+-         * - `Z`, 'UTC', 'UT' or 'GMT' — identifies the fixed-offset time zone [TimeZone.UTC],
+-         * - a string starting with '+', '-', `UTC+`, `UTC-`, `UT+`, `UT-`, `GMT+`, `GMT-` — identifiers the time zone
+-         *   with the fixed offset specified after `+` or `-`,
+-         * - all other strings are treated as region-based zone identifiers.
+-         * In the IANA Time Zone Database (TZDB) which is used as the default source of time zones,
+-         * these ids are usually in the form `area/city`, for example, `Europe/Berlin` or `America/Los_Angeles`.
++         * Supported identifiers include:
++         * - `Z`, `UTC`, `UT`, or `GMT` — the fixed-offset time zone [TimeZone.UTC].
++         * - numeric offsets such as `"+02:30"`, `"UTC-04"`, or `"GMT+0330"`, which result in a [FixedOffsetTimeZone]
++         *   with the corresponding [UtcOffset].
++         * - region-based ids such as `"Europe/Berlin"` or `"America/Los_Angeles"`, which follow the IANA Time Zone
++         *   Database (TZDB) naming scheme.
+          *
+-         * @throws IllegalTimeZoneException if [zoneId] has an invalid format or a time-zone with the name [zoneId]
+-         * is not found.
++         * Parsing is strict so that mistakes are surfaced early. If you only need to persist a clock shift relative to
++         * UTC, use [FixedOffsetTimeZone] directly instead of relying on a region id.
++         *
++         * @throws IllegalTimeZoneException if [zoneId] has an invalid format or a matching time zone is not found on the
++         * current platform.
+          */
+         public fun of(zoneId: String): TimeZone
+ 
+         /**
+-         * Queries the set of identifiers of time zones available in the system.
++         * Returns the set of region-based identifiers available on this system.
++         *
++         * The content depends on the platform (some may bundle a reduced TZDB). Use it to drive UI pickers or
++         * validate persisted ids before calling [of].
+          */
+         public val availableZoneIds: Set<String>
+-    }
++}
+ 
+     /**
+      * Return the civil date/time value that this instant has in the time zone provided as an implicit receiver.
+@@ -91,10 +122,17 @@ public expect open class TimeZone {
+ }
+ 
+ /**
+- * A time zone that is known to always have the same offset from UTC.
++ * A time zone whose [UtcOffset] never changes.
++ *
++ * Fixed-offset zones are useful for interoperating with systems that transmit explicit offsets (for example, RFC 3339
++ * timestamps), for storing business rules like "run at 09:00 UTC+02", or for tests where deterministic behavior across
++ * daylight-saving changes is required.
+  */
+ @Serializable(with = FixedOffsetTimeZoneSerializer::class)
+ public expect class FixedOffsetTimeZone : TimeZone {
++    /**
++     * Creates a fixed-offset time zone from the provided [offset].
++     */
+     public constructor(offset: UtcOffset)
+ 
+     /**
+@@ -110,7 +148,10 @@ public expect class FixedOffsetTimeZone : TimeZone {
+ public typealias ZoneOffset = FixedOffsetTimeZone
+ 
+ /**
+- * Finds the offset from UTC this time zone has at the specified [instant] of physical time.
++ * Returns the [UtcOffset] that this time zone applies at the given [instant].
++ *
++ * This reflects daylight-saving transitions: for a [FixedOffsetTimeZone] the result always equals [FixedOffsetTimeZone.offset],
++ * while for region-based zones it can vary over time.
+  *
+  * @see Instant.toLocalDateTime
+  * @see TimeZone.offsetAt

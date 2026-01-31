@@ -1,0 +1,136 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 472119cf..ca693987 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -678,6 +678,7 @@ Several methods for which it is unlikely that they are used by API consumers hav
+ * Merge first line of body expression with function signature only when it fits on the same line `function-signature` ([#1527](https://github.com/pinterest/ktlint/issues/1527))
+ * Add missing whitespace when else is on same line as true condition `multiline-if-else` ([#1560](https://github.com/pinterest/ktlint/issues/1560))
+ * Fix multiline if-statements `multiline-if-else` ([#828](https://github.com/pinterest/ktlint/issues/828))
++* Prevent false positive when chaining `else if` before combining the expression with additional operators (e.g. Elvis or dot-qualification) `multiline-if-else`
+ * Prevent class cast exception on ".editorconfig" property `ktlint_code_style`  ([#1559](https://github.com/pinterest/ktlint/issues/1559))
+ * Handle trailing comma in enums `trailing-comma` ([#1542](https://github.com/pinterest/ktlint/pull/1542))
+ * Allow EOL comment after annotation ([#1539](https://github.com/pinterest/ktlint/issues/1539))
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
+index 33f6a6e4..96b4ab47 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
+@@ -23,7 +23,14 @@ import com.pinterest.ktlint.ruleset.standard.StandardRule
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+ import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
+ import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.PsiWhiteSpaceImpl
++import org.jetbrains.kotlin.psi.KtBinaryExpression
+ import org.jetbrains.kotlin.psi.KtBlockExpression
++import org.jetbrains.kotlin.psi.KtDotQualifiedExpression
++import org.jetbrains.kotlin.psi.KtIfExpression
++import org.jetbrains.kotlin.psi.KtParenthesizedExpression
++import org.jetbrains.kotlin.psi.KtPostfixExpression
++import org.jetbrains.kotlin.psi.KtPrefixExpression
++import org.jetbrains.kotlin.psi.KtSafeQualifiedExpression
+ import org.jetbrains.kotlin.psi.psiUtil.leaves
+ 
+ /**
+@@ -53,17 +60,19 @@ public class MultiLineIfElseRule :
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+     ) {
+         if (node.elementType == THEN || node.elementType == ELSE) {
+-            if (node.firstChildNode?.elementType == BLOCK) {
++            val firstChildNode = node.firstChildNode ?: return
++            if (firstChildNode.elementType == BLOCK) {
++                return
++            }
++
++            if (node.elementType == ELSE && firstChildNode.startsWithIfExpression()) {
++                // Allow else-if regardless of whether the previous branch spans multiple lines or when the
++                // result of the if-expression is combined with other expressions (e.g. Elvis/dot-qualified).
+                 return
+             }
+ 
+             if (!node.treePrev.textContains('\n')) {
+-                if (node.firstChildNode.elementType == IF) {
+-                    // Allow single line for:
+-                    // else if (...)
+-                    return
+-                }
+-                if (!node.treeParent.textContains('\n')) {
++if (!node.treeParent.textContains('\n')) {
+                     // Allow single line if statements as long as they are really simple (e.g. do not contain newlines)
+                     //    if (...) <statement> // no else statement
+                     //    if (...) <statement> else <statement>
+@@ -119,6 +128,18 @@ public class MultiLineIfElseRule :
+                 ?.upsertWhitespaceBeforeMe(" ")
+         }
+     }
++
++    private fun ASTNode.startsWithIfExpression(): Boolean =
++        when (val psi = psi) {
++            is KtIfExpression -> true
++            is KtBinaryExpression -> psi.left?.node?.startsWithIfExpression() ?: false
++            is KtDotQualifiedExpression -> psi.receiverExpression.node.startsWithIfExpression()
++            is KtSafeQualifiedExpression -> psi.receiverExpression.node.startsWithIfExpression()
++            is KtParenthesizedExpression -> psi.expression?.node?.startsWithIfExpression() ?: false
++            is KtPostfixExpression -> psi.baseExpression?.node?.startsWithIfExpression() ?: false
++            is KtPrefixExpression -> psi.baseExpression?.node?.startsWithIfExpression() ?: false
++            else -> false
++        }
+ }
+ 
+ public val MULTI_LINE_IF_ELSE_RULE_ID: RuleId = MultiLineIfElseRule().ruleId
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleElseIfRegressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleElseIfRegressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleElseIfRegressionTest.kt
+@@ -0,0 +1,45 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class MultiLineIfElseRuleElseIfRegressionTest {
++    private val multiLineIfElseRuleAssertThat = assertThatRule { MultiLineIfElseRule() }
++
++    @Test
++    fun `Given a multiline else-if chain with an elvis operator then do not force braces`() {
++        val code =
++            """
++            fun foo(showFilter: Boolean, activeTabIndex: Int?): Int {
++                val value =
++                    if (showFilter) {
++                        1
++                    } else if ((activeTabIndex ?: 0) == 0) {
++                        2
++                    } else {
++                        null
++                    } ?: 0
++                return value
++            }
++            """.trimIndent()
++        multiLineIfElseRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given a multiline else-if chain followed by a dot-qualified call then do not force braces`() {
++        val code =
++            """
++            fun foo(bar1: Boolean, bar2: Boolean): String {
++                return if (bar1) {
++                    "bar1"
++                } else if (bar2) {
++                    "bar2"
++                } else {
++                    "bar3"
++                }.plus("foo")
++            }
++            """.trimIndent()
++        multiLineIfElseRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

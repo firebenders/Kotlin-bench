@@ -45,6 +45,24 @@ MODEL_CONFIG = {
         "cached_input_price": 0.175,
         "output_price": 14.00,
     },
+    "gpt-5.2-codex": {
+        "display_name": "GPT-5.2-Codex",
+        "input_price": 1.75,
+        "cached_input_price": 0.175,
+        "output_price": 14.00,
+    },
+    "gpt-5.1-codex": {
+        "display_name": "GPT-5.1-Codex",
+        "input_price": 1.25,
+        "cached_input_price": 0.125,
+        "output_price": 10.00,
+    },
+    "gpt-4.1": {
+        "display_name": "GPT-4.1",
+        "input_price": 2.50,
+        "cached_input_price": 0.25,
+        "output_price": 10.00,
+    },
     "zai-glm-4.7": {
         "display_name": "GLM-4.7",
         "input_price": 0.60,

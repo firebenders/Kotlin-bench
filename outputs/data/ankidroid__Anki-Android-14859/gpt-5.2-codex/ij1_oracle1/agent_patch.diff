@@ -1,0 +1,197 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index c7bb17d62d..e9e3f2b8b6 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.6'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -226,12 +225,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -246,12 +245,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -361,7 +354,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+index 8f8b62c9a3..a3ab6b4d12 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+@@ -259,18 +259,58 @@ open class CardBrowser :
+         if (which != mOrder) {
+             mOrder = which
+             mOrderAsc = false
+-            which.save(getColUnsafe.config, baseContext.sharedPrefs())
+-            getColUnsafe.config.set("sortBackwards", mOrderAsc)
++            saveSortOrderToConfig(getColUnsafe, which)
+             searchCards()
+         } else if (which != SortType.NO_SORTING) {
+             // if the same element is selected again, reverse the order
+             mOrderAsc = !mOrderAsc
+-            getColUnsafe.config.set("sortBackwards", mOrderAsc)
++            saveSortBackwardsToConfig(getColUnsafe)
+             mCards.reverse()
+             updateList()
+         }
+     }
+ 
++    private fun loadSortOrderFromConfig(col: com.ichi2.libanki.Collection) {
++        val preferences = baseContext.sharedPrefs()
++        if (cardsOrNotes == CARDS) {
++            mOrder = SortType.fromCol(col.config, preferences)
++            mOrderAsc = col.config.get("sortBackwards") ?: false
++            return
++        }
++
++        val noteSortType = col.config.get<String>("noteSortType") ?: SortType.SORT_FIELD.ankiSortType
++        val noteSort = SortType.entries.firstOrNull { it.ankiSortType == noteSortType } ?: SortType.SORT_FIELD
++        mOrder = if (noteSort == SortType.SORT_FIELD && preferences.getBoolean(NOTE_BROWSER_NO_SORTING_KEY, false)) {
++            SortType.NO_SORTING
++        } else {
++            noteSort
++        }
++        mOrderAsc = col.config.get("browserNoteSortBackwards") ?: false
++    }
++
++    private fun saveSortOrderToConfig(col: com.ichi2.libanki.Collection, which: SortType) {
++        val preferences = baseContext.sharedPrefs()
++        if (cardsOrNotes == CARDS) {
++            which.save(col.config, preferences)
++            col.config.set("sortBackwards", mOrderAsc)
++            return
++        }
++
++        col.config.set("noteSortType", which.ankiSortType ?: SortType.SORT_FIELD.ankiSortType)
++        preferences.edit {
++            putBoolean(NOTE_BROWSER_NO_SORTING_KEY, which == SortType.NO_SORTING)
++        }
++        col.config.set("browserNoteSortBackwards", mOrderAsc)
++    }
++
++    private fun saveSortBackwardsToConfig(col: com.ichi2.libanki.Collection) {
++        if (cardsOrNotes == CARDS) {
++            col.config.set("sortBackwards", mOrderAsc)
++        } else {
++            col.config.set("browserNoteSortBackwards", mOrderAsc)
++        }
++    }
++
+     private fun savedFilters(col: com.ichi2.libanki.Collection): HashMap<String, String> {
+         return col.config.get("savedFilters") ?: hashMapOf()
+     }
+@@ -464,12 +504,10 @@ open class CardBrowser :
+         super.onCollectionLoaded(col)
+         Timber.d("onCollectionLoaded()")
+         registerExternalStorageListener()
+-        val preferences = baseContext.sharedPrefs()
+-
+-        mOrder = SortType.fromCol(col.config, preferences)
+-        mOrderAsc = col.config.get("sortBackwards") ?: false
++        cardsOrNotes = CardsOrNotes.fromCollection(col)
++        loadSortOrderFromConfig(col)
+         mCards.reset()
+-        // Create a spinner for column 1
++// Create a spinner for column 1
+         val cardsColumn1Spinner = findViewById<Spinner>(R.id.browser_column1_spinner)
+         val column1Adapter = ArrayAdapter.createFromResource(
+             this,
+@@ -581,9 +619,8 @@ open class CardBrowser :
+             alwaysShowDefault = false,
+             showFilteredDecks = true
+         )
+-        cardsOrNotes = CardsOrNotes.fromCollection(col)
+         isTruncated = this.sharedPrefs().getBoolean("isTruncated", false)
+-        deckSpinnerSelection!!.initializeActionBarDeckSpinner(this.supportActionBar!!)
++deckSpinnerSelection!!.initializeActionBarDeckSpinner(this.supportActionBar!!)
+         selectDeckAndSave(deckId)
+ 
+         // If a valid value for last deck exists then use it, otherwise use libanki selected deck
+@@ -1196,8 +1233,11 @@ open class CardBrowser :
+ 
+     fun switchCardOrNote(newCardsMode: CardsOrNotes) {
+         launchCatchingTask {
+-            withCol { newCardsMode.saveToCollection(this) }
+-            cardsOrNotes = newCardsMode
++            withCol {
++                newCardsMode.saveToCollection(this)
++                cardsOrNotes = newCardsMode
++                loadSortOrderFromConfig(this)
++            }
+             searchCards()
+         }
+     }
+@@ -2455,6 +2495,7 @@ open class CardBrowser :
+         const val CARD_NOT_AVAILABLE = -1
+         const val DISPLAY_COLUMN_1_KEY = "cardBrowserColumn1"
+         const val DISPLAY_COLUMN_2_KEY = "cardBrowserColumn2"
++        private const val NOTE_BROWSER_NO_SORTING_KEY = "browserNoteNoSorting"
+ 
+         fun clearLastDeckId() {
+             val context: Context = AnkiDroidApp.instance
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

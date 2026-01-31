@@ -1,0 +1,353 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 26e4a6c2..00d7883f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -41,6 +41,7 @@ At this point in time, it is not yet decided what the next steps will be. Ktlint
+ * Ignore property with name `serialVersionUID` in `property-naming` ([#2045](https://github.com/pinterest/ktlint/issues/2045))
+ * Prevent incorrect reporting of violations in case a nullable function type reference exceeds the maximum line length `parameter-list-wrapping` ([#1324](https://github.com/pinterest/ktlint/issues/1324)) 
+ * Prevent false negative on `else` branch when body contains only chained calls or binary expression ([#2057](https://github.com/pinterest/ktlint/issues/2057))
++* Automatically rerun formatting on a file until no autocorrectable violations remain (with a maximum of three reruns) so cascading rule fixes are applied consistently
+ 
+ ### Changed
+ 
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+index eec63c77..7c5ad42f 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+@@ -134,11 +134,66 @@ public class KtLintRuleEngine(
+ 
+         val hasUTF8BOM = code.content.startsWith(UTF8_BOM)
+         val ruleExecutionContext = createRuleExecutionContext(this, code)
++        val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
++
++        var finalErrors: Set<Pair<LintError, Boolean>> = emptySet()
++        var anyMutationsApplied = false
++        var rerunsExecuted = 0
++        var shouldRerun = false
++        do {
++            val formatRunResult = performFormatRun(code, ruleExecutionContext, visitorProvider)
++
++            finalErrors = formatRunResult.lintErrors
++            anyMutationsApplied = anyMutationsApplied || formatRunResult.mutated
++
++            shouldRerun =
++                formatRunResult.hasAutoCorrectableErrors && rerunsExecuted < MAX_FORMAT_RERUNS
++            if (shouldRerun) {
++                rerunsExecuted++
++                LOGGER.debug {
++                    "Rerunning format for file '${code.fileNameOrStdin()}' (rerun $rerunsExecuted of $MAX_FORMAT_RERUNS)"
++                }
++            } else if (formatRunResult.hasAutoCorrectableErrors) {
++                LOGGER.warn {
++                    "Reached maximum number of format reruns ($MAX_FORMAT_RERUNS) for file '${code.fileNameOrStdin()}'"
++                }
++            }
++        } while (shouldRerun)
++
++        finalErrors
++            .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
++            .forEach { (e, corrected) -> callback(e, corrected) }
++
++        if (!anyMutationsApplied) {
++            return code.content
++        }
+ 
++        val formattedCode =
++            ruleExecutionContext
++                .rootNode
++                .text
++                .replace("\n", ruleExecutionContext.determineLineSeparator(code.content))
++        return if (hasUTF8BOM) {
++            UTF8_BOM + formattedCode
++        } else {
++            formattedCode
++        }.also {
++            LOGGER.debug("Finished with formatting file '${code.fileNameOrStdin()}'")
++        }
++    }
++
++    private fun performFormatRun(
++        code: Code,
++        ruleExecutionContext: RuleExecutionContext,
++        visitorProvider: VisitorProvider,
++    ): FormatRunResult {
+         var tripped = false
+         var mutated = false
++        var hasAutoCorrectableErrors = false
+         val errors = mutableSetOf<Pair<LintError, Boolean>>()
+-        val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
++
++        ruleExecutionContext.rebuildSuppressionLocator()
++
+         visitorProvider
+             .visitor()
+             .invoke { rule ->
+@@ -146,6 +201,7 @@ public class KtLintRuleEngine(
+                     tripped = true
+                     if (canBeAutoCorrected) {
+                         mutated = true
++                        hasAutoCorrectableErrors = true
+                         /**
+                          * Rebuild the suppression locator after each change in the AST as the offsets of the
+                          * suppression hints might have changed.
+@@ -191,32 +247,19 @@ public class KtLintRuleEngine(
+                 }
+         }
+ 
+-        errors
+-            .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
+-            .forEach { (e, corrected) -> callback(e, corrected) }
+-
+-        if (!mutated) {
+-            return code.content
+-        }
+-
+-        val formattedCode =
+-            ruleExecutionContext
+-                .rootNode
+-                .text
+-                .replace("\n", ruleExecutionContext.determineLineSeparator(code.content))
+-        return if (hasUTF8BOM) {
+-            UTF8_BOM + formattedCode
+-        } else {
+-            formattedCode
+-        }.also {
+-            LOGGER.debug("Finished with formatting file '${code.fileNameOrStdin()}'")
+-        }
++        return FormatRunResult(errors, mutated, hasAutoCorrectableErrors)
+     }
+ 
++    private data class FormatRunResult(
++        val lintErrors: Set<Pair<LintError, Boolean>>,
++        val mutated: Boolean,
++        val hasAutoCorrectableErrors: Boolean,
++    )
++
+     private fun RuleExecutionContext.determineLineSeparator(fileContent: String): String {
+         val eol = editorConfig[END_OF_LINE_PROPERTY]
+         return when {
+-            eol == crlf || eol != lf && fileContent.lastIndexOf('\r') != -1 -> "\r\n"
++eol == crlf || eol != lf && fileContent.lastIndexOf('\r') != -1 -> "\r\n"
+             else -> "\n"
+         }
+     }
+@@ -282,6 +325,7 @@ public class KtLintRuleEngine(
+     public fun transformToAst(code: Code): FileASTNode = createRuleExecutionContext(this, code).rootNode
+ 
+     public companion object {
++        internal const val MAX_FORMAT_RERUNS = 3
+         internal const val UTF8_BOM = "\uFEFF"
+ 
+         public const val STDIN_FILE: String = "<stdin>"
+
+diff --git a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngineFormatRerunTest.kt b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngineFormatRerunTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngineFormatRerunTest.kt
+@@ -0,0 +1,198 @@
++package com.pinterest.ktlint.rule.engine.api
++
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.REGULAR_STRING_PART
++import com.pinterest.ktlint.rule.engine.core.api.Rule
++import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAsLateAsPossible
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import org.assertj.core.api.Assertions.assertThat
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafElement
++import org.junit.jupiter.api.BeforeEach
++import org.junit.jupiter.api.Test
++
++class KtLintRuleEngineFormatRerunTest {
++    @BeforeEach
++    fun setUp() {
++        ConvertBarToBazRule.reset()
++        ConvertFooToBarRule.reset()
++        FlipFlopRule.reset()
++    }
++
++    @Test
++    fun `format reruns until no autocorrectable errors remain`() {
++        val callbackResults = mutableListOf<Pair<String, Boolean>>()
++        val formattedCode =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider { ConvertBarToBazRule() },
++                        RuleProvider { ConvertFooToBarRule() },
++                    ),
++            ).format(
++                Code.fromSnippet(
++                    """
++                    val value = "foo"
++                    """.trimIndent(),
++                ),
++            ) { lintError, corrected ->
++                callbackResults.add(lintError.detail to corrected)
++            }
++
++        assertThat(formattedCode).isEqualTo(
++            """
++            val value = "baz"
++            """.trimIndent(),
++        )
++        assertThat(callbackResults).isEmpty()
++        assertThat(ConvertBarToBazRule.autoCorrectCount).isEqualTo(1)
++        assertThat(ConvertFooToBarRule.autoCorrectCount).isEqualTo(1)
++    }
++
++    @Test
++    fun `format stops rerunning after reaching maximum rerun limit`() {
++        val callbackResults = mutableListOf<Boolean>()
++        val formattedCode =
++            KtLintRuleEngine(
++                ruleProviders =
++                    setOf(
++                        RuleProvider { FlipFlopRule() },
++                    ),
++            ).format(
++                Code.fromSnippet(
++                    """
++                    val value = "foo"
++                    """.trimIndent(),
++                ),
++            ) { _, corrected ->
++                callbackResults.add(corrected)
++            }
++
++        assertThat(FlipFlopRule.autoCorrectCount).isEqualTo(KtLintRuleEngine.MAX_FORMAT_RERUNS + 1)
++        assertThat(callbackResults)
++            .hasSize(2)
++            .contains(true)
++            .contains(false)
++        assertThat(formattedCode).isEqualTo(
++"""
++            val value = "foo"
++            """.trimIndent(),
++        )
++    }
++}
++
++private class ConvertBarToBazRule : Rule(
++    ruleId = RuleId("test:convert-bar-to-baz"),
++    about = About(),
++) {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType == REGULAR_STRING_PART && node.text == "bar") {
++            emit(node.startOffset, "bar should be turned into baz", true)
++            if (autoCorrect) {
++                (node as LeafElement).rawReplaceWithText("baz")
++                incrementAutoCorrectCount()
++            }
++        }
++    }
++
++    companion object {
++        private var autoCorrectCounter = 0
++
++        internal fun reset() {
++            autoCorrectCounter = 0
++        }
++
++        internal fun incrementAutoCorrectCount() {
++            autoCorrectCounter++
++        }
++
++        internal val autoCorrectCount: Int
++            get() = autoCorrectCounter
++    }
++}
++
++private class ConvertFooToBarRule : Rule(
++    ruleId = RuleId("test:convert-foo-to-bar"),
++    about = About(),
++    visitorModifiers = setOf(RunAsLateAsPossible),
++) {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType == REGULAR_STRING_PART && node.text == "foo") {
++            emit(node.startOffset, "foo should be turned into bar", true)
++            if (autoCorrect) {
++                (node as LeafElement).rawReplaceWithText("bar")
++                incrementAutoCorrectCount()
++            }
++        }
++    }
++
++    companion object {
++        private var autoCorrectCounter = 0
++
++        internal fun reset() {
++            autoCorrectCounter = 0
++        }
++
++        internal fun incrementAutoCorrectCount() {
++            autoCorrectCounter++
++        }
++
++        internal val autoCorrectCount: Int
++            get() = autoCorrectCounter
++    }
++}
++
++private class FlipFlopRule : Rule(
++    ruleId = RuleId("test:flip-flop"),
++    about = About(),
++) {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        if (node.elementType != REGULAR_STRING_PART) {
++            return
++        }
++        when (node.text) {
++            "foo" -> {
++                emit(node.startOffset, "foo toggled to bar", true)
++                if (autoCorrect) {
++                    (node as LeafElement).rawReplaceWithText("bar")
++                    incrementAutoCorrectCount()
++                }
++            }
++            "bar" -> {
++                emit(node.startOffset, "bar toggled to foo", true)
++                if (autoCorrect) {
++                    (node as LeafElement).rawReplaceWithText("foo")
++                    incrementAutoCorrectCount()
++                }
++            }
++        }
++    }
++
++    companion object {
++        private var autoCorrectCounter = 0
++
++        internal fun reset() {
++            autoCorrectCounter = 0
++        }
++
++        internal fun incrementAutoCorrectCount() {
++            autoCorrectCounter++
++        }
++
++        internal val autoCorrectCount: Int
++            get() = autoCorrectCounter
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

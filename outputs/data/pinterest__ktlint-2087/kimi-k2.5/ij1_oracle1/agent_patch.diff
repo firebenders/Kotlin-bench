@@ -1,0 +1,424 @@
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+index eec63c77..15496b66 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+@@ -133,65 +133,93 @@ public class KtLintRuleEngine(
+         LOGGER.debug { "Starting with formatting file '${code.fileNameOrStdin()}'" }
+ 
+         val hasUTF8BOM = code.content.startsWith(UTF8_BOM)
+-        val ruleExecutionContext = createRuleExecutionContext(this, code)
+ 
+-        var tripped = false
++        var currentCode = code
+         var mutated = false
+-        val errors = mutableSetOf<Pair<LintError, Boolean>>()
+-        val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+-        visitorProvider
+-            .visitor()
+-            .invoke { rule ->
+-                ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
+-                    tripped = true
+-                    if (canBeAutoCorrected) {
+-                        mutated = true
+-                        /**
+-                         * Rebuild the suppression locator after each change in the AST as the offsets of the
+-                         * suppression hints might have changed.
+-                         */
+-                        ruleExecutionContext.rebuildSuppressionLocator()
+-                    }
+-                    val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+-                    errors.add(
+-                        Pair(
+-                            LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
+-                            // It is assumed that a rule that emits that an error can be autocorrected, also
+-                            // does correct the error.
+-                            canBeAutoCorrected,
+-                        ),
+-                    )
+-                    // In trace mode report the violation immediately. The order in which violations are actually found might be different
+-                    // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
+-                    // violations are being solved.
+-                    LOGGER.trace {
+-                        "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
+-                            canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
+-                    }
+-                }
+-            }
+-        if (tripped) {
++        val allErrors = mutableSetOf<Pair<LintError, Boolean>>()
++
++        // Repeat format step until no more errors are found which can be auto-corrected, or max 3 reruns
++        repeat(MAX_FORMAT_RUNS) { runNumber ->
++            val ruleExecutionContext = createRuleExecutionContext(this, currentCode)
++
++            var tripped = false
++            var runMutated = false
++            val errors = mutableSetOf<Pair<LintError, Boolean>>()
++            val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+             visitorProvider
+                 .visitor()
+                 .invoke { rule ->
+-                    ruleExecutionContext.executeRule(
+-                        rule,
+-                        false,
+-                    ) { offset, errorMessage, canBeAutoCorrected ->
++                    ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
++                        tripped = true
++                        if (canBeAutoCorrected) {
++                            runMutated = true
++                            /**
++                             * Rebuild the suppression locator after each change in the AST as the offsets of the
++                             * suppression hints might have changed.
++                             */
++                            ruleExecutionContext.rebuildSuppressionLocator()
++                        }
+                         val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+                         errors.add(
+                             Pair(
+                                 LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
+-                                // It is assumed that a rule only corrects an error after it has emitted an
+-                                // error and indicating that it actually can be autocorrected.
+-                                false,
++                                // It is assumed that a rule that emits that an error can be autocorrected, also
++                                // does correct the error.
++                                canBeAutoCorrected,
+                             ),
+                         )
++                        // In trace mode report the violation immediately. The order in which violations are actually found might be different
++                        // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
++                        // violations are being solved.
++                        LOGGER.trace {
++                            "Format violation: ${currentCode.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
++                                canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
++                        }
+                     }
+                 }
++            if (tripped) {
++                visitorProvider
++                    .visitor()
++                    .invoke { rule ->
++                        ruleExecutionContext.executeRule(
++                            rule,
++                            false,
++                        ) { offset, errorMessage, canBeAutoCorrected ->
++                            val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
++                            errors.add(
++                                Pair(
++                                    LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
++                                    // It is assumed that a rule only corrects an error after it has emitted an
++                                    // error and indicating that it actually can be autocorrected.
++                                    false,
++                                ),
++                            )
++                        }
++                    }
++            }
++
++            allErrors.addAll(errors)
++
++            if (runMutated) {
++                mutated = true
++                // Prepare for next run with the formatted code
++                val formattedCode =
++                    ruleExecutionContext
++                        .rootNode
++                        .text
++                        .replace("\n", ruleExecutionContext.determineLineSeparator(currentCode.content))
++                currentCode =
++                    Code.fromSnippet(
++                        content = if (hasUTF8BOM && runNumber == 0) formattedCode.substring(UTF8_BOM.length) else formattedCode,
++                        script = currentCode.script,
++                    )
++            } else {
++                // No more auto-correctable errors, we can stop
++                return@repeat
++            }
+         }
+ 
+-        errors
++        allErrors
+             .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
+             .forEach { (e, corrected) -> callback(e, corrected) }
+ 
+@@ -199,15 +227,11 @@ public class KtLintRuleEngine(
+             return code.content
+         }
+ 
+-        val formattedCode =
+-            ruleExecutionContext
+-                .rootNode
+-                .text
+-                .replace("\n", ruleExecutionContext.determineLineSeparator(code.content))
++        val finalFormattedCode = currentCode.content
+         return if (hasUTF8BOM) {
+-            UTF8_BOM + formattedCode
++            UTF8_BOM + finalFormattedCode
+         } else {
+-            formattedCode
++            finalFormattedCode
+         }.also {
+             LOGGER.debug("Finished with formatting file '${code.fileNameOrStdin()}'")
+         }
+@@ -285,5 +309,11 @@ public class KtLintRuleEngine(
+         internal const val UTF8_BOM = "\uFEFF"
+ 
+         public const val STDIN_FILE: String = "<stdin>"
++
++        /**
++         * Maximum number of times to run the formatter on a file. This prevents infinite loops when a set of rules
++         * keep producing auto-correctable errors.
++         */
++        internal const val MAX_FORMAT_RUNS = 3
+     }
+ }
+
+diff --git a/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/FormatRerunTest.kt b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/FormatRerunTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine/src/test/kotlin/com/pinterest/ktlint/rule/engine/api/FormatRerunTest.kt
+@@ -0,0 +1,237 @@
++package com.pinterest.ktlint.rule.engine.api
++
++import com.pinterest.ktlint.rule.engine.core.api.ElementType
++import com.pinterest.ktlint.rule.engine.core.api.Rule
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.RuleProvider
++import org.assertj.core.api.Assertions.assertThat
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafElement
++import org.junit.jupiter.api.Test
++
++/**
++ * Tests for the format rerun functionality.
++ * When format finds any lint violations in a file that can be autocorrected, it should automatically
++ * rerun format on that file before returning the lint violations of the last format run.
++ * To prevent infinite loops, no more than 3 reruns will be executed.
++ */
++class FormatRerunTest {
++
++    @Test
++    fun `Given a rule that requires multiple format runs to stabilize then format should rerun automatically`() {
++        // This rule corrects "step1" to "step2" on first run, and "step2" to "final" on second run
++        val ktLintRuleEngine = KtLintRuleEngine(
++            ruleProviders = setOf(
++                RuleProvider { MultiStepAutoCorrectRule() },
++            ),
++        )
++
++        val code = "val x = step1"
++        val expectedFinalCode = "val x = final"
++
++        val actualFormattedCode = ktLintRuleEngine.format(Code.fromSnippet(code))
++
++        assertThat(actualFormattedCode).isEqualTo(expectedFinalCode)
++    }
++
++    @Test
++    fun `Given a rule that requires 3 format runs to stabilize then format should rerun up to 3 times`() {
++        // This rule requires 3 runs to fully stabilize
++        val ktLintRuleEngine = KtLintRuleEngine(
++            ruleProviders = setOf(
++                RuleProvider { ThreeStepAutoCorrectRule() },
++            ),
++        )
++
++        val code = "val x = step0"
++        val expectedFinalCode = "val x = step3"
++
++        val actualFormattedCode = ktLintRuleEngine.format(Code.fromSnippet(code))
++
++        assertThat(actualFormattedCode).isEqualTo(expectedFinalCode)
++    }
++
++    @Test
++    fun `Given rules that would cause infinite loop then format should stop after max runs`() {
++        // This rule always produces autocorrectable errors, which would cause infinite loop if not capped
++        val ktLintRuleEngine = KtLintRuleEngine(
++            ruleProviders = setOf(
++                RuleProvider { InfiniteLoopRule() },
++            ),
++        )
++
++        val code = "val x = test"
++
++        // Should not hang or throw exception - should return after max runs
++        val actualFormattedCode = ktLintRuleEngine.format(Code.fromSnippet(code))
++
++        // The code will be modified by the rule but should not cause infinite loop
++        assertThat(actualFormattedCode).isNotNull()
++    }
++
++    @Test
++    fun `Given no autocorrectable errors then format should not rerun`() {
++        val ktLintRuleEngine = KtLintRuleEngine(
++            ruleProviders = setOf(
++                RuleProvider { NoAutoCorrectRule() },
++            ),
++        )
++
++        val code = "val x = test"
++
++        val actualFormattedCode = ktLintRuleEngine.format(Code.fromSnippet(code))
++
++        // Code should remain unchanged as there are no autocorrectable errors
++        assertThat(actualFormattedCode).isEqualTo(code)
++    }
++
++    @Test
++    fun `Given a rule that stabilizes after first run then format should not rerun`() {
++        val ktLintRuleEngine = KtLintRuleEngine(
++            ruleProviders = setOf(
++                RuleProvider { SingleStepAutoCorrectRule() },
++            ),
++        )
++
++        val code = "val x = old"
++        val expectedFinalCode = "val x = new"
++
++        val actualFormattedCode = ktLintRuleEngine.format(Code.fromSnippet(code))
++
++        assertThat(actualFormattedCode).isEqualTo(expectedFinalCode)
++    }
++
++    /**
++     * A rule that requires multiple format runs to fully correct the code.
++     * On first run: "step1" -> "step2"
++     * On second run: "step2" -> "final"
++     */
++    private class MultiStepAutoCorrectRule : Rule(
++        ruleId = RuleId("test:multi-step-autocorrect"),
++        about = About(),
++    ) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++            if (node.elementType == ElementType.IDENTIFIER && node.text == "step1") {
++                emit(node.startOffset, "Should be step2", true)
++                if (autoCorrect) {
++                    (node as LeafElement).rawReplaceWithText("step2")
++                }
++            } else if (node.elementType == ElementType.IDENTIFIER && node.text == "step2") {
++                emit(node.startOffset, "Should be final", true)
++                if (autoCorrect) {
++                    (node as LeafElement).rawReplaceWithText("final")
++                }
++            }
++        }
++    }
++
++    /**
++     * A rule that requires exactly 3 runs to fully correct the code.
++     * step0 -> step1 -> step2 -> step3
++     */
++    private class ThreeStepAutoCorrectRule : Rule(
++        ruleId = RuleId("test:three-step-autocorrect"),
++        about = About(),
++    ) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++            when {
++                node.elementType == ElementType.IDENTIFIER && node.text == "step0" -> {
++                    emit(node.startOffset, "Should be step1", true)
++                    if (autoCorrect) {
++                        (node as LeafElement).rawReplaceWithText("step1")
++                    }
++                }
++                node.elementType == ElementType.IDENTIFIER && node.text == "step1" -> {
++                    emit(node.startOffset, "Should be step2", true)
++                    if (autoCorrect) {
++                        (node as LeafElement).rawReplaceWithText("step2")
++                    }
++                }
++                node.elementType == ElementType.IDENTIFIER && node.text == "step2" -> {
++                    emit(node.startOffset, "Should be step3", true)
++                    if (autoCorrect) {
++                        (node as LeafElement).rawReplaceWithText("step3")
++                    }
++                }
++            }
++        }
++    }
++
++    /**
++     * A rule that always produces autocorrectable errors (simulating an infinite loop scenario).
++     * This tests that the max runs limit prevents actual infinite loops.
++     */
++    private class InfiniteLoopRule : Rule(
++        ruleId = RuleId("test:infinite-loop"),
++        about = About(),
++    ) {
++        private var counter = 0
++
++        override fun beforeFirstNode(editorConfig: com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig) {
++            counter = 0
++        }
++
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++            if (node.elementType == ElementType.IDENTIFIER && node.text.startsWith("test")) {
++                counter++
++                emit(node.startOffset, "Error $counter", true)
++                if (autoCorrect) {
++                    // Always create a new autocorrectable error
++                    (node as LeafElement).rawReplaceWithText("test$counter")
++                }
++            }
++        }
++    }
++
++    /**
++     * A rule that only reports non-autocorrectable errors.
++     */
++    private class NoAutoCorrectRule : Rule(
++        ruleId = RuleId("test:no-autocorrect"),
++        about = About(),
++    ) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++            if (node.elementType == ElementType.IDENTIFIER && node.text == "test") {
++                emit(node.startOffset, "Cannot be fixed", false)
++            }
++        }
++    }
++
++    /**
++     * A rule that corrects everything in a single run.
++     */
++    private class SingleStepAutoCorrectRule : Rule(
++        ruleId = RuleId("test:single-step-autocorrect"),
++        about = About(),
++    ) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++            if (node.elementType == ElementType.IDENTIFIER && node.text == "old") {
++                emit(node.startOffset, "Should be new", true)
++                if (autoCorrect) {
++                    (node as LeafElement).rawReplaceWithText("new")
++                }
++            }
++        }
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

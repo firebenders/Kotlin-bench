@@ -1,0 +1,141 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ab67c249..5ab2dc99 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -15,6 +15,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ * Prevent nullpointer exception (NPE) if class without body is followed by multiple blank lines until end of file `no-consecutive-blank-lines` ([#1987](https://github.com/pinterest/ktlint/issues/1987))
+ * Allow to 'unset' the `.editorconfig` property `ktlint_function_signature_rule_force_multiline_when_parameter_count_greater_or_equal_than` when using `ktlint_official` code style `function-signature` ([#1977](https://github.com/pinterest/ktlint/issues/1977))
+ * Prevent nullpointer exception (NPE) if or operator at start of line is followed by dot qualified expression `indent` ([#1993](https://github.com/pinterest/ktlint/issues/1993))
++* Align multiline lambda parameters when using `intellij_idea` or `android_studio` code styles `indent` ([#1756](https://github.com/pinterest/ktlint/issues/1756))
+ * Restrict indentation of closing quotes to `ktlint_official` code style to keep formatting of other code styles consistent with `0.48.x` and before `indent` ([#1971](https://github.com/pinterest/ktlint/issues/1971))
+ 
+ ### Changed
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+index 65465d1e..b2136d08 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRule.kt
+@@ -451,7 +451,7 @@ public class IndentationRule :
+             }
+     }
+ 
+-    private fun ASTNode.calculateIndentOfFunctionLiteralParameters() =
++    private fun ASTNode.calculateIndentOfFunctionLiteralParameters(): String {
+         if (codeStyle == ktlint_official || isFirstParameterOfFunctionLiteralPrecededByNewLine()) {
+             // val fieldExample =
+             //      LongNameClass {
+@@ -460,25 +460,25 @@ public class IndentationRule :
+             //              paramC ->
+             //          ClassB(paramA, paramB, paramC)
+             //      }
+-            indentConfig.indent.repeat(2)
+-        } else {
+-            // Allow default IntelliJ IDEA formatting:
+-            // val fieldExample =
+-            //     LongNameClass { paramA,
+-            //                     paramB,
+-            //                     paramC ->
+-            //         ClassB(paramA, paramB, paramC)
+-            //     }
+-            parent(CALL_EXPRESSION)
+-                ?.let { callExpression ->
+-                    val textBeforeFirstParameter =
+-                        callExpression.findChildByType(REFERENCE_EXPRESSION)?.text +
+-                            " { "
+-                    " ".repeat(textBeforeFirstParameter.length)
+-                }
+-                ?: indentConfig.indent.repeat(2)
++            return indentConfig.indent.repeat(2)
+         }
+ 
++        val firstParameter =
++            parent(FUNCTION_LITERAL)
++                ?.findChildByType(VALUE_PARAMETER_LIST)
++                ?.findChildByType(VALUE_PARAMETER)
++                ?: return indentConfig.indent.repeat(2)
++
++        val indentBeforeFirstParameter = firstParameter.indent(includeNewline = false)
++        val lineIndentLength = indentBeforeFirstParameter.takeWhile { it.isWhitespace() }.length
++        val additionalIndentLength = indentBeforeFirstParameter.length - lineIndentLength
++
++        return additionalIndentLength
++            .takeIf { it > 0 }
++            ?.let { " ".repeat(it) }
++            ?: indentConfig.indent.repeat(2)
++    }
++
+     private fun ASTNode.isFirstParameterOfFunctionLiteralPrecededByNewLine() =
+         parent(FUNCTION_LITERAL)
+             ?.findChildByType(VALUE_PARAMETER_LIST)
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleLambdaParametersTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleLambdaParametersTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IndentationRuleLambdaParametersTest.kt
+@@ -0,0 +1,59 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.android_studio
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.intellij_idea
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++internal class IndentationRuleLambdaParametersTest {
++    private val indentationRuleAssertThat = assertThatRule { IndentationRule() }
++
++    private val correctlyFormattedCode =
++        """
++        |fun subject() {
++        |    combine(
++        |        Any(),
++        |        Any()
++        |    ) { value1,
++        |            value2 ->
++        |        TODO()
++        |    }
++        |}
++        """.trimMargin()
++
++    private val misalignedLambdaParameters =
++        """
++        |fun subject() {
++        |    combine(
++        |        Any(),
++        |        Any()
++        |    ) { value1,
++        |        value2 ->
++        |        TODO()
++        |    }
++        |}
++        """.trimMargin()
++
++    @Test
++    fun `Given trailing lambda parameters in intellij idea style then parameters align with first parameter`() {
++        indentationRuleAssertThat(correctlyFormattedCode)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to intellij_idea)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given trailing lambda parameters in android studio style then parameters align with first parameter`() {
++        indentationRuleAssertThat(correctlyFormattedCode)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to android_studio)
++            .hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given misaligned trailing lambda parameters then formatter aligns them for intellij idea style`() {
++        indentationRuleAssertThat(misalignedLambdaParameters)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to intellij_idea)
++            .isFormattedAs(correctlyFormattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

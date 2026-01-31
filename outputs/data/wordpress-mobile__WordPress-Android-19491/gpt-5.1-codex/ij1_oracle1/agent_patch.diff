@@ -1,0 +1,104 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt
+index 79cfcf757fa..3f9143a37b0 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt
+@@ -21,6 +21,7 @@ import org.wordpress.android.ui.posts.CriticalPostActionTracker.CriticalPostActi
+ import org.wordpress.android.ui.posts.PostListAction.DismissPendingNotification
+ import org.wordpress.android.ui.posts.PostListAction.PreviewPost
+ import org.wordpress.android.ui.posts.PostListAction.RetryUpload
++import org.wordpress.android.ui.posts.PostListAction.ViewComments
+ import org.wordpress.android.ui.posts.PostListAction.ViewPost
+ import org.wordpress.android.ui.posts.PostListAction.ViewStats
+ import org.wordpress.android.ui.posts.PostUploadAction.CancelPostAndMediaUpload
+@@ -134,7 +135,7 @@ class PostActionHandler(
+             BUTTON_PROMOTE_WITH_BLAZE -> {
+                 triggerPostListAction.invoke(PostListAction.ShowPromoteWithBlaze(post))
+             }
+-            BUTTON_COMMENTS -> {} // todo: implement
++            BUTTON_COMMENTS -> triggerPostListAction.invoke(ViewComments(site, post))
+         }
+     }
+ 
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListAction.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListAction.kt
+index 7c3f089ccef..d187f3486a3 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListAction.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListAction.kt
+@@ -52,6 +52,7 @@ sealed class PostListAction {
+ 
+     class ViewStats(val site: SiteModel, val post: PostModel) : PostListAction()
+     class ViewPost(val site: SiteModel, val post: PostModel) : PostListAction()
++    class ViewComments(val site: SiteModel, val post: PostModel) : PostListAction()
+     class DismissPendingNotification(val pushId: Int) : PostListAction()
+ 
+     class ShowPromoteWithBlaze(val post: PostModel) : PostListAction()
+@@ -108,8 +109,11 @@ fun handlePostListAction(
+         is PostListAction.ViewPost -> {
+             ActivityLauncher.browsePostOrPage(activity, action.site, action.post)
+         }
++        is PostListAction.ViewComments -> {
++            ActivityLauncher.viewUnifiedComments(activity, action.site)
++        }
+         is PostListAction.DismissPendingNotification -> {
+-            NativeNotificationsUtils.dismissNotification(action.pushId, activity)
++NativeNotificationsUtils.dismissNotification(action.pushId, activity)
+         }
+         is PostListAction.ShowPromoteWithBlaze -> {
+             blazeFeatureUtils.trackEntryPointTapped(BlazeFlowSource.POSTS_LIST)
+diff --git a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+index 915d884477a..f3a1e6098fa 100644
+--- a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
++++ b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+@@ -47,6 +47,7 @@ import org.wordpress.android.viewmodel.posts.PostListItemType.PostListItemUiStat
+ import org.wordpress.android.viewmodel.uistate.ProgressBarUiState
+ import org.wordpress.android.widgets.PostListButtonType
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD
++import org.wordpress.android.widgets.PostListButtonType.BUTTON_COMMENTS
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_COPY
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_COPY_URL
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_DELETE
+@@ -94,6 +95,7 @@ class PostListItemUiStateHelper @Inject constructor(
+     ): PostListItemUiState {
+         val postStatus: PostStatus = PostStatus.fromPost(post)
+         val uploadUiState = uploadUiStateUseCase.createUploadUiState(post, site, uploadStatusTracker)
++        val shouldShowCommentsButton = post.remotePostId != 0L && postStatus != TRASHED
+ 
+         val onButtonClicked = { buttonType: PostListButtonType ->
+             onAction.invoke(post, buttonType, POST_LIST_BUTTON_PRESSED)
+@@ -112,8 +114,9 @@ class PostListItemUiStateHelper @Inject constructor(
+                 postStatus,
+                 post
+             ),
++            shouldShowCommentsButton = shouldShowCommentsButton
+         )
+-        // val defaultActions = createDefaultViewActions(buttonTypes, onButtonClicked)
++// val defaultActions = createDefaultViewActions(buttonTypes, onButtonClicked)
+         val moreActions = createMoreActions(buttonTypes, onButtonClicked)
+ 
+         val remotePostId = RemotePostId(RemoteId(post.remotePostId))
+@@ -400,9 +403,10 @@ class PostListItemUiStateHelper @Inject constructor(
+         siteHasCapabilitiesToPublish: Boolean,
+         statsSupported: Boolean,
+         shouldShowStatsInJetpackRemovalPhase: Boolean,
+-        shouldShowPromoteWithBlaze: Boolean
++        shouldShowPromoteWithBlaze: Boolean,
++        shouldShowCommentsButton: Boolean
+     ): List<PostListButtonType> {
+-        val canRetryUpload = uploadUiState is UploadFailed
++val canRetryUpload = uploadUiState is UploadFailed
+         val canCancelPendingAutoUpload = (uploadUiState is UploadWaitingForConnection ||
+                 (uploadUiState is UploadFailed && uploadUiState.isEligibleForAutoUpload))
+         val canPublishPost = (canRetryUpload || uploadUiState is NothingToUpload || !canCancelPendingAutoUpload) &&
+@@ -443,8 +447,12 @@ class PostListItemUiStateHelper @Inject constructor(
+             buttonTypes.add(BUTTON_STATS)
+         }
+ 
++        if (shouldShowCommentsButton) {
++            buttonTypes.add(BUTTON_COMMENTS)
++        }
++
+         if (canShowCopy) {
+-            buttonTypes.add(BUTTON_COPY)
++buttonTypes.add(BUTTON_COPY)
+         }
+ 
+         buttonTypes.addMoveToDraftActionIfAvailable(postStatus)

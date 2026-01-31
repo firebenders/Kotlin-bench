@@ -1,3 +1,127 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+index 28a6ebc7..36ffe3fd 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+@@ -1,5 +1,6 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATED_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
+@@ -542,11 +543,12 @@ public class FunctionSignatureRule :
+                 if (whiteSpaceBeforeFunctionBodyExpression.isWhiteSpaceWithNewline()) {
+                     val mergeWithFunctionSignature =
+                         if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression) {
+-                            functionBodyExpressionWrapping == default ||
++                            !containsAnnotatedExpressionWithParameters(functionBodyExpressionNodes) &&
++                                (functionBodyExpressionWrapping == default ||
+                                 (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||
+                                 node.isMultilineFunctionSignatureWithoutExplicitReturnType(
+                                     lastNodeOfFunctionSignatureWithBodyExpression,
+-                                )
++                                ))
+                         } else {
+                             false
+                         }
+@@ -610,6 +612,25 @@ public class FunctionSignatureRule :
+             ?.matches(INDENT_WITH_CLOSING_PARENTHESIS)
+             ?: false
+ 
++    /**
++     * Checks if the function body expression contains an annotated expression with parameters.
++     * This is needed because merging such an expression with the function signature would
++     * violate the annotation rule.
++     */
++    private fun containsAnnotatedExpressionWithParameters(functionBodyExpressionNodes: List<ASTNode>): Boolean =
++        functionBodyExpressionNodes
++            .any { it.elementType == ANNOTATED_EXPRESSION && it.hasAnnotationWithValueArgumentList() }
++
++    private fun ASTNode.hasAnnotationWithValueArgumentList(): Boolean =
++        findChildByType(MODIFIER_LIST)
++            ?.children()
++            .orEmpty()
++            .any { it.elementType == ANNOTATION_ENTRY && it.isAnnotationEntryWithValueArgumentList() }
++
++    private fun ASTNode.isAnnotationEntryWithValueArgumentList() =
++        // Use the full qualified path to VALUE_ARGUMENT_LIST
++        findChildByType(com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT_LIST) != null
++
+     private fun fixFunctionBodyBlock(
+         node: ASTNode,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+
+diff --git a/FIX_SUMMARY.md b/FIX_SUMMARY.md
+new file mode 100644
+--- /dev/null
++++ b/FIX_SUMMARY.md
+@@ -0,0 +1,59 @@
++# Fix for Issue #2028: Do Not Merge Annotated Expression with Function Signature Rule
++
++## Problem Description
++
++The `function-signature` rule was merging annotated function body expressions with the function signature, even when the annotation contained parameters. This violated the `annotation` rule, which requires annotations with parameters to be on separate lines.
++
++### Example
++
++Original code:
++```kotlin
++private fun getErrorMessage(value: String): String =
++        @Suppress("DEPRECATION")
++        customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT_ERROR_MESSAGE_WITH_NO_REASON, value)
++```
++
++Before fix: The function-signature rule would merge the annotation with the signature, producing invalid output that violates the annotation rule.
++
++After fix: The annotation remains on a separate line, respecting both rules.
++
++## Solution
++
++Modified `FunctionSignatureRule.kt` to:
++
++1. **Added import**: `import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATED_EXPRESSION`
++
++2. **Added helper methods**:
++   - `containsAnnotatedExpressionWithParameters()`: Checks if the function body expression contains an annotated expression with parameters
++   - `hasAnnotationWithValueArgumentList()`: Checks if a node has an annotation with value argument list
++   - `isAnnotationEntryWithValueArgumentList()`: Checks if an annotation entry has a value argument list
++
++3. **Modified merge logic**: In the `fixFunctionBodyExpression` method, added a check `!containsAnnotatedExpressionWithParameters(functionBodyExpressionNodes)` before merging:
++
++```kotlin
++val mergeWithFunctionSignature =
++    if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression) {
++        !containsAnnotatedExpressionWithParameters(functionBodyExpressionNodes) &&
++            (functionBodyExpressionWrapping == default ||
++            (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||
++            node.isMultilineFunctionSignatureWithoutExplicitReturnType(
++                lastNodeOfFunctionSignatureWithBodyExpression,
++            ))
++    } else {
++        false
++    }
++```
++
++## Files Changed
++
++- `ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt`
++  - Added ANNOTATED_EXPRESSION import
++  - Added 3 helper methods to check for annotated expressions with parameters
++  - Modified mergeWithFunctionSignature logic to prevent merging when annotated expressions with parameters are present
++
++## Impact
++
++- The `function-signature` rule now respects the `annotation` rule by not merging function body expressions that contain annotations with parameters
++- Existing functionality is preserved for non-annotated expressions
++- The fix ensures that both rules can work together harmoniously without conflicts
++
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotationTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotationTest.kt
+@@ -0,0 +1,1 @@
++
 
 diff --git a/local.properties b/local.properties
 new file mode 100644
@@ -5,4 +129,119 @@ new file mode 100644
 +++ b/local.properties
 @@ -0,0 +1,2 @@
 +sdk.dir=/root/android-sdk
++
+
+diff --git a/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotationTest.kt b/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotationTest.kt
+@@ -0,0 +1,88 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.MAX_LINE_LENGTH_MARKER
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class FunctionSignatureRuleAnnotationTest {
++    private val functionSignatureRuleAssertThat = assertThatRule { FunctionSignatureRule() }
++
++    /**
++     * Test case for issue #2028
++     * The function-signature rule should not merge the annotated expression
++     * with the function signature when the annotation contains parameters.
++     */
++    @Test
++    fun `Issue 2028 - Do not merge annotated expression with function signature when annotation has parameters`() {
++        val code =
++            """
++            private val customMessage = "error"
++
++            private fun getErrorMessage(value: String): String =
++                    @Suppress("DEPRECATION")
++                    customMessage.takeUnless { it.isEmpty() } ?: String.format("Error: %s", value)
++            """.trimIndent()
++
++        val formattedCode =
++            """
++            private val customMessage = "error"
++
++            private fun getErrorMessage(value: String): String =
++                    @Suppress("DEPRECATION")
++                    customMessage.takeUnless { it.isEmpty() } ?: String.format("Error: %s", value)
++            """.trimIndent()
++
++        functionSignatureRuleAssertThat(code)
++            .hasNoLintViolations()
++            .isFormattedAs(formattedCode)
++    }
++
++    /**
++     * Test that annotation without parameters can be merged
++     */
++    @Test
++    fun `Given function body expression with annotation without parameters and fits on same line then merge`() {
++        val code =
++            """
++            private fun foo(x: String): String =
++                @SomeAnnotation
++                bar(x)
++            """.trimIndent()
++
++        val formattedCode =
++            """
++            private fun foo(x: String): String = @SomeAnnotation
++                bar(x)
++            """.trimIndent()
++
++        functionSignatureRuleAssertThat(code)
++            .setMaxLineLength()
++            .hasLintViolation(2, 40, "First line of body expression fits on same line as function signature")
++            .isFormattedAs(formattedCode)
++    }
++
++    /**
++     * Test that annotated expression with multiple arguments is not merged
++     */
++    @Test
++    fun `Given function body expression with annotation containing multiple arguments then do not merge`() {
++        val code =
++            """
++            private fun foo(x: String): String =
++                    @Suppress("DEPRECATION", "OTHER")
++                    bar(x)
++            """.trimIndent()
++
++        val formattedCode =
++            """
++            private fun foo(x: String): String =
++                    @Suppress("DEPRECATION", "OTHER")
++                    bar(x)
++            """.trimIndent()
++
++        functionSignatureRuleAssertThat(code)
++            .hasNoLintViolations()
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/test_annotation_fix.kt b/test_annotation_fix.kt
+new file mode 100644
+--- /dev/null
++++ b/test_annotation_fix.kt
+@@ -0,0 +1,1 @@
++
+
+diff --git a/test_annotation_issue.kt b/test_annotation_issue.kt
+new file mode 100644
+--- /dev/null
++++ b/test_annotation_issue.kt
+@@ -0,0 +1,8 @@
++package test
++
++private val customMessage = "error"
++
++private fun getErrorMessage(value: String): String =
++        @Suppress("DEPRECATION")
++        customMessage.takeUnless { it.isEmpty() } ?: String.format("Error: %s", value)
 +

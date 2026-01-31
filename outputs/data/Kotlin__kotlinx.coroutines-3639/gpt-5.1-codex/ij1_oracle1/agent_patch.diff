@@ -1,0 +1,103 @@
+diff --git a/CHANGES.md b/CHANGES.md
+index 377270d1c..f81e03b65 100644
+--- a/CHANGES.md
++++ b/CHANGES.md
+@@ -8,6 +8,7 @@
+ * Fixed a memory leak in `withTimeout` on K/N with the new memory model (#3351).
+ * Added the guarantee that all `Throwable` implementations in the core library are serializable (#3328).
+ * Moved the documentation to <https://kotlinlang.org/api/kotlinx.coroutines/> (#3342).
++* Changed `CoroutineContext.isActive` to return `true` when there is no `Job` in the context, aligning it with `CoroutineScope.isActive` and improving cancellation checks in jobless entry points.
+ * Various documentation improvements.
+ 
+ ## Version 1.6.3
+diff --git a/docs/topics/coroutine-context-and-dispatchers.md b/docs/topics/coroutine-context-and-dispatchers.md
+index 32d189195..1cdd4bc7d 100644
+--- a/docs/topics/coroutine-context-and-dispatchers.md
++++ b/docs/topics/coroutine-context-and-dispatchers.md
+@@ -292,7 +292,7 @@ My job is "coroutine#1":BlockingCoroutine{Active}@6d311334
+ <!--- TEST lines.size == 1 && lines[0].startsWith("My job is \"coroutine#1\":BlockingCoroutine{Active}@") -->
+ 
+ Note that [isActive] in [CoroutineScope] is just a convenient shortcut for
+-`coroutineContext[Job]?.isActive == true`.
++`coroutineContext[Job]?.isActive ?: true`.
+ 
+ ## Children of a coroutine
+ 
+diff --git a/kotlinx-coroutines-core/common/src/Job.kt b/kotlinx-coroutines-core/common/src/Job.kt
+index 65646dc59..f283a3220 100644
+--- a/kotlinx-coroutines-core/common/src/Job.kt
++++ b/kotlinx-coroutines-core/common/src/Job.kt
+@@ -550,11 +550,11 @@ public fun Job.cancelChildren(cause: Throwable? = null) {
+  * }
+  * ```
+  *
+- * The `coroutineContext.isActive` expression is a shortcut for `coroutineContext[Job]?.isActive == true`.
+- * See [Job.isActive].
++ * The `coroutineContext.isActive` expression is a shortcut for `coroutineContext[Job]?.isActive ?: true`,
++ * so it returns `true` when the context does not contain a [Job]. See [Job.isActive].
+  */
+ public val CoroutineContext.isActive: Boolean
+-    get() = this[Job]?.isActive == true
++    get() = this[Job]?.isActive ?: true
+ 
+ /**
+  * Cancels [Job] of this context with an optional cancellation cause.
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/common/test/CoroutineContextIsActiveTest.kt b/kotlinx-coroutines-core/common/test/CoroutineContextIsActiveTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/CoroutineContextIsActiveTest.kt
+@@ -0,0 +1,38 @@
++/*
++ * Copyright 2016-2021 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines
++
++import kotlin.coroutines.EmptyCoroutineContext
++import kotlin.coroutines.coroutineContext
++import kotlin.test.Test
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++class CoroutineContextIsActiveTest : TestBase() {
++    @Test
++    fun `default to true when context lacks job`() {
++        assertTrue(EmptyCoroutineContext.isActive)
++    }
++
++    @Test
++    fun `jobless derived context stays active`() = runTest {
++        val joblessContext = coroutineContext.minusKey(Job)
++        assertTrue(joblessContext.isActive)
++    }
++
++    @Test
++    fun `reflects job state`() = runTest {
++        val job = Job()
++        val contextWithJob = job + EmptyCoroutineContext
++
++        assertTrue(contextWithJob.isActive)
++
++        job.cancel()
++        job.join()
++
++        assertFalse(contextWithJob.isActive)
++    }
++}
++

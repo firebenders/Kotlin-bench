@@ -1,82 +1,117 @@
-diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
-index c7bb17d62d..e9e3f2b8b6 100644
---- a/AnkiDroid/build.gradle
-+++ b/AnkiDroid/build.gradle
-@@ -2,7 +2,6 @@ plugins {
-     // Gradle plugin portal
-     id 'com.github.triplet.play' version '3.8.6'
-     id 'com.android.application'
--    id 'app.brant.amazonappstorepublisher'
-     id 'idea'
-     id 'kotlin-android'
-     id 'kotlin-parcelize'
-@@ -226,12 +225,12 @@ android {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+index 8f8b62c9a3..775ac4b0d1 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/CardBrowser.kt
+@@ -259,13 +259,12 @@ open class CardBrowser :
+         if (which != mOrder) {
+             mOrder = which
+             mOrderAsc = false
+-            which.save(getColUnsafe.config, baseContext.sharedPrefs())
+-            getColUnsafe.config.set("sortBackwards", mOrderAsc)
++            which.save(getColUnsafe.config, baseContext.sharedPrefs(), cardsOrNotes, mOrderAsc)
+             searchCards()
+         } else if (which != SortType.NO_SORTING) {
+             // if the same element is selected again, reverse the order
+             mOrderAsc = !mOrderAsc
+-            getColUnsafe.config.set("sortBackwards", mOrderAsc)
++            which.save(getColUnsafe.config, baseContext.sharedPrefs(), cardsOrNotes, mOrderAsc)
+             mCards.reverse()
+             updateList()
+         }
+@@ -466,8 +465,13 @@ open class CardBrowser :
+         registerExternalStorageListener()
+         val preferences = baseContext.sharedPrefs()
+ 
+-        mOrder = SortType.fromCol(col.config, preferences)
+-        mOrderAsc = col.config.get("sortBackwards") ?: false
++        cardsOrNotes = CardsOrNotes.fromCollection(col)
++        mOrder = SortType.fromCol(col.config, preferences, cardsOrNotes)
++        mOrderAsc = if (cardsOrNotes == CardsOrNotes.CARDS) {
++            col.config.get("sortBackwards") ?: false
++        } else {
++            col.config.get("browserNoteSortBackwards") ?: false
++        }
+         mCards.reset()
+         // Create a spinner for column 1
+         val cardsColumn1Spinner = findViewById<Spinner>(R.id.browser_column1_spinner)
+@@ -581,7 +585,6 @@ open class CardBrowser :
+             alwaysShowDefault = false,
+             showFilteredDecks = true
+         )
+-        cardsOrNotes = CardsOrNotes.fromCollection(col)
+         isTruncated = this.sharedPrefs().getBoolean("isTruncated", false)
+         deckSpinnerSelection!!.initializeActionBarDeckSpinner(this.supportActionBar!!)
+         selectDeckAndSave(deckId)
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt b/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
+index cc42c2f540..cf760b0a9e 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/model/SortType.kt
+@@ -56,6 +56,30 @@ enum class SortType(val ankiSortType: String?, val cardBrowserLabelIndex: Int) {
+         }
      }
  
-     compileOptions {
--        sourceCompatibility JavaVersion.VERSION_11
--        targetCompatibility JavaVersion.VERSION_11
-+        sourceCompatibility JavaVersion.VERSION_17
-+        targetCompatibility JavaVersion.VERSION_17
-         coreLibraryDesugaringEnabled true
-     }
-     kotlinOptions {
--        jvmTarget = JavaVersion.VERSION_11
-+        jvmTarget = JavaVersion.VERSION_17
-     }
++    /**
++     * Saves the sort type with support for both cards and notes mode.
++     * @param config The collection config
++     * @param preferences SharedPreferences for UI-related settings
++     * @param cardsOrNotes Whether in CARDS or NOTES mode
++     * @param sortAscending Whether the sort should be ascending
++     */
++    fun save(config: Config, preferences: SharedPreferences, cardsOrNotes: CardsOrNotes, sortAscending: Boolean) {
++        // in the case of 'no sorting', we still need a sort type.
++        // The inverse is handled in `fromCol`
++        val sortTypeValue = this.ankiSortType ?: SORT_FIELD.ankiSortType
++
++        if (cardsOrNotes == CardsOrNotes.CARDS) {
++            config.set("sortType", sortTypeValue)
++            config.set("sortBackwards", !sortAscending)
++        } else {
++            config.set("noteSortType", sortTypeValue)
++            config.set("browserNoteSortBackwards", !sortAscending)
++        }
++        preferences.edit {
++            putBoolean("cardBrowserNoSorting", this@SortType == NO_SORTING)
++        }
++    }
++
+     /** Converts the [SortType] to a [SortOrder] */
+     fun toSortOrder(): SortOrder =
+         if (this == NO_SORTING) SortOrder.NoOrdering() else SortOrder.UseCollectionOrdering()
+@@ -70,8 +94,21 @@ enum class SortType(val ankiSortType: String?, val cardBrowserLabelIndex: Int) {
+             return type
+         }
  
-     packagingOptions {
-@@ -246,12 +245,6 @@ play {
-     track.set('alpha')
- }
- 
--amazon {
--    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
--    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
--    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
--    replaceEdit = true
++        fun fromCol(config: Config, preferences: SharedPreferences, cardsOrNotes: CardsOrNotes): SortType {
++            val colOrder = if (cardsOrNotes == CardsOrNotes.CARDS) {
++                config.get<String>("sortType")
++            } else {
++                config.get<String>("noteSortType")
++            }
++            val type = entries.firstOrNull { it.ankiSortType == colOrder } ?: NO_SORTING
++            if (type == SORT_FIELD && preferences.getBoolean("cardBrowserNoSorting", false)) {
++                return NO_SORTING
++            }
++            return type
++        }
++
+         fun fromCardBrowserLabelIndex(index: Int): SortType {
+             return entries.firstOrNull { it.cardBrowserLabelIndex == index } ?: NO_SORTING
+         }
+     }
 -}
- 
- // Install Git pre-commit hook for Ktlint
- tasks.register('installGitHook', Copy) {
-@@ -361,7 +354,7 @@ dependencies {
-     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
-     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
-     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
--    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
-+    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
- 
-     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
-     // and there's no no-op version for release build. Usage has been disabled for release
-diff --git a/gradle.properties b/gradle.properties
-index 13992ecd31..b06b0f2c12 100644
---- a/gradle.properties
-+++ b/gradle.properties
-@@ -9,7 +9,7 @@
- 
- # Specifies the JVM arguments used for the daemon process.
- # The setting is particularly useful for tweaking memory settings.
--org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
-+org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
- 
- # AndroidX package structure to make it clearer which packages are bundled with the
- # Android operating system, and which are packaged with your app's APK
-diff --git a/settings.gradle.kts b/settings.gradle.kts
-index 72d79e8d9e..32b98034e3 100644
---- a/settings.gradle.kts
-+++ b/settings.gradle.kts
-@@ -5,14 +5,6 @@ pluginManagement {
-         mavenCentral()
-         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
-     }
--    resolutionStrategy {
--        // TODO try to find another plugin for this functionality?
--        eachPlugin {
--            if (requested.id.id == "app.brant.amazonappstorepublisher") {
--                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
--            }
--        }
--    }
- }
- 
- dependencyResolutionManagement {
++}
+\ No newline at end of file
+
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserNotesOrderTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserNotesOrderTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/CardBrowserNotesOrderTest.kt
+@@ -0,0 +1,1 @@
++
+
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/model/SortTypeTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/model/SortTypeTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/model/SortTypeTest.kt
+@@ -0,0 +1,1 @@
++

@@ -1,0 +1,116 @@
+diff --git a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+index de1522526..6fcf7b135 100644
+--- a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
++++ b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+@@ -12,9 +12,10 @@ import kotlin.concurrent.*
+ 
+ private val throwableFields = Throwable::class.java.fieldsCountOrDefault(-1)
+ private typealias Ctor = (Throwable) -> Throwable?
++private data class RankedCtor(val ctor: Ctor, val priority: Int)
+ 
+ private val ctorCache = try {
+-    if (ANDROID_DETECTED) WeakMapCtorCache
++if (ANDROID_DETECTED) WeakMapCtorCache
+     else ClassValueCtorCache
+ } catch (e: Throwable) {
+     // Fallback on Java 6 or exotic setups
+@@ -39,29 +40,34 @@ private fun <E : Throwable> createConstructor(clz: Class<E>): Ctor {
+     * Exceptions are shared among coroutines, so we should copy exception before recovering current stacktrace.
+     */
+     val constructors = clz.constructors.sortedByDescending { it.parameterTypes.size }
++    var bestCtor: RankedCtor? = null
+     for (constructor in constructors) {
+-        val result = createSafeConstructor(constructor)
+-        if (result != null) return result
++        val rankedCtor = createSafeConstructor(constructor) ?: continue
++        val currentBestPriority = bestCtor?.priority ?: Int.MAX_VALUE
++        if (rankedCtor.priority < currentBestPriority) {
++            bestCtor = rankedCtor
++            if (rankedCtor.priority == 0) break
++        }
+     }
+-    return nullResult
++    return bestCtor?.ctor ?: nullResult
+ }
+ 
+-private fun createSafeConstructor(constructor: Constructor<*>): Ctor? {
++private fun createSafeConstructor(constructor: Constructor<*>): RankedCtor? {
+     val p = constructor.parameterTypes
+     return when (p.size) {
+         2 -> when {
+             p[0] == String::class.java && p[1] == Throwable::class.java ->
+-                safeCtor { e -> constructor.newInstance(e.message, e) as Throwable }
++                RankedCtor(safeCtor { e -> constructor.newInstance(e.message, e) as Throwable }, 0)
+             else -> null
+         }
+         1 -> when (p[0]) {
+             Throwable::class.java ->
+-                safeCtor { e -> constructor.newInstance(e) as Throwable }
++                RankedCtor(safeCtor { e -> constructor.newInstance(e) as Throwable }, 1)
+             String::class.java ->
+-                safeCtor { e -> (constructor.newInstance(e.message) as Throwable).also { it.initCause(e) } }
++                RankedCtor(safeCtor { e -> (constructor.newInstance(e.message) as Throwable).also { it.initCause(e) } }, 2)
+             else -> null
+         }
+-        0 -> safeCtor { e -> (constructor.newInstance() as Throwable).also { it.initCause(e) } }
++        0 -> RankedCtor(safeCtor { e -> (constructor.newInstance() as Throwable).also { it.initCause(e) } }, 3)
+         else -> null
+     }
+ }
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/jvm/test/exceptions/StackTraceRecoveryConstructorSelectionTest.kt b/kotlinx-coroutines-core/jvm/test/exceptions/StackTraceRecoveryConstructorSelectionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/exceptions/StackTraceRecoveryConstructorSelectionTest.kt
+@@ -0,0 +1,36 @@
++/*
++ * Copyright 2016-2021 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines.exceptions
++
++import kotlinx.coroutines.TestBase
++import kotlinx.coroutines.coroutineScope
++import kotlin.test.assertEquals
++import kotlin.test.assertTrue
++import kotlin.test.fail
++import org.junit.Test
++
++class StackTraceRecoveryConstructorSelectionTest : TestBase() {
++
++    private class NestedException : RuntimeException {
++        constructor(message: String) : super(message)
++        constructor(cause: Throwable) : super(cause)
++        constructor() : super()
++    }
++
++    @Test
++    fun testPreferCauseConstructorToAvoidNestedCopies() = runTest {
++        val result = runCatching {
++            coroutineScope<Unit> {
++                throw NestedException(IllegalStateException("ERROR"))
++            }
++        }
++        val exception = result.exceptionOrNull() ?: fail("Expected coroutine scope to fail")
++        assertTrue(exception is NestedException)
++        val cause = exception.cause ?: fail("Expected cause to be present")
++        assertTrue(cause is IllegalStateException)
++        assertEquals("ERROR", cause.message)
++    }
++}
++

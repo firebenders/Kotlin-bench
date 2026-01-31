@@ -39,18 +39,30 @@ agent-bench/
 # List all available Anki tasks
 modal run agent-bench/run_eval.py --list-tasks
 
-# Run a single task
-modal run agent-bench/run_eval.py --task-id ankidroid__Anki-Android-16395
+# Run a single task with GPT-5.2-Codex
+modal run agent-bench/run_eval.py --task-id ankidroid__Anki-Android-16395 --model gpt-5.2-codex
 
-# Run all Anki tasks in parallel
-modal run agent-bench/run_eval.py --all-tasks
+# Run all Anki tasks in parallel with a specific model
+modal run agent-bench/run_eval.py --all-tasks --model gpt-5.2-codex
+
+# Run with multiple models in parallel
+modal run agent-bench/run_eval.py --all-tasks --models gpt-5.2-codex,claude-sonnet-4-20250514,gpt-5.1-codex
 
 # Run sequentially (for debugging)
-modal run agent-bench/run_eval.py --all-tasks --no-parallel
+modal run agent-bench/run_eval.py --all-tasks --model gpt-5.2-codex --no-parallel
 
 # Save results to file
-modal run agent-bench/run_eval.py --all-tasks --output results.json
+modal run agent-bench/run_eval.py --all-tasks --model gpt-5.2-codex --output results.json
 ```
+
+### Supported Models
+
+The evaluation system accepts any model identifier string. The model name is passed to the Firebender agent server which handles the LLM API calls. Common models include:
+
+- **GPT Models**: `gpt-5.2-codex`, `gpt-5.1-codex`, `gpt-4.1`
+- **Claude Models**: `claude-sonnet-4-20250514`, `claude-opus-4-5`, `claude-3.7-sonnet`, `claude-3.5-sonnet`
+- **Gemini Models**: `gemini-2.5-pro`, `gemini-3-pro-preview`, `gemini-3-flash-preview`
+- **Custom Models**: Any model identifier supported by your Firebender configuration
 
 ## Pipeline Architecture
 

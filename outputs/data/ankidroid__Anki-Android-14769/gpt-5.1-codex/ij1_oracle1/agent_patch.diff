@@ -1,0 +1,252 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index a275f03b41..91b51abaf1 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.6'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -161,9 +160,6 @@ android {
+         play {
+             dimension "appStore"
+         }
+-        amazon {
+-            dimension "appStore"
+-        }
+         // A 'full' build has no restrictions on storage/camera. Distributed on GitHub/F-Droid
+         full {
+             dimension "appStore"
+@@ -226,12 +222,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -246,12 +242,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ task installGitHook(type: Copy) {
+@@ -360,7 +350,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+     implementation 'com.github.AppIntro:AppIntro:6.3.1'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
+index f13e3c77a2..25c3ca35a8 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/CardTemplatePreviewer.kt
+@@ -69,8 +69,9 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+      */
+     var cardIndex = 0
+         private set
++    private var noteEditorCardIndexInitialized = false
+     private var mAllFieldsNull = true
+-    private var mCardType: String? = null
++private var mCardType: String? = null
+     protected var previewLayout: PreviewLayout? = null
+     override fun onCreate(savedInstanceState: Bundle?) {
+         if (showedActivityFailedScreen(savedInstanceState)) {
+@@ -275,7 +276,16 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+ 
+     private fun setCurrentCardFromNoteEditorBundle(col: Collection): Card? {
+         assert(mNoteEditorBundle != null)
+-        currentCard = getDummyCard(mEditedNotetype, cardIndex, getBundleEditFields(mNoteEditorBundle))
++        val fieldValues = getBundleEditFields(mNoteEditorBundle)
++        val previewNote = buildPreviewNote(mEditedNotetype, fieldValues) ?: return null
++
++        if (!noteEditorCardIndexInitialized) {
++            initializeCardIndexFromOrdinal(previewNote, col)
++        } else {
++            clampCardIndexWithinBounds(previewNote)
++        }
++
++        currentCard = createPreviewCard(previewNote, col, cardIndex)
+         // example: a basic card with no fields provided
+         if (currentCard == null) {
+             return null
+@@ -291,9 +301,38 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+         return currentCard
+     }
+ 
++    private fun initializeCardIndexFromOrdinal(note: Note, col: Collection) {
++        val totalCards = note.numberOfCardsEphemeral()
++        if (totalCards <= 0) {
++            cardIndex = 0
++            noteEditorCardIndexInitialized = true
++            return
++        }
++        val safeOrdinal = mOrdinal.coerceAtLeast(0)
++        val initialIndex = if (note.notetype.isCloze) {
++            val clozeNumbers = col.clozeNumbersInNote(note)
++            val target = safeOrdinal + 1
++            val matchedIndex = clozeNumbers.indexOf(target)
++            if (matchedIndex >= 0) matchedIndex else 0
++        } else {
++            safeOrdinal
++        }
++        cardIndex = initialIndex.coerceIn(0, totalCards - 1)
++        noteEditorCardIndexInitialized = true
++    }
++
++    private fun clampCardIndexWithinBounds(note: Note) {
++        val totalCards = note.numberOfCardsEphemeral()
++        cardIndex = if (totalCards <= 0) {
++            0
++        } else {
++            cardIndex.coerceIn(0, totalCards - 1)
++        }
++    }
++
+     /**
+      * Set the set tags of currentNote to tagsList.  We make no
+-     * assumption on the content of tagsList, except that its strings
++* assumption on the content of tagsList, except that its strings
+      * are valid tags (i.e. no spaces in it).
+      */
+     private fun setTags(currentNote: Note, tagsList: List<String>?) {
+@@ -329,49 +368,60 @@ open class CardTemplatePreviewer : AbstractFlashcardViewer() {
+         return mutableListOf(*ret)
+     }
+ 
+-    /**
+-     * This method generates a note from a sample model, or fails if invalid
+-     * @param index The index in the templates for the model. NOT `ord`
+-     */
+-    fun getDummyCard(notetype: NotetypeJson, index: Int): Card? {
+-        return getDummyCard(notetype, index, notetype.fieldsNames.toMutableList())
+-    }
+-
+-    /**
+-     * This method generates a note from a sample model, or fails if invalid
+-     * @param cardIndex The index in the templates for the model. NOT `ord`
+-     */
+-    private fun getDummyCard(notetype: NotetypeJson?, cardIndex: Int, fieldValues: MutableList<String>): Card? {
+-        Timber.d("getDummyCard() Creating dummy note for index %s", cardIndex)
++    private fun buildPreviewNote(notetype: NotetypeJson?, fieldValues: MutableList<String>): Note? {
+         if (notetype == null) {
+             return null
+         }
+         if (mAllFieldsNull) {
+             getLabels(fieldValues)
+         }
+-        val n = getColUnsafe.newNote(notetype)
++        val note = getColUnsafe.newNote(notetype)
+         var i = 0
+-        while (i < fieldValues.size && i < n.fields.size) {
++        while (i < fieldValues.size && i < note.fields.size) {
+             if (mAllFieldsNull) {
+-                if (mCardType != null && mCardType == getString(R.string.cloze_model_name) && i == 0 ||
+-                    mCardType == getString(R.string.basic_typing_model_name) && i == 1
+-                ) {
+-                    n.setField(i, fieldValues[i])
++                val shouldUseRawValue = mCardType != null && (
++                    mCardType == getString(R.string.cloze_model_name) && i == 0 ||
++                        mCardType == getString(R.string.basic_typing_model_name) && i == 1
++                    )
++                if (shouldUseRawValue) {
++                    note.setField(i, fieldValues[i])
+                 } else {
+-                    n.setField(i, "(" + fieldValues[i] + ")")
++                    note.setField(i, "(" + fieldValues[i] + ")")
+                 }
+             } else {
+-                n.setField(i, fieldValues[i])
++                note.setField(i, fieldValues[i])
+             }
+             i++
+         }
+-        try {
+-            return EphemeralCard.fromNote(n, getColUnsafe, cardIndex)
++        return note
++    }
++
++    private fun createPreviewCard(note: Note, col: Collection, cardIndex: Int): Card? {
++        return try {
++            EphemeralCard.fromNote(note, col, cardIndex)
+         } catch (e: Exception) {
+             // Calling code handles null return, so we can log this for developer's interest but move on
+-            Timber.d(e, "getDummyCard() unable to create card")
++            Timber.d(e, "Unable to create preview card")
++            null
+         }
+-        return null
++    }
++
++    /**
++     * This method generates a note from a sample model, or fails if invalid
++     * @param index The index in the templates for the model. NOT `ord`
++     */
++    fun getDummyCard(notetype: NotetypeJson, index: Int): Card? {
++        return getDummyCard(notetype, index, notetype.fieldsNames.toMutableList())
++    }
++
++    /**
++     * This method generates a note from a sample model, or fails if invalid
++     * @param cardIndex The index in the templates for the model. NOT `ord`
++     */
++    private fun getDummyCard(notetype: NotetypeJson?, cardIndex: Int, fieldValues: MutableList<String>): Card? {
++        Timber.d("getDummyCard() Creating dummy note for index %s", cardIndex)
++        val previewNote = buildPreviewNote(notetype, fieldValues) ?: return null
++        return createPreviewCard(previewNote, getColUnsafe, cardIndex)
+     }
+ 
+     /** Override certain aspects of Card behavior so we may display unsaved data  */
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

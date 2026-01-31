@@ -1,0 +1,412 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index fbed0bc717..0ad0fb127d 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.4'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -163,9 +162,6 @@ android {
+         play {
+             dimension "appStore"
+         }
+-        amazon {
+-            dimension "appStore"
+-        }
+         // A 'full' build has no restrictions on storage/camera. Distributed on GitHub/F-Droid
+         full {
+             dimension "appStore"
+@@ -228,12 +224,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -248,12 +244,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ task installGitHook(type: Copy) {
+@@ -364,7 +354,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+     implementation 'com.github.AppIntro:AppIntro:6.3.1'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ControlsSettingsFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ControlsSettingsFragment.kt
+index 8ff932d8b6..aed76e65bc 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ControlsSettingsFragment.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ControlsSettingsFragment.kt
+@@ -15,7 +15,6 @@
+  */
+ package com.ichi2.anki.preferences
+ 
+-import androidx.preference.PreferenceCategory
+ import com.ichi2.anki.R
+ import com.ichi2.anki.cardviewer.ViewerCommand
+ import com.ichi2.anki.reviewer.MappableBinding.Companion.toPreferenceString
+@@ -28,19 +27,14 @@ class ControlsSettingsFragment : SettingsFragment() {
+         get() = "prefs.controls"
+ 
+     override fun initSubscreen() {
+-        val commandMappingCategory = requirePreference<PreferenceCategory>(R.string.controls_command_mapping_cat_key)
+-        addAllControlPreferencesToCategory(commandMappingCategory)
+-    }
+-
+-    /** Attaches all possible [ControlPreference] elements to a given [PreferenceCategory] */
+-    fun addAllControlPreferencesToCategory(category: PreferenceCategory) {
+         for (command in ViewerCommand.values()) {
+-            val preference = ControlPreference(category.context).apply {
+-                setTitle(command.resourceId)
+-                key = command.preferenceKey
+-                setDefaultValue(command.defaultValue.toPreferenceString())
++            val preference = requirePreference<ControlPreference>(command.preferenceKey)
++            val defaultValue = command.defaultValue.toPreferenceString()
++            preference.setTitle(command.resourceId)
++            preference.setDefaultValue(defaultValue)
++            if (preference.sharedPreferences?.contains(command.preferenceKey) != true) {
++                preference.value = defaultValue
+             }
+-            category.addPreference(preference)
+         }
+-    }
++}
+ }
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/Preferences.kt b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/Preferences.kt
+index 275b95bccb..74e574379e 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/Preferences.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/Preferences.kt
+@@ -40,7 +40,6 @@ import com.bytehamster.lib.preferencesearch.SearchPreferenceResult
+ import com.bytehamster.lib.preferencesearch.SearchPreferenceResultListener
+ import com.ichi2.anki.*
+ import com.ichi2.anki.CollectionManager.withCol
+-import com.ichi2.anki.cardviewer.ViewerCommand
+ import com.ichi2.anki.services.BootService.Companion.scheduleNotification
+ import com.ichi2.compat.CompatHelper
+ import com.ichi2.libanki.Collection
+@@ -158,19 +157,6 @@ class Preferences :
+             index(R.xml.preferences_accessibility)
+         }
+ 
+-        /**
+-         * The command bindings preferences are created programmatically
+-         * on [ControlsSettingsFragment.addAllControlPreferencesToCategory],
+-         * so they should be added programmatically to the search index as well.
+-         */
+-        for (command in ViewerCommand.values()) {
+-            searchConfig.indexItem()
+-                .withTitle(getString(command.resourceId))
+-                .withKey(command.preferenceKey)
+-                .withResId(R.xml.preferences_controls)
+-                .addBreadcrumb(getString(R.string.pref_cat_controls))
+-                .addBreadcrumb(getString(R.string.controls_main_category))
+-        }
+ 
+         // Some preferences and categories are only shown conditionally,
+         // so they should be searchable based on the same conditions
+diff --git a/AnkiDroid/src/main/java/com/ichi2/preferences/ControlPreference.kt b/AnkiDroid/src/main/java/com/ichi2/preferences/ControlPreference.kt
+index 051117e2fb..7ba9412616 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/preferences/ControlPreference.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/preferences/ControlPreference.kt
+@@ -21,6 +21,7 @@ import android.content.Context
+ import android.util.AttributeSet
+ import androidx.appcompat.app.AlertDialog
+ import androidx.preference.ListPreference
++import androidx.preference.PreferenceGroup
+ import com.afollestad.materialdialogs.MaterialDialog
+ import com.afollestad.materialdialogs.customview.customView
+ import com.ichi2.anki.R
+@@ -201,7 +202,7 @@ class ControlPreference : ListPreference {
+      * in the parent PreferenceGroup of this [ControlPreference]
+      */
+     private fun clearBinding(binding: MappableBinding) {
+-        val preferenceGroup = parent
++        val preferenceGroup = findRootPreferenceGroup()
+             ?: return
+ 
+         for (command in ViewerCommand.values()) {
+@@ -214,6 +215,14 @@ class ControlPreference : ListPreference {
+         }
+     }
+ 
++    private fun findRootPreferenceGroup(): PreferenceGroup? {
++        var group: PreferenceGroup? = parent
++        while (group?.parent is PreferenceGroup) {
++            group = group.parent as PreferenceGroup
++        }
++        return group
++    }
++
+     private fun showDialogToReplaceBinding(binding: MappableBinding, title: String, parentDialog: MaterialDialog) {
+         val commandName = context.getString(getCommandWithBindingExceptThis(binding)!!.resourceId)
+ 
+diff --git a/AnkiDroid/src/main/res/values/10-preferences.xml b/AnkiDroid/src/main/res/values/10-preferences.xml
+index ce1eddbd3b..c0ca22dc21 100644
+--- a/AnkiDroid/src/main/res/values/10-preferences.xml
++++ b/AnkiDroid/src/main/res/values/10-preferences.xml
+@@ -205,10 +205,16 @@
+     <string name="keyboard">Keyboard</string>
+     <string name="bluetooth">Bluetooth</string>
+     <string name="controls_main_category" maxLength="41">Command mapping</string>
++    <string name="controls_category_answer_buttons" maxLength="41">Answer buttons</string>
++    <string name="controls_category_flags" maxLength="41">Flags</string>
++    <string name="controls_category_whiteboard" maxLength="41">Whiteboard</string>
++    <string name="controls_category_current_card_note" maxLength="41">Current card/note</string>
++    <string name="controls_category_navigation" maxLength="41">Navigation</string>
++    <string name="controls_category_misc" maxLength="41">Misc</string>
+ 
+ 
+     <!-- studyoptions -->
+-    <string name="studyoptions_limit_select_tags">Select tags</string>
++<string name="studyoptions_limit_select_tags">Select tags</string>
+     <!-- Deck configurations -->
+     <string name="deck_conf_general" maxLength="41" comment="Label of the submenu for the general options of new deck">General</string>
+     <string name="deck_conf_reminders" maxLength="41">Reminders</string>
+diff --git a/AnkiDroid/src/main/res/xml/preferences_controls.xml b/AnkiDroid/src/main/res/xml/preferences_controls.xml
+index 1f5bd699f2..71a1917a26 100644
+--- a/AnkiDroid/src/main/res/xml/preferences_controls.xml
++++ b/AnkiDroid/src/main/res/xml/preferences_controls.xml
+@@ -49,6 +49,138 @@
+         android:valueFrom="20"
+         android:valueTo="180"
+         app1:displayValue="true"/>
+-    <!-- This category is expanded in BindingPreference.setup -->
+-    <PreferenceCategory android:title="@string/controls_main_category" android:key="@string/controls_command_mapping_cat_key" />
++    <PreferenceCategory
++        android:title="@string/controls_category_answer_buttons">
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_SHOW_ANSWER"
++            android:title="@string/show_answer" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_FLIP_OR_ANSWER_EASE1"
++            android:title="@string/gesture_answer_1" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_FLIP_OR_ANSWER_EASE2"
++            android:title="@string/gesture_answer_2" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_FLIP_OR_ANSWER_EASE3"
++            android:title="@string/gesture_answer_3" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_FLIP_OR_ANSWER_EASE4"
++            android:title="@string/gesture_answer_4" />
++    </PreferenceCategory>
++
++    <PreferenceCategory
++        android:title="@string/controls_category_flags">
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_TOGGLE_FLAG_RED"
++            android:title="@string/gesture_flag_red" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_TOGGLE_FLAG_ORANGE"
++            android:title="@string/gesture_flag_orange" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_TOGGLE_FLAG_GREEN"
++            android:title="@string/gesture_flag_green" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_TOGGLE_FLAG_BLUE"
++            android:title="@string/gesture_flag_blue" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_TOGGLE_FLAG_PINK"
++            android:title="@string/gesture_flag_pink" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_TOGGLE_FLAG_TURQUOISE"
++            android:title="@string/gesture_flag_turquoise" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_TOGGLE_FLAG_PURPLE"
++            android:title="@string/gesture_flag_purple" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_UNSET_FLAG"
++            android:title="@string/gesture_flag_remove" />
++    </PreferenceCategory>
++
++    <PreferenceCategory
++        android:title="@string/controls_category_whiteboard">
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_TOGGLE_WHITEBOARD"
++            android:title="@string/gesture_toggle_whiteboard" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_CLEAR_WHITEBOARD"
++            android:title="@string/clear_whiteboard" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_CHANGE_WHITEBOARD_PEN_COLOR"
++            android:title="@string/title_whiteboard_editor" />
++    </PreferenceCategory>
++
++    <PreferenceCategory
++        android:title="@string/controls_category_current_card_note">
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_EDIT"
++            android:title="@string/cardeditor_title_edit_card" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_MARK"
++            android:title="@string/menu_mark_note" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_BURY_CARD"
++            android:title="@string/menu_bury_card" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_SUSPEND_CARD"
++            android:title="@string/menu_suspend_card" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_DELETE"
++            android:title="@string/menu_delete_note" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_BURY_NOTE"
++            android:title="@string/menu_bury_note" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_SUSPEND_NOTE"
++            android:title="@string/menu_suspend_note" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_TAG"
++            android:title="@string/add_tag" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_CARD_INFO"
++            android:title="@string/card_info_title" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_ADD_NOTE"
++            android:title="@string/menu_add_note" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_RESCHEDULE_NOTE"
++            android:title="@string/card_editor_reschedule_card" />
++    </PreferenceCategory>
++
++    <PreferenceCategory
++        android:title="@string/controls_category_navigation">
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_PAGE_UP"
++            android:title="@string/gesture_page_up" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_PAGE_DOWN"
++            android:title="@string/gesture_page_down" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_EXIT"
++            android:title="@string/gesture_abort_learning" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_ABORT_AND_SYNC"
++            android:title="@string/gesture_abort_sync" />
++    </PreferenceCategory>
++
++    <PreferenceCategory
++        android:title="@string/controls_category_misc">
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_UNDO"
++            android:title="@string/undo" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_PLAY_MEDIA"
++            android:title="@string/gesture_play" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_RECORD_VOICE"
++            android:title="@string/record_voice" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_REPLAY_VOICE"
++            android:title="@string/replay_voice" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_SHOW_HINT"
++            android:title="@string/gesture_show_hint" />
++        <com.ichi2.preferences.ControlPreference
++            android:key="binding_SHOW_ALL_HINTS"
++            android:title="@string/gesture_show_all_hints" />
++    </PreferenceCategory>
+ </PreferenceScreen>
+\ No newline at end of file
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {
+
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/preferences/ControlsPreferencesXmlTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/preferences/ControlsPreferencesXmlTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/preferences/ControlsPreferencesXmlTest.kt
+@@ -0,0 +1,39 @@
++/*
++ *  Copyright (c) 2026
++ *
++ *  This program is free software; you can redistribute it and/or modify it under
++ *  the terms of the GNU General Public License as published by the Free Software
++ *  Foundation; either version 3 of the License, or (at your option) any later
++ *  version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT ANY
++ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
++ *  PARTICULAR PURPOSE. See the GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along with
++ *  this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++package com.ichi2.anki.preferences
++
++import android.content.Context
++import androidx.test.core.app.ApplicationProvider
++import com.ichi2.anki.R
++import com.ichi2.anki.cardviewer.ViewerCommand
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class ControlsPreferencesXmlTest {
++    @Test
++    fun allViewerCommandsArePresentInControlsPreferencesXml() {
++        val context = ApplicationProvider.getApplicationContext<Context>()
++        val keys = PreferenceTestUtils.getKeysFromXml(context, R.xml.preferences_controls).toSet()
++
++        for (command in ViewerCommand.values()) {
++            assertTrue(
++                "Missing control preference for ${command.preferenceKey} in preferences_controls.xml",
++                keys.contains(command.preferenceKey)
++            )
++        }
++    }
++}
++

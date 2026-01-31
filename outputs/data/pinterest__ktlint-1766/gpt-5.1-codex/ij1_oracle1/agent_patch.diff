@@ -1,0 +1,125 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ea4b034e..78dcf123 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -11,7 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ ### Fixed
+ * Do not enable the experimental rules by default when `.editorconfig` properties `disabled_rules` or `ktlint_disabled_rules` are set. ([#1771](https://github.com/pinterest/ktlint/issues/1771))
+ * A function signature not having any parameters which exceeds the `max-line-length` should be ignored by rule `function-signature` ([#1773](https://github.com/pinterest/ktlint/issues/1773))
+-* 
++* Force array-style annotations (`@[ ... ]`) onto separate lines in `annotation` rule. ([#1765](https://github.com/pinterest/ktlint/issues/1765))
+ 
+ ### Changed
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+index 7fdfdd88..2ea1dfa8 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+@@ -5,6 +5,7 @@ import com.pinterest.ktlint.core.ast.ElementType.ANNOTATED_EXPRESSION
+ import com.pinterest.ktlint.core.ast.ElementType.ANNOTATION
+ import com.pinterest.ktlint.core.ast.ElementType.ANNOTATION_ENTRY
+ import com.pinterest.ktlint.core.ast.ElementType.FILE_ANNOTATION_LIST
++import com.pinterest.ktlint.core.ast.ElementType.LBRACKET
+ import com.pinterest.ktlint.core.ast.ElementType.TYPE_ARGUMENT_LIST
+ import com.pinterest.ktlint.core.ast.ElementType.VALUE_ARGUMENT
+ import com.pinterest.ktlint.core.ast.ElementType.VALUE_ARGUMENT_LIST
+@@ -49,15 +50,45 @@ public class AnnotationRule : Rule("annotation") {
+             FILE_ANNOTATION_LIST -> {
+                 visitFileAnnotationList(node, emit, autoCorrect)
+             }
++            ANNOTATION ->
++                visitAnnotation(node, emit, autoCorrect)
+             ANNOTATION_ENTRY ->
+                 visitAnnotationEntry(node, emit, autoCorrect)
+         }
+     }
+ 
+-    private fun visitAnnotationEntry(
++    private fun visitAnnotation(
+         node: ASTNode,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+         autoCorrect: Boolean,
++    ) {
++        require(node.elementType == ANNOTATION)
++
++        if (!node.isArrayAnnotationSyntax()) {
++            return
++        }
++
++        val canBeAutoCorrected = node.treeParent?.elementType != ANNOTATED_EXPRESSION
++
++        if (node.isOnSameLineAsAnnotatedConstruct()) {
++            emit(
++                node.startOffset,
++                "Annotation must be placed on separate line",
++                canBeAutoCorrected,
++            )
++            if (autoCorrect && canBeAutoCorrected) {
++                node
++                    .lastChildLeafOrSelf()
++                    .nextLeaf()
++                    ?.upsertWhitespaceBeforeMe(getNewlineWithIndent(node))
++            }
++        }
++    }
++
++    private fun visitAnnotationEntry(
++node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
+     ) {
+         require(node.elementType == ANNOTATION_ENTRY)
+ 
+@@ -217,8 +248,11 @@ public class AnnotationRule : Rule("annotation") {
+     private fun ASTNode.isFollowedByOtherAnnotationEntry() =
+         siblings(forward = true).any { it.elementType == ANNOTATION_ENTRY }
+ 
++    private fun ASTNode.isArrayAnnotationSyntax() =
++        findChildByType(LBRACKET) != null
++
+     private fun ASTNode.isOnSameLineAsNextAnnotationEntry() =
+-        siblings(forward = true)
++siblings(forward = true)
+             .takeWhile { it.elementType != ANNOTATION_ENTRY }
+             .none { it.isWhiteSpaceWithNewline() }
+ 
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRuleArrayAnnotationTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRuleArrayAnnotationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRuleArrayAnnotationTest.kt
+@@ -0,0 +1,26 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++class AnnotationRuleArrayAnnotationTest {
++    private val annotationRuleAssertThat = assertThatRule { AnnotationRule() }
++
++    @Test
++    fun `Given array-style annotation on same line as annotated construct`() {
++        val code =
++            """
++            @[Foo Bar] class Foo
++            """.trimIndent()
++        val formattedCode =
++            """
++            @[Foo Bar]
++            class Foo
++            """.trimIndent()
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Annotation must be placed on separate line")
++            .isFormattedAs(formattedCode)
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

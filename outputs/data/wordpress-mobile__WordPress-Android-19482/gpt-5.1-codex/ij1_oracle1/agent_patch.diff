@@ -1,0 +1,879 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+index 5e3eed9be28..729f23c8baf 100644
+--- a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
++++ b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+@@ -403,11 +403,11 @@ class PostListItemUiStateHelper @Inject constructor(
+         shouldShowPromoteWithBlaze: Boolean
+     ): List<PostListButtonType> {
+         val canRetryUpload = uploadUiState is UploadFailed
+-        val canCancelPendingAutoUpload = (uploadUiState is UploadWaitingForConnection ||
+-                (uploadUiState is UploadFailed && uploadUiState.isEligibleForAutoUpload))
+-        val canPublishPost = (canRetryUpload || uploadUiState is NothingToUpload || !canCancelPendingAutoUpload) &&
+-                (isLocallyChanged || isLocalDraft || postStatus == DRAFT ||
+-                        (siteHasCapabilitiesToPublish && postStatus == PENDING))
++        val canCancelPendingAutoUpload = uploadUiState is UploadWaitingForConnection ||
++                (uploadUiState is UploadFailed && uploadUiState.isEligibleForAutoUpload)
++        if (postStatus == TRASHED) {
++            return listOf(BUTTON_MOVE_TO_DRAFT, BUTTON_DELETE_PERMANENTLY)
++        }
+ 
+         val canShowStats = statsSupported &&
+                 postStatus == PUBLISHED &&
+@@ -417,76 +417,126 @@ class PostListItemUiStateHelper @Inject constructor(
+         val canShowCopy = postStatus == PUBLISHED || postStatus == DRAFT
+         val canShowCopyUrlButton = !isLocalDraft && postStatus != TRASHED
+         val canShowViewButton = !canRetryUpload && postStatus != TRASHED
+-        val canShowPublishButton = canRetryUpload || canPublishPost
+-        val buttonTypes = ArrayList<PostListButtonType>()
+ 
+-        if (postStatus != TRASHED) {
+-            buttonTypes.add(BUTTON_EDIT)
+-        }
++        val buttonTypes = mutableListOf<PostListButtonType>()
++        buttonTypes.add(BUTTON_EDIT)
+ 
+-        if (canCancelPendingAutoUpload) {
+-            buttonTypes.add(BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+-        }
+-
+-        if (canShowPublishButton) {
+-            buttonTypes.add(
+-                when {
+-                    canRetryUpload -> BUTTON_RETRY
+-                    !siteHasCapabilitiesToPublish -> BUTTON_SUBMIT
+-                    postStatus == SCHEDULED && isLocallyChanged -> BUTTON_SYNC
+-                    else -> BUTTON_PUBLISH
+-                }
+-            )
+-        }
++        getPublishAction(
++            canRetryUpload = canRetryUpload,
++            uploadUiState = uploadUiState,
++            canCancelPendingAutoUpload = canCancelPendingAutoUpload,
++            isLocalDraft = isLocalDraft,
++            isLocallyChanged = isLocallyChanged,
++            postStatus = postStatus,
++            siteHasCapabilitiesToPublish = siteHasCapabilitiesToPublish
++        )?.let { buttonTypes.add(it) }
+ 
+-        if (canShowViewButton) {
+-            buttonTypes.addViewOrPreviewAction(isLocalDraft || isLocallyChanged)
+-        }
++        getViewOrPreviewAction(
++            canShowViewButton = canShowViewButton,
++            shouldShowPreview = isLocalDraft || isLocallyChanged
++        )?.let { buttonTypes.add(it) }
+ 
+         if (canShowStats) {
+             buttonTypes.add(BUTTON_STATS)
+         }
+ 
+-        if (canShowCopy) {
+-            buttonTypes.add(BUTTON_COPY)
+-        }
++        buttonTypes.addAll(getOfflineActions(canCancelPendingAutoUpload, canRetryUpload))
++        buttonTypes.addAll(
++            getShareAndPromoteActions(
++                canShowCopyUrlButton = canShowCopyUrlButton,
++                canShowCopy = canShowCopy,
++                shouldShowPromoteWithBlaze = shouldShowPromoteWithBlaze
++            )
++        )
++        buttonTypes.addAll(getManageActions(isLocalDraft, postStatus))
+ 
+-        buttonTypes.addMoveToDraftActionIfAvailable(postStatus)
++        return buttonTypes
++    }
+ 
+-        if (canShowCopyUrlButton) {
+-            buttonTypes.add(BUTTON_COPY_URL)
++    private fun getPublishAction(
++        canRetryUpload: Boolean,
++        uploadUiState: PostUploadUiState,
++        canCancelPendingAutoUpload: Boolean,
++        isLocalDraft: Boolean,
++        isLocallyChanged: Boolean,
++        postStatus: PostStatus,
++        siteHasCapabilitiesToPublish: Boolean
++    ): PostListButtonType? {
++        if (canRetryUpload) {
++            return null
+         }
+-
+-        if (shouldShowPromoteWithBlaze) {
+-            buttonTypes.add(BUTTON_PROMOTE_WITH_BLAZE)
++        val shouldShowPublishAction =
++            (uploadUiState is NothingToUpload || !canCancelPendingAutoUpload) &&
++                    (isLocallyChanged || isLocalDraft || postStatus == DRAFT ||
++                            (siteHasCapabilitiesToPublish && postStatus == PENDING))
++        if (!shouldShowPublishAction) {
++            return null
++        }
++        return when {
++            !siteHasCapabilitiesToPublish -> BUTTON_SUBMIT
++            postStatus == SCHEDULED && isLocallyChanged -> BUTTON_SYNC
++            else -> BUTTON_PUBLISH
+         }
+-
+-        buttonTypes.addDeletingOrTrashAction(isLocalDraft, postStatus)
+-
+-        return buttonTypes
+     }
+ 
+-    private fun MutableList<PostListButtonType>.addViewOrPreviewAction(shouldShowPreview: Boolean) {
+-        add(if (shouldShowPreview) BUTTON_PREVIEW else BUTTON_VIEW)
++    private fun getViewOrPreviewAction(
++        canShowViewButton: Boolean,
++        shouldShowPreview: Boolean
++    ): PostListButtonType? {
++        if (!canShowViewButton) {
++            return null
++        }
++        return if (shouldShowPreview) BUTTON_PREVIEW else BUTTON_VIEW
+     }
+ 
+-    private fun MutableList<PostListButtonType>.addDeletingOrTrashAction(
+-        isLocalDraft: Boolean,
+-        postStatus: PostStatus
+-    ) {
+-        when {
+-            isLocalDraft -> add(BUTTON_DELETE)
+-            postStatus == TRASHED -> add(BUTTON_DELETE_PERMANENTLY)
+-            postStatus != TRASHED -> add(BUTTON_TRASH)
++    private fun getOfflineActions(
++        canCancelPendingAutoUpload: Boolean,
++        canRetryUpload: Boolean
++    ): List<PostListButtonType> {
++        val offlineActions = mutableListOf<PostListButtonType>()
++        if (canCancelPendingAutoUpload) {
++            offlineActions.add(BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
++        }
++        if (canRetryUpload) {
++            offlineActions.add(BUTTON_RETRY)
+         }
++        return offlineActions
+     }
+ 
+-    private fun MutableList<PostListButtonType>.addMoveToDraftActionIfAvailable(postStatus: PostStatus) {
+-        val canMovePostToDraft = postStatus == PUBLISHED || postStatus == TRASHED
++    private fun getShareAndPromoteActions(
++        canShowCopyUrlButton: Boolean,
++        canShowCopy: Boolean,
++        shouldShowPromoteWithBlaze: Boolean
++    ): List<PostListButtonType> {
++        val shareActions = mutableListOf<PostListButtonType>()
++        if (canShowCopyUrlButton) {
++            shareActions.add(BUTTON_COPY_URL)
++        }
++        if (canShowCopy) {
++            shareActions.add(BUTTON_COPY)
++        }
++        if (shouldShowPromoteWithBlaze) {
++            shareActions.add(BUTTON_PROMOTE_WITH_BLAZE)
++        }
++        return shareActions
++    }
+ 
+-        if (canMovePostToDraft) {
+-            add(BUTTON_MOVE_TO_DRAFT)
++    private fun getManageActions(
++        isLocalDraft: Boolean,
++        postStatus: PostStatus
++    ): List<PostListButtonType> {
++        val manageActions = mutableListOf<PostListButtonType>()
++        if (postStatus == PUBLISHED) {
++            manageActions.add(BUTTON_MOVE_TO_DRAFT)
+         }
++        manageActions.add(
++            if (isLocalDraft) {
++                BUTTON_DELETE
++            } else {
++                BUTTON_TRASH
++            }
++        )
++        return manageActions
+     }
+ 
+     private fun createMoreActions(
+diff --git a/WordPress/src/test/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelperTest.kt b/WordPress/src/test/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelperTest.kt
+index 0937eb3a4a8..f5441fcb6db 100644
+--- a/WordPress/src/test/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelperTest.kt
++++ b/WordPress/src/test/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelperTest.kt
+@@ -94,14 +94,16 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_PUBLISH)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(state.moreActions.actions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(state.moreActions.actions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(state.moreActions.actions).hasSize(6)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_PUBLISH,
++            PostListButtonType.BUTTON_VIEW,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify local draft actions`() {
+@@ -109,13 +111,15 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_DRAFT, isLocalDraft = true)
+         )
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_PUBLISH)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(state.moreActions.actions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
+-        assertThat(state.moreActions.actions).hasSize(5)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_PUBLISH,
++            PostListButtonType.BUTTON_PREVIEW,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_DELETE
++        )
++}
+ 
+     @Test
+     fun `verify draft actions without publishing rights`() {
+@@ -124,15 +128,16 @@ class PostListItemUiStateHelperTest {
+             capabilitiesToPublish = false
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_SUBMIT)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(6)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_SUBMIT,
++            PostListButtonType.BUTTON_VIEW,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify local draft actions without publishing rights`() {
+@@ -141,14 +146,15 @@ class PostListItemUiStateHelperTest {
+             capabilitiesToPublish = false
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_SUBMIT)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
+-        assertThat(moreActions).hasSize(5)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_SUBMIT,
++            PostListButtonType.BUTTON_PREVIEW,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_DELETE
++        )
++}
+ 
+     @Test
+     fun `verify draft actions on failed upload`() {
+@@ -159,14 +165,15 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_DRAFT)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(5)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_RETRY,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify local draft actions on failed upload`() {
+@@ -177,13 +184,14 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_DRAFT, isLocalDraft = true)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
+-        assertThat(moreActions).hasSize(4)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_RETRY,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_DELETE
++        )
++}
+ 
+     @Test
+     fun `verify draft actions on failed upload without publishing rights`() {
+@@ -195,13 +203,15 @@ class PostListItemUiStateHelperTest {
+             capabilitiesToPublish = false
+         )
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(state.moreActions.actions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(state.moreActions.actions).hasSize(5)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_RETRY,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify local draft actions on failed upload without publishing rights`() {
+@@ -214,12 +224,14 @@ class PostListItemUiStateHelperTest {
+             capabilitiesToPublish = false
+         )
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
+-        assertThat(state.moreActions.actions).hasSize(4)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_RETRY,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_DELETE
++        )
++}
+ 
+     @Test
+     fun `verify published post actions`() {
+@@ -227,16 +239,17 @@ class PostListItemUiStateHelperTest {
+         val state = createPostListItemUiState(
+             post = createPostModel(status = POST_STATE_PUBLISH)
+         )
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_STATS)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[6].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(7)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_VIEW,
++            PostListButtonType.BUTTON_STATS,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify published post actions when stats are not supported`() {
+@@ -245,15 +258,16 @@ class PostListItemUiStateHelperTest {
+             statsSupported = false
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(6)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_VIEW,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `given published post with stats access when jetpack removal phase then stats is in menu`() {
+@@ -262,16 +276,17 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_PUBLISH)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_STATS)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[6].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(7)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_VIEW,
++            PostListButtonType.BUTTON_STATS,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `given published post with stats access when not jetpack removal phase then stats is not in menu`() {
+@@ -280,15 +295,16 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_PUBLISH)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(6)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_VIEW,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify published post with changes actions`() {
+@@ -296,16 +312,17 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_PUBLISH, isLocallyChanged = true)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_PUBLISH)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[6].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(7)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_PUBLISH,
++            PostListButtonType.BUTTON_PREVIEW,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify published post with failed upload actions`() {
+@@ -316,15 +333,16 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_PUBLISH, isLocallyChanged = true)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(6)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_RETRY,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify trashed post actions`() {
+@@ -332,10 +350,12 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_TRASHED)
+         )
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE_PERMANENTLY)
+-        assertThat(state.moreActions.actions).hasSize(2)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_DELETE_PERMANENTLY
++        )
++}
+ 
+     @Test
+     fun `verify scheduled post actions`() {
+@@ -343,13 +363,14 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_SCHEDULED)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(4)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_VIEW,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify scheduled post with changes actions`() {
+@@ -357,14 +378,15 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_SCHEDULED, isLocallyChanged = true)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_SYNC)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(5)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_SYNC,
++            PostListButtonType.BUTTON_PREVIEW,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify scheduled post with failed upload actions`() {
+@@ -375,13 +397,14 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_SCHEDULED, isLocallyChanged = true)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(4)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_RETRY,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify post pending review with publishing rights actions`() {
+@@ -389,13 +412,15 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_PENDING)
+         )
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_PUBLISH)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(state.moreActions.actions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(state.moreActions.actions).hasSize(5)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_PUBLISH,
++            PostListButtonType.BUTTON_VIEW,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify post pending review without publishing rights`() {
+@@ -404,13 +429,14 @@ class PostListItemUiStateHelperTest {
+             capabilitiesToPublish = false
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(4)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_VIEW,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify published post with local changes eligible for auto upload`() {
+@@ -421,16 +447,17 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_PUBLISH, isLocallyChanged = true)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[6].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(7)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_PREVIEW,
++            PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify scheduled post with local changes eligible for auto upload`() {
+@@ -441,14 +468,15 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_SCHEDULED, isLocallyChanged = true)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(5)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_PREVIEW,
++            PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify published private post with local changes eligible for auto upload`() {
+@@ -458,14 +486,15 @@ class PostListItemUiStateHelperTest {
+         val state = createPostListItemUiState(
+             post = createPostModel(status = POST_STATE_PRIVATE, isLocallyChanged = true)
+         )
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(5)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_PREVIEW,
++            PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify draft with local changes eligible for auto upload`() {
+@@ -476,15 +505,16 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_DRAFT, isLocallyChanged = true)
+         )
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType)
+-            .isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(state.moreActions.actions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(state.moreActions.actions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(state.moreActions.actions).hasSize(6)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_PREVIEW,
++            PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `verify published with local changes eligible for auto upload after a failed upload`() {
+@@ -504,16 +534,17 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_PUBLISH, isLocallyChanged = true)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[6].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(7)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD,
++            PostListButtonType.BUTTON_RETRY,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_TRASH
++        )
++}
+ 
+     @Test
+     fun `private label shown for private posts`() {
+@@ -830,10 +861,12 @@ class PostListItemUiStateHelperTest {
+     @Test
+     fun `show only delete and move to draft buttons on trashed posts`() {
+         val state = createPostListItemUiState(post = createPostModel(POST_STATE_TRASHED))
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE_PERMANENTLY)
+-        assertThat(state.moreActions.actions).hasSize(2)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_DELETE_PERMANENTLY
++        )
++}
+ 
+     @Test
+     fun `show delete button on local draft with a media upload error`() {
+@@ -844,14 +877,15 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(isLocalDraft = true, isLocallyChanged = true)
+         )
+ 
+-        val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
+-        assertThat(moreActions).hasSize(5)
+-    }
++        assertActions(
++            state,
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_RETRY,
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_DELETE
++        )
++}
+ 
+     @Test
+     fun `pending publish post label shown when post eligible for auto-upload`() {
+@@ -1043,6 +1077,10 @@ class PostListItemUiStateHelperTest {
+         assertThat(state.data.statuses).contains(UiStringRes(R.string.post_status_sticky))
+     }
+ 
++    private fun assertActions(state: PostListItemUiState, vararg expected: PostListButtonType) {
++        assertThat(state.moreActions.actions.map { it.buttonType }).containsExactly(*expected)
++    }
++
+     private fun createPostModel(
+         status: String = POST_STATE_PUBLISH,
+         isLocalDraft: Boolean = false,
+
+diff --git a/WordPress/src/main/res/drawable/ic_gridicons_link_white_24dp.xml b/WordPress/src/main/res/drawable/ic_gridicons_link_white_24dp.xml
+new file mode 100644
+--- /dev/null
++++ b/WordPress/src/main/res/drawable/ic_gridicons_link_white_24dp.xml
+@@ -0,0 +1,10 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FFFFFFFF"
++        android:pathData="M10,17.389L8.444,17.389A5.194,5.194 0,1 1,8.444 7L10,7v1.5L8.444,8.5a3.694,3.694 0,0 0,0 7.389L10,15.889v1.5ZM14,7h1.556a5.194,5.194 0,0 1,0 10.39L14,17.39v-1.5h1.556a3.694,3.694 0,0 0,0 -7.39L14,8.5L14,7ZM9.5,13h5v-1.5h-5L9.5,13Z" />
++</vector>
++

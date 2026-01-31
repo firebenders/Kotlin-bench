@@ -1,0 +1,108 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 0695bd9c..7a583445 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -11,6 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ ### Fixed
+ * Do not enable the experimental rules by default when `.editorconfig` properties `disabled_rules` or `ktlint_disabled_rules` are set. ([#1771](https://github.com/pinterest/ktlint/issues/1771))
+ * A function signature not having any parameters which exceeds the `max-line-length` should be ignored by rule `function-signature` ([#1773](https://github.com/pinterest/ktlint/issues/1773))
++* Do not require wrapping for single-line lambda blocks embedded in raw string templates when only the string contents exceed `max_line_length` (wrapping)
+ 
+ ### Changed
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
+index 167cc132..1221845b 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRule.kt
+@@ -141,7 +141,7 @@ public class WrappingRule :
+                     // A multiline block should always be wrapped unless it starts with an EOL comment
+                     node.firstChildLeafOrSelf().elementType != EOL_COMMENT
+                 }
+-                maxLineLength > 0 -> {
++                maxLineLength > 0 && !node.isPartOfStringTemplate() -> {
+                     val startOfLine = node.prevLeaf { it.isWhiteSpaceWithNewline() }
+                     val endOfLine = node.nextLeaf { it.isWhiteSpaceWithNewline() }
+                     val line =
+@@ -152,7 +152,7 @@ public class WrappingRule :
+                             .orEmpty()
+                     line.length > maxLineLength
+                 }
+-                else -> false
++else -> false
+             }
+         if (wrapBlock) {
+             startOfBlock
+@@ -562,6 +562,10 @@ public class WrappingRule :
+         return true
+     }
+ 
++    private fun ASTNode.isPartOfStringTemplate(): Boolean =
++        generateSequence(treeParent) { it.treeParent }
++            .any { it.elementType == STRING_TEMPLATE }
++
+     override fun afterVisitChildNodes(
+         node: ASTNode,
+         autoCorrect: Boolean,
+@@ -591,7 +595,7 @@ public class WrappingRule :
+     }
+ 
+     private companion object {
+-        private val LTOKEN_SET = TokenSet.create(LPAR, LBRACE, LBRACKET, LT)
++private val LTOKEN_SET = TokenSet.create(LPAR, LBRACE, LBRACKET, LT)
+         private val RTOKEN_SET = TokenSet.create(RPAR, RBRACE, RBRACKET, GT)
+         private val MATCHING_RTOKEN_MAP =
+             LTOKEN_SET.types.zip(
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleRawStringTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleRawStringTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/WrappingRuleRawStringTest.kt
+@@ -0,0 +1,40 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++internal class WrappingRuleRawStringTest {
++    private val wrappingRuleAssertThat = assertThatRule { WrappingRule() }
++
++    @Test
++    fun `Given a raw string with a let block exceeding the max line length then do not require wrapping inside the string template`() {
++        val code =
++            """
++            package test
++
++            class QueryGenerator {
++                fun getQueryString(query: QueryRequest): String {
++                    val q = $MULTILINE_STRING_QUOTE
++                        SELECT *
++                        FROM table_name_long_enough_so_max_line_length_is_met_and_wrapping_rule_is_violated_and_generates_an_error WHERE 1 = 1 $.{query.gameId?.let { "AND id = ?" } ?: ""}
++                    $MULTILINE_STRING_QUOTE
++                    return q
++                }
++            }
++
++            data class QueryRequest(
++                val gameId: String?,
++            )
++            """.trimIndent()
++                .replacePlaceholderWithStringTemplate()
++        wrappingRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to "120")
++            .hasNoLintViolations()
++    }
++
++    private fun String.replacePlaceholderWithStringTemplate() = replace("$.", "${'$'}")
++}
++
++private const val MULTILINE_STRING_QUOTE = "\"\"\""
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

@@ -1,0 +1,125 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 5a4038fb..62b5af3a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -14,6 +14,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ * Fix wrapping of nested function literals `wrapping` ([#2106](https://github.com/pinterest/ktlint/issues/2106))
+ * Do not indent class body for classes having a long super type list in code style `ktlint_official` as it is inconsistent compared to other class bodies `indent` [#2115](https://github.com/pinterest/ktlint/issues/2115) 
+ * Fix spacing around colon in annotations `spacing-around-colon` ([#2093](https://github.com/pinterest/ktlint/issues/2093))
++* Ensure whitespace inserted before a function body is attached to the correct AST node to avoid repeated spacing violations (`curly-spacing`, `function-start-of-body-spacing`, `function-signature`)
+ 
+ ### Changed
+ 
+diff --git a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+index 201e7dac..721a7aae 100644
+--- a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
++++ b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+@@ -236,14 +236,29 @@ public fun ASTNode.upsertWhitespaceBeforeMe(text: String) {
+         if (this.elementType == WHITE_SPACE) {
+             return replaceWhitespaceWith(text)
+         }
+-        val previous = treePrev ?: prevLeaf()
+-        if (previous != null && previous.elementType == WHITE_SPACE) {
+-            previous.replaceWhitespaceWith(text)
+-        } else {
++        fun ASTNode.insertWhitespaceBeforeCurrentNode() {
+             PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
+                 (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
+             }
+         }
++        val previousSibling = treePrev
++        when {
++            previousSibling != null && previousSibling.elementType == WHITE_SPACE ->
++                previousSibling.replaceWhitespaceWith(text)
++            previousSibling != null ->
++                insertWhitespaceBeforeCurrentNode()
++            else -> {
++                val previousLeaf = prevLeaf()
++                when {
++                    previousLeaf == null -> insertWhitespaceBeforeCurrentNode()
++                    previousLeaf.elementType == WHITE_SPACE -> previousLeaf.replaceWhitespaceWith(text)
++                    else ->
++                        PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
++                            (previousLeaf.psi as LeafElement).rawInsertAfterMe(psiWhiteSpace)
++                        }
++                }
++            }
++        }
+     } else {
+         val prevLeaf =
+             requireNotNull(prevLeaf()) {
+
+diff --git a/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtensionWhitespaceRegressionTest.kt b/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtensionWhitespaceRegressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-rule-engine-core/src/test/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtensionWhitespaceRegressionTest.kt
+@@ -0,0 +1,61 @@
++package com.pinterest.ktlint.rule.engine.core.api
++
++import com.pinterest.ktlint.rule.engine.api.Code
++import com.pinterest.ktlint.rule.engine.api.KtLintRuleEngine
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.LBRACE
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
++import org.assertj.core.api.Assertions.assertThat
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.junit.jupiter.api.Test
++
++internal class ASTNodeExtensionWhitespaceRegressionTest {
++    private val ktLintRuleEngine =
++        KtLintRuleEngine(
++            ruleProviders =
++                setOf(
++                    RuleProvider { DummyRule() },
++                ),
++        )
++
++    @Test
++    fun `Given a function without spacing before the body block when inserting whitespace before the opening brace then the whitespace is visible before the block`() {
++        val code =
++            """
++            fun foo(){
++                println("bar")
++            }
++            """.trimIndent()
++        val fileASTNode = ktLintRuleEngine.transformToAst(code)
++val funNode = requireNotNull(fileASTNode.findChildByType(FUN))
++        val blockNode = requireNotNull(funNode.findChildByType(BLOCK))
++        val openingBrace = requireNotNull(blockNode.findChildByType(LBRACE))
++
++        assertThat(blockNode.prevLeaf()?.elementType).isNotEqualTo(WHITE_SPACE)
++
++        openingBrace.upsertWhitespaceBeforeMe(" ")
++
++        val whitespaceBeforeBlock = blockNode.prevLeaf()
++        assertThat(whitespaceBeforeBlock?.elementType).isEqualTo(WHITE_SPACE)
++        assertThat(whitespaceBeforeBlock?.text).isEqualTo(" ")
++    }
++
++    private fun KtLintRuleEngine.transformToAst(code: String) = transformToAst(Code.fromSnippet(code))
++
++    private open class DummyRule(
++        val block: (node: ASTNode) -> Unit = {},
++    ) : Rule(
++            ruleId = RuleId("test:dummy-rule"),
++            about = About(),
++        ) {
++        override fun beforeVisitChildNodes(
++            node: ASTNode,
++            autoCorrect: Boolean,
++            emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        ) {
++            block(node)
++        }
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

@@ -1,0 +1,162 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/progress/SiteCreationProgressViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/progress/SiteCreationProgressViewModel.kt
+index 7cb91d4066e..c60143d51db 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/progress/SiteCreationProgressViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/progress/SiteCreationProgressViewModel.kt
+@@ -183,7 +183,7 @@ class SiteCreationProgressViewModel @Inject constructor(
+             }
+ 
+             FAILURE -> {
+-                serviceStateForRetry = event.payload as SiteCreationServiceState
++                serviceStateForRetry = event.payload as? SiteCreationServiceState
+                 tracker.trackErrorShown(
+                     ERROR_CONTEXT,
+                     UNKNOWN,
+@@ -191,7 +191,7 @@ class SiteCreationProgressViewModel @Inject constructor(
+                 )
+                 updateUiStateAsync(GenericError)
+             }
+-        }
++}
+     }
+ 
+     private fun mapPayloadToSiteModel(payload: Any?): SiteModel {
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt b/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt
+index 86a62720f40..7f57a3d2376 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManager.kt
+@@ -90,14 +90,7 @@ class SiteCreationServiceManager @Inject constructor(
+                 // making ANY modification to this stat please refer to: p4qSXL-35X-p2
+                 tracker.trackSiteCreated(siteData.siteDesign)
+             }
+-            FAILURE -> {
+-                val currentState = serviceListener.getCurrentState()
+-                AppLog.e(
+-                    T.SITE_CREATION,
+-                    "SiteCreationService entered state FAILURE while on step: ${currentState?.step?.name}"
+-                )
+-                updateServiceState(FAILURE, currentState)
+-            }
++            FAILURE -> updateFailureState()
+         }
+     }
+ 
+@@ -136,7 +129,7 @@ class SiteCreationServiceManager @Inject constructor(
+                          */
+                         val errorMsg = "Site already exists - seems like an issue with domain suggestions endpoint"
+                         AppLog.e(T.SITE_CREATION, errorMsg)
+-                        throw IllegalStateException(errorMsg)
++                        updateFailureState(fallbackToCurrentState = false)
+                     }
+                 } else {
+                     executePhase(FAILURE)
+@@ -144,7 +137,24 @@ class SiteCreationServiceManager @Inject constructor(
+             } else {
+                 executePhase(SUCCESS)
+             }
++}
++    }
++
++    private fun updateFailureState(
++        payload: SiteCreationServiceState? = null,
++        fallbackToCurrentState: Boolean = true
++    ) {
++        val currentState = serviceListener.getCurrentState()
++        AppLog.e(
++            T.SITE_CREATION,
++            "SiteCreationService entered state FAILURE while on step: ${currentState?.step?.name}"
++        )
++        val payloadToUse = when {
++            payload != null -> payload
++            fallbackToCurrentState -> currentState
++            else -> null
+         }
++        updateServiceState(FAILURE, payloadToUse)
+     }
+ 
+     /**
+@@ -158,7 +168,7 @@ class SiteCreationServiceManager @Inject constructor(
+     }
+ 
+     interface SiteCreationServiceManagerListener {
+-        fun getCurrentState(): SiteCreationServiceState?
++fun getCurrentState(): SiteCreationServiceState?
+ 
+         fun updateState(state: SiteCreationServiceState)
+     }
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/SiteCreationFixtures.kt b/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/SiteCreationFixtures.kt
+index d5a3ed974f0..83e3a189f4e 100644
+--- a/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/SiteCreationFixtures.kt
++++ b/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/SiteCreationFixtures.kt
+@@ -64,3 +64,4 @@ val RESULT_COMPLETED = Completed(SITE_MODEL)
+ 
+ val SERVICE_SUCCESS = SiteCreationServiceState(SUCCESS, Pair(SITE_REMOTE_ID, SITE_SLUG))
+ val SERVICE_ERROR = SiteCreationServiceState(FAILURE, SiteCreationServiceState(CREATE_SITE))
++val SERVICE_ERROR_NO_RESUME_STATE = SiteCreationServiceState(FAILURE)
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/progress/SiteCreationProgressViewModelTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/progress/SiteCreationProgressViewModelTest.kt
+index 16ceae89cc2..04be1c2e309 100644
+--- a/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/progress/SiteCreationProgressViewModelTest.kt
++++ b/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/progress/SiteCreationProgressViewModelTest.kt
+@@ -36,6 +36,7 @@ import org.wordpress.android.ui.sitecreation.PAID_DOMAIN
+ import org.wordpress.android.ui.sitecreation.RESULT_CREATED
+ import org.wordpress.android.ui.sitecreation.RESULT_IN_CART
+ import org.wordpress.android.ui.sitecreation.SERVICE_ERROR
++import org.wordpress.android.ui.sitecreation.SERVICE_ERROR_NO_RESUME_STATE
+ import org.wordpress.android.ui.sitecreation.SERVICE_SUCCESS
+ import org.wordpress.android.ui.sitecreation.SITE_CREATION_STATE
+ import org.wordpress.android.ui.sitecreation.SITE_CREATION_STATE_FREE
+@@ -54,6 +55,7 @@ import kotlin.test.assertEquals
+ import kotlin.test.assertFalse
+ import kotlin.test.assertIs
+ import kotlin.test.assertNotNull
++import kotlin.test.assertNull
+ import kotlin.test.assertTrue
+ 
+ @ExperimentalCoroutinesApi
+@@ -156,9 +158,17 @@ class SiteCreationProgressViewModelTest : BaseUnitTest() {
+         assertEquals(viewModel.startCreateSiteService.value?.previousState, SERVICE_ERROR.payload)
+     }
+ 
++    @Test
++    fun `on retry click after service error without resume data restarts from scratch`() = test {
++        startViewModel()
++        viewModel.onSiteCreationServiceStateUpdated(SERVICE_ERROR_NO_RESUME_STATE)
++        viewModel.retry()
++        assertNull(viewModel.startCreateSiteService.value?.previousState)
++    }
++
+     @Test
+     fun `on retry click after network error restarts site creation service`() = test {
+-        whenever(networkUtils.isNetworkAvailable()).thenReturn(false, true)
++whenever(networkUtils.isNetworkAvailable()).thenReturn(false, true)
+         startViewModel()
+         advanceUntilIdle()
+         viewModel.retry()
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManagerTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManagerTest.kt
+index a70333b1083..0062d484ec5 100644
+--- a/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManagerTest.kt
++++ b/WordPress/src/test/java/org/wordpress/android/ui/sitecreation/services/SiteCreationServiceManagerTest.kt
+@@ -121,8 +121,23 @@ class SiteCreationServiceManagerTest : BaseUnitTest() {
+     }
+ 
+     @Test
+-    fun verifyRetryWorksWhenTheSiteWasCreatedInPreviousAttempt() = test {
++    fun verifySiteExistsErrorWithoutRetryEmitsFailureState() = test {
+         setSiteExistsErrorResponses()
++        whenever(serviceListener.getCurrentState()).thenReturn(CREATE_SITE_STATE)
++
++        startFlow()
++
++        argumentCaptor<SiteCreationServiceState>().apply {
++            verify(serviceListener, times(3)).updateState(capture())
++            assertThat(allValues[0]).isEqualTo(IDLE_STATE)
++            assertThat(allValues[1]).isEqualTo(CREATE_SITE_STATE)
++            assertThat(allValues[2]).isEqualTo(FAILURE_STATE)
++        }
++    }
++
++    @Test
++    fun verifyRetryWorksWhenTheSiteWasCreatedInPreviousAttempt() = test {
++setSiteExistsErrorResponses()
+         retryFlow(previousState = CREATE_SITE_STATE.stepName)
+ 
+         val argumentCaptor = argumentCaptor<SiteCreationServiceState>()

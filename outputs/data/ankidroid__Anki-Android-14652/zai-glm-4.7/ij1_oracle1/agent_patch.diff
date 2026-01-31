@@ -58,6 +58,145 @@ index 412b151315..6034f428dd 100644
      implementation 'com.github.AppIntro:AppIntro:6.3.1'
  
      // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt b/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
+index 8b6894a2cd..75b13b5f24 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
+@@ -488,6 +488,7 @@ object UsageAnalytics {
+         "showProgress", // Show remaining
+         "showETA", // Show ETA
+         "card_browser_show_media_filenames", // Display filenames in card browser
++        "showAudioPlayButtons", // Show play buttons on cards with audio
+         // Controls
+         "gestures", // Enable gestures
+         "gestureCornerTouch", // 9-point touch
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/CardAppearance.kt b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/CardAppearance.kt
+index 0269ed0ff6..50176578f8 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/CardAppearance.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/CardAppearance.kt
+@@ -23,7 +23,13 @@ import com.ichi2.themes.Theme
+ import com.ichi2.themes.Themes.currentTheme
+ 
+ /** Responsible for calculating CSS and element styles and modifying content on a flashcard  */
+-class CardAppearance(private val customFonts: ReviewerCustomFonts, private val cardZoom: Int, private val imageZoom: Int, private val centerVertically: Boolean) {
++class CardAppearance(
++    private val customFonts: ReviewerCustomFonts,
++    private val cardZoom: Int,
++    private val imageZoom: Int,
++    private val centerVertically: Boolean,
++    private val showAudioPlayButtons: Boolean = true
++) {
+     /** Below could be in a better abstraction.  */
+     fun appendCssStyle(style: StringBuilder) {
+         // Zoom cards
+@@ -79,7 +85,8 @@ class CardAppearance(private val customFonts: ReviewerCustomFonts, private val c
+             val cardZoom = preferences.getInt("cardZoom", 100)
+             val imageZoom = preferences.getInt("imageZoom", 100)
+             val centerVertically = preferences.getBoolean("centerVertically", false)
+-            return CardAppearance(customFonts, cardZoom, imageZoom, centerVertically)
++            val showAudioPlayButtons = preferences.getBoolean("showAudioPlayButtons", true)
++            return CardAppearance(customFonts, cardZoom, imageZoom, centerVertically, showAudioPlayButtons)
+         }
+ 
+         fun fixBoldStyle(content: String): String {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
+index b512edc6bb..ca42554347 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
+@@ -49,7 +49,7 @@ class HtmlGenerator(
+     }
+ 
+     fun expandSounds(content: String): String {
+-        return Sound.expandSounds(content)
++        return Sound.expandSounds(content, cardAppearance.showAudioPlayButtons)
+     }
+ 
+     companion object {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/AppearanceSettingsFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/AppearanceSettingsFragment.kt
+index ff91cb74d5..1a87b2d1fb 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/AppearanceSettingsFragment.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/AppearanceSettingsFragment.kt
+@@ -141,6 +141,17 @@ class AppearanceSettingsFragment : SettingsFragment() {
+                 true
+             }
+         }
++        // Show play buttons on cards with audio
++        requirePreference<SwitchPreferenceCompat>(R.string.show_audio_play_buttons_key).apply {
++            launchCatchingTask { isChecked = context.sharedPrefs().getBoolean("showAudioPlayButtons", true) }
++            setOnPreferenceChangeListener { _, newValue ->
++                val newCheckedValue = newValue as? Boolean ?: return@setOnPreferenceChangeListener false
++                context.sharedPrefs().edit {
++                    putBoolean("showAudioPlayButtons", newCheckedValue)
++                }
++                true
++            }
++        }
+     }
+ 
+     private val mBackgroundImageResultLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { selectedImage ->
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt
+index cdcbdcc787..ca3e9fb78d 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt
+@@ -224,8 +224,8 @@ class Sound(private val soundPlayer: SoundPlayer, private val soundDir: String)
+          * @param content -- card content to be rendered that may contain embedded audio
+          * @return -- the same content but in a format that will render working play buttons when audio was embedded
+          */
+-        fun expandSounds(content: String): String {
+-            return addPlayIcons(content)
++        fun expandSounds(content: String, showIcons: Boolean = true): String {
++            return addPlayIcons(content, showIcons)
+         }
+ 
+         /**
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt
+index fc1b62e7c9..7ffed4197a 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt
+@@ -60,7 +60,8 @@ val AV_PLAYLINK_RE = Regex("playsound:(.):(\\d+)")
+ 
+ fun stripAvRefs(text: String) = AV_REF_RE.replace("", text)
+ 
+-fun addPlayIcons(content: String): String {
++fun addPlayIcons(content: String, showIcons: Boolean = true): String {
++    if (!showIcons) return content
+     return AV_REF_RE.replace(content) { match ->
+         val groups = match.groupValues
+         val side = groups[2]
+diff --git a/AnkiDroid/src/main/res/values/10-preferences.xml b/AnkiDroid/src/main/res/values/10-preferences.xml
+index 548e3bbc21..8fb184dae5 100644
+--- a/AnkiDroid/src/main/res/values/10-preferences.xml
++++ b/AnkiDroid/src/main/res/values/10-preferences.xml
+@@ -182,6 +182,8 @@
+     <!-- Appearance settings -->
+     <string name="pref_cat_reviewer" maxLength="41">Reviewer</string>
+     <string name="accessibility" maxLength="41">Accessibility</string>
++    <string name="show_audio_play_buttons" maxLength="41">Show play buttons on cards with audio</string>
++    <string name="show_audio_play_buttons_summ">Show or hide play buttons on the card content</string>
+     <!-- Paste clipboard image as png option -->
+     <string name="paste_as_png" maxLength="41">Paste clipboard images as PNG</string>
+     <string name="paste_as_png_summary">By default Anki pastes images on the clipboard as JPG files to save disk space. You can use this option to paste as PNG images instead.</string>
+diff --git a/AnkiDroid/src/main/res/xml/preferences_appearance.xml b/AnkiDroid/src/main/res/xml/preferences_appearance.xml
+index 4c9de6a1f0..a5efe5c730 100644
+--- a/AnkiDroid/src/main/res/xml/preferences_appearance.xml
++++ b/AnkiDroid/src/main/res/xml/preferences_appearance.xml
+@@ -110,11 +110,12 @@
+             android:summary="@string/show_eta_summ"
+             android:title="@string/show_eta" />
+     </PreferenceCategory>
+-    <PreferenceCategory android:title="@string/card_browser">
+         <SwitchPreferenceCompat
+-            android:checked="false"
+-            android:defaultValue="false"
+-            android:key="@string/pref_display_filenames_in_browser_key"
++            android:key="@string/show_audio_play_buttons_key"
++            android:title="@string/show_audio_play_buttons"
++            android:summary="@string/show_audio_play_buttons_summ"
++            android:defaultValue="true"
++            />
+             android:title="@string/card_browser_hide_media"
+             android:summary="@string/card_browser_hide_media_summary"/>
+     </PreferenceCategory>
 diff --git a/gradle.properties b/gradle.properties
 index 13992ecd31..b06b0f2c12 100644
 --- a/gradle.properties

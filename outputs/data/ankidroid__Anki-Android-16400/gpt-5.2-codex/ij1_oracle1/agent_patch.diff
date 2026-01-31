@@ -1,0 +1,760 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 8eba4324b0..480ed6dbe3 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -248,12 +248,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+index 346f7dd839..b861758193 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+@@ -216,6 +216,7 @@ abstract class AbstractFlashcardViewer :
+ 
+     // Android WebView
+     var automaticAnswer = AutomaticAnswer.defaultInstance(this)
++    private var autoAdvancePausedByUser = false
+ 
+     @VisibleForTesting(otherwise = VisibleForTesting.PROTECTED)
+     internal var typeAnswer: TypeAnswer? = null
+@@ -619,9 +620,11 @@ abstract class AbstractFlashcardViewer :
+ 
+     override fun onResume() {
+         super.onResume()
+-        automaticAnswer.enable()
++        if (!autoAdvancePausedByUser) {
++            automaticAnswer.enable()
++        }
+         gestureDetectorImpl.startShakeDetector()
+-        if (this::cardMediaPlayer.isInitialized) {
++if (this::cardMediaPlayer.isInitialized) {
+             cardMediaPlayer.isEnabled = true
+         }
+         // Reset the activity title
+@@ -1334,8 +1337,29 @@ abstract class AbstractFlashcardViewer :
+         }
+     }
+ 
++    protected fun isAutoAdvancePausedByUser(): Boolean = autoAdvancePausedByUser
++
++    protected fun toggleAutoAdvance(): Boolean {
++        autoAdvancePausedByUser = !autoAdvancePausedByUser
++        if (autoAdvancePausedByUser) {
++            automaticAnswer.disable()
++            return true
++        }
++        automaticAnswer.enable()
++        launchCatchingTask {
++            if (!automaticAnswerShouldWaitForAudio()) {
++                if (isDisplayingAnswer) {
++                    automaticAnswer.scheduleAutomaticDisplayQuestion()
++                } else {
++                    automaticAnswer.scheduleAutomaticDisplayAnswer()
++                }
++            }
++        }
++        return false
++    }
++
+     internal inner class ReadTextListener : ReadText.ReadTextListener {
+-        override fun onDone(playedSide: CardSide?) {
++override fun onDone(playedSide: CardSide?) {
+             Timber.d("done reading text")
+             this@AbstractFlashcardViewer.onSoundGroupCompleted()
+         }
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
+index 5eafcf1578..d9921765b1 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
+@@ -486,8 +486,12 @@ open class Reviewer :
+             R.id.action_toggle_whiteboard -> {
+                 toggleWhiteboard()
+             }
++            R.id.action_toggle_auto_advance -> {
++                toggleAutoAdvance()
++                refreshActionBar()
++            }
+             R.id.action_open_deck_options -> {
+-                val i = com.ichi2.anki.pages.DeckOptions.getIntent(this, getColUnsafe.decks.current().id)
++val i = com.ichi2.anki.pages.DeckOptions.getIntent(this, getColUnsafe.decks.current().id)
+                 deckOptionsLauncher.launch(i)
+             }
+             R.id.action_select_tts -> {
+@@ -843,11 +847,21 @@ open class Reviewer :
+         } else {
+             toggleWhiteboardIcon.setTitle(R.string.enable_whiteboard)
+         }
++        val toggleAutoAdvanceItem = menu.findItem(R.id.action_toggle_auto_advance)
++        toggleAutoAdvanceItem.isVisible = toggleAutoAdvanceItem.isVisible && automaticAnswer.isEnabled()
++        toggleAutoAdvanceItem.setTitle(
++            if (isAutoAdvancePausedByUser()) {
++                R.string.resume_auto_advance
++            } else {
++                R.string.pause_auto_advance
++            }
++        )
++
+         if (colIsOpenUnsafe() && getColUnsafe.decks.isFiltered(parentDid)) {
+             menu.findItem(R.id.action_open_deck_options).isVisible = false
+         }
+         if (tts.enabled && !actionButtons.status.selectTtsIsDisabled()) {
+-            menu.findItem(R.id.action_select_tts).isVisible = true
++menu.findItem(R.id.action_select_tts).isVisible = true
+         }
+         if (!suspendNoteAvailable() && !actionButtons.status.suspendIsDisabled()) {
+             menu.findItem(R.id.action_suspend).isVisible = false
+@@ -1251,8 +1265,13 @@ open class Reviewer :
+                 openCardInfo(fromGesture)
+                 return true
+             }
++            ViewerCommand.TOGGLE_AUTO_ADVANCE -> {
++                toggleAutoAdvance()
++                refreshActionBar()
++                return true
++            }
+             ViewerCommand.RESCHEDULE_NOTE -> {
+-                showDueDateDialog()
++showDueDateDialog()
+                 return true
+             }
+             ViewerCommand.USER_ACTION_1 -> {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt b/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
+index 5c4a0265c5..586fc5c0a1 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
+@@ -524,8 +524,9 @@ object UsageAnalytics {
+         "binding_REPLAY_VOICE",
+         "binding_SAVE_VOICE",
+         "binding_TOGGLE_WHITEBOARD",
++        "binding_TOGGLE_AUTO_ADVANCE",
+         "binding_CLEAR_WHITEBOARD",
+-        "binding_CHANGE_WHITEBOARD_PEN_COLOR",
++"binding_CHANGE_WHITEBOARD_PEN_COLOR",
+         "binding_SHOW_HINT",
+         "binding_SHOW_ALL_HINTS",
+         "binding_ADD_NOTE",
+@@ -572,8 +573,9 @@ object UsageAnalytics {
+         "customButtonDeckOptions",
+         "customButtonMarkCard",
+         "customButtonToggleMicToolBar",
++        "customButtonToggleAutoAdvance",
+         "customButtonBury",
+-        "customButtonSuspend",
++"customButtonSuspend",
+         "customButtonDelete",
+         "customButtonEnableWhiteboard",
+         "customButtonToggleStylus",
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
+index 5914cdc59a..1999c16d9d 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
+@@ -68,8 +68,9 @@ enum class ViewerCommand(val resourceId: Int) {
+     SAVE_VOICE(R.string.save_voice),
+     REPLAY_VOICE(R.string.replay_voice),
+     TOGGLE_WHITEBOARD(R.string.gesture_toggle_whiteboard),
++    TOGGLE_AUTO_ADVANCE(R.string.gesture_toggle_auto_advance),
+     CLEAR_WHITEBOARD(R.string.clear_whiteboard),
+-    CHANGE_WHITEBOARD_PEN_COLOR(R.string.title_whiteboard_editor),
++CHANGE_WHITEBOARD_PEN_COLOR(R.string.title_whiteboard_editor),
+     SHOW_HINT(R.string.gesture_show_hint),
+     SHOW_ALL_HINTS(R.string.gesture_show_all_hints),
+     ADD_NOTE(R.string.menu_add_note),
+@@ -187,8 +188,9 @@ enum class ViewerCommand(val resourceId: Int) {
+                 TOGGLE_FLAG_PINK -> listOf(keyCode(KeyEvent.KEYCODE_5, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_5, CardSide.BOTH, ctrl()))
+                 TOGGLE_FLAG_TURQUOISE -> listOf(keyCode(KeyEvent.KEYCODE_6, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_6, CardSide.BOTH, ctrl()))
+                 TOGGLE_FLAG_PURPLE -> listOf(keyCode(KeyEvent.KEYCODE_7, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_7, CardSide.BOTH, ctrl()))
++                TOGGLE_AUTO_ADVANCE -> listOf(keyCode(KeyEvent.KEYCODE_A, CardSide.BOTH, shift()))
+                 SHOW_HINT -> listOf(keyCode(KeyEvent.KEYCODE_H, CardSide.BOTH))
+-                SHOW_ALL_HINTS -> listOf(keyCode(KeyEvent.KEYCODE_G, CardSide.BOTH))
++SHOW_ALL_HINTS -> listOf(keyCode(KeyEvent.KEYCODE_G, CardSide.BOTH))
+                 ADD_NOTE -> listOf(keyCode(KeyEvent.KEYCODE_A, CardSide.BOTH))
+                 else -> emptyList()
+             }
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ControlsSettingsFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ControlsSettingsFragment.kt
+index 5f94d2a65b..24704d0bdc 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ControlsSettingsFragment.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ControlsSettingsFragment.kt
+@@ -50,7 +50,10 @@ class ControlsSettingsFragment : SettingsFragment() {
+         findPreference<ControlPreference>(getString(R.string.toggle_whiteboard_command_key))?.let {
+             it.title = getString(R.string.gesture_toggle_whiteboard).toSentenceCase(R.string.sentence_gesture_toggle_whiteboard)
+         }
+-        findPreference<ControlPreference>(getString(R.string.abort_and_sync_command_key))?.let {
++        findPreference<ControlPreference>(getString(R.string.toggle_auto_advance_command_key))?.let {
++            it.title = getString(R.string.gesture_toggle_auto_advance).toSentenceCase(R.string.sentence_gesture_toggle_auto_advance)
++        }
++findPreference<ControlPreference>(getString(R.string.abort_and_sync_command_key))?.let {
+             it.title = getString(R.string.gesture_abort_sync).toSentenceCase(R.string.sentence_gesture_abort_sync)
+         }
+         findPreference<ControlPreference>(getString(R.string.flag_red_command_key))?.let {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt b/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt
+index 697ef8cfe0..1c4ddae6ce 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt
+@@ -28,7 +28,7 @@ class ActionButtonStatus {
+     /**
+      * Custom button allocation
+      */
+-    private val customButtons: MutableMap<Int, Int> = hashMapInit(25) // setup's size
++    private val customButtons: MutableMap<Int, Int> = hashMapInit(26) // setup's size
+ 
+     fun setup(preferences: SharedPreferences) {
+         // NOTE: the default values below should be in sync with preferences_custom_buttons.xml and reviewer.xml
+@@ -53,8 +53,9 @@ class ActionButtonStatus {
+         setupButton(preferences, R.id.action_delete, "customButtonDelete", SHOW_AS_ACTION_NEVER)
+         setupButton(preferences, R.id.action_toggle_mic_tool_bar, "customButtonToggleMicToolBar", SHOW_AS_ACTION_NEVER)
+         setupButton(preferences, R.id.action_toggle_whiteboard, "customButtonEnableWhiteboard", SHOW_AS_ACTION_NEVER)
++        setupButton(preferences, R.id.action_toggle_auto_advance, "customButtonToggleAutoAdvance", SHOW_AS_ACTION_NEVER)
+         setupButton(preferences, R.id.action_toggle_stylus, "customButtonToggleStylus", SHOW_AS_ACTION_IF_ROOM)
+-        setupButton(preferences, R.id.action_save_whiteboard, "customButtonSaveWhiteboard", SHOW_AS_ACTION_NEVER)
++setupButton(preferences, R.id.action_save_whiteboard, "customButtonSaveWhiteboard", SHOW_AS_ACTION_NEVER)
+         setupButton(preferences, R.id.action_change_whiteboard_pen_color, "customButtonWhiteboardPenColor", SHOW_AS_ACTION_IF_ROOM)
+         setupButton(preferences, R.id.user_action_1, "customButtonUserAction1", MENU_DISABLED)
+         setupButton(preferences, R.id.user_action_2, "customButtonUserAction2", MENU_DISABLED)
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerFragment.kt
+index f9c4b7616c..b4831a9156 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerFragment.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerFragment.kt
+@@ -135,8 +135,9 @@ class ReviewerFragment :
+             R.id.action_redo -> viewModel.redo()
+             R.id.action_suspend_card -> viewModel.suspendCard()
+             R.id.action_suspend_note -> viewModel.suspendNote()
++            R.id.action_toggle_auto_advance -> viewModel.toggleAutoAdvance()
+             R.id.action_undo -> viewModel.undo()
+-            R.id.flag_none -> viewModel.setFlag(Flag.NONE)
++R.id.flag_none -> viewModel.setFlag(Flag.NONE)
+             R.id.flag_red -> viewModel.setFlag(Flag.RED)
+             R.id.flag_orange -> viewModel.setFlag(Flag.ORANGE)
+             R.id.flag_green -> viewModel.setFlag(Flag.GREEN)
+@@ -293,6 +294,14 @@ class ReviewerFragment :
+                 }
+             }
+ 
++        val autoAdvanceItem = menu.findItem(R.id.action_toggle_auto_advance)
++        viewModel.isAutoAdvancePausedFlow.flowWithLifecycle(lifecycle)
++            .collectLatestIn(lifecycleScope) { paused ->
++                autoAdvanceItem.title = getString(
++                    if (paused) R.string.resume_auto_advance else R.string.pause_auto_advance
++                )
++            }
++
+         val undoItem = menu.findItem(R.id.action_undo)
+         viewModel.undoLabelFlow.flowWithLifecycle(lifecycle)
+             .collectLatestIn(lifecycleScope) { label ->
+@@ -301,7 +310,7 @@ class ReviewerFragment :
+             }
+ 
+         val redoItem = menu.findItem(R.id.action_redo)
+-        viewModel.redoLabelFlow.flowWithLifecycle(lifecycle)
++viewModel.redoLabelFlow.flowWithLifecycle(lifecycle)
+             .collectLatestIn(lifecycleScope) { label ->
+                 redoItem.title = label ?: CollectionManager.TR.undoRedo()
+                 redoItem.isEnabled = label != null
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerViewModel.kt b/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerViewModel.kt
+index 569f18c8bd..b2347a1fbb 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerViewModel.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerViewModel.kt
+@@ -70,8 +70,9 @@ class ReviewerViewModel(cardMediaPlayer: CardMediaPlayer) :
+     val isMarkedFlow = MutableStateFlow(false)
+     val flagCodeFlow = MutableStateFlow(Flag.NONE.code)
+     val actionFeedbackFlow = MutableSharedFlow<String>()
++    val isAutoAdvancePausedFlow = MutableStateFlow(false)
+     val canBuryNoteFlow = MutableStateFlow(true)
+-    val canSuspendNoteFlow = MutableStateFlow(true)
++val canSuspendNoteFlow = MutableStateFlow(true)
+     val undoLabelFlow = MutableStateFlow<String?>(null)
+     val redoLabelFlow = MutableStateFlow<String?>(null)
+     val countsFlow = MutableStateFlow(Counts() to Counts.Queue.NEW)
+@@ -290,6 +291,23 @@ class ReviewerViewModel(cardMediaPlayer: CardMediaPlayer) :
+         }
+     }
+ 
++    fun toggleAutoAdvance() {
++        val shouldPause = !isAutoAdvancePausedFlow.value
++        isAutoAdvancePausedFlow.value = shouldPause
++        autoAdvance.setPaused(shouldPause)
++        if (!shouldPause) {
++            launchCatchingIO {
++                if (!autoAdvance.shouldWaitForAudio()) {
++                    if (showingAnswer.value) {
++                        autoAdvance.onShowAnswer()
++                    } else {
++                        autoAdvance.onShowQuestion()
++                    }
++                }
++            }
++        }
++    }
++
+     fun stopAutoAdvance() {
+         autoAdvance.cancelQuestionAndAnswerActionJobs()
+     }
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/autoadvance/AutoAdvance.kt b/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/autoadvance/AutoAdvance.kt
+index 2570b85af4..d3048b6e4d 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/autoadvance/AutoAdvance.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/autoadvance/AutoAdvance.kt
+@@ -36,6 +36,7 @@ import kotlinx.coroutines.delay
+ class AutoAdvance(val viewModel: ReviewerViewModel) {
+     private var questionActionJob: Job? = null
+     private var answerActionJob: Job? = null
++    private var isPaused = false
+ 
+     private var settings = viewModel.asyncIO {
+         val card = viewModel.currentCard.await()
+@@ -53,8 +54,17 @@ class AutoAdvance(val viewModel: ReviewerViewModel) {
+         answerActionJob?.cancel()
+     }
+ 
++    fun setPaused(paused: Boolean) {
++        isPaused = paused
++        if (paused) {
++            cancelQuestionAndAnswerActionJobs()
++        }
++    }
++
++    fun isPaused(): Boolean = isPaused
++
+     fun onCardChange(card: Card) {
+-        cancelQuestionAndAnswerActionJobs()
++cancelQuestionAndAnswerActionJobs()
+         settings = viewModel.asyncIO {
+             AutoAdvanceSettings.createInstance(card.currentDeckId().did)
+         }
+@@ -62,6 +72,7 @@ class AutoAdvance(val viewModel: ReviewerViewModel) {
+ 
+     suspend fun onShowQuestion() {
+         answerActionJob?.cancel()
++        if (isPaused) return
+         if (!durationToShowQuestionFor().isPositive()) return
+ 
+         questionActionJob = viewModel.launchCatchingIO {
+@@ -75,6 +86,7 @@ class AutoAdvance(val viewModel: ReviewerViewModel) {
+ 
+     suspend fun onShowAnswer() {
+         questionActionJob?.cancel()
++        if (isPaused) return
+         if (!durationToShowAnswerFor().isPositive()) return
+ 
+         answerActionJob = viewModel.launchCatchingIO {
+diff --git a/AnkiDroid/src/main/res/menu/reviewer.xml b/AnkiDroid/src/main/res/menu/reviewer.xml
+index 45ffd00c30..669310fb25 100644
+--- a/AnkiDroid/src/main/res/menu/reviewer.xml
++++ b/AnkiDroid/src/main/res/menu/reviewer.xml
+@@ -1,6 +1,5 @@
+ <menu xmlns:android="http://schemas.android.com/apk/res/android"
+     xmlns:ankidroid="http://schemas.android.com/apk/res-auto"
+-    xmlns:tools="http://schemas.android.com/tools"
+     android:layoutDirection="locale">
+ 
+     <item
+@@ -52,13 +51,48 @@
+         android:title="@string/enable_whiteboard"
+         android:icon="@drawable/ic_enable_whiteboard"
+         ankidroid:showAsAction="never"/>
++    <item
++        android:id="@+id/action_toggle_auto_advance"
++        android:title="@string/pause_auto_advance"
++        android:icon="@drawable/ic_reschedule"
++        ankidroid:showAsAction="never"/>
+     <item
+         android:id="@+id/action_flag"
+         android:title="@string/menu_flag_card"
+         android:icon="@drawable/ic_flag_transparent"
+         ankidroid:showAsAction="always" >
+-        <menu>
+-            <!-- flags are dynamically added -->
++<menu>
++            <item
++                android:id="@+id/action_flag_zero"
++                android:title="@string/menu_flag_card_zero"/>
++            <item
++                android:id="@+id/action_flag_one"
++                android:title="@string/menu_flag_card_one"
++                android:icon="@drawable/ic_flag_red"/>
++            <item
++                android:id="@+id/action_flag_two"
++                android:title="@string/menu_flag_card_two"
++                android:icon="@drawable/ic_flag_orange"/>
++            <item
++                android:id="@+id/action_flag_three"
++                android:title="@string/menu_flag_card_three"
++                android:icon="@drawable/ic_flag_green"/>
++            <item
++                android:id="@+id/action_flag_four"
++                android:title="@string/menu_flag_card_four"
++                android:icon="@drawable/ic_flag_blue"/>
++            <item
++                android:id="@+id/action_flag_five"
++                android:title="@string/menu_flag_card_five"
++                android:icon="@drawable/ic_flag_pink"/>
++            <item
++                android:id="@+id/action_flag_six"
++                android:title="@string/menu_flag_card_six"
++                android:icon="@drawable/ic_flag_turquoise"/>
++            <item
++                android:id="@+id/action_flag_seven"
++                android:title="@string/menu_flag_card_seven"
++                android:icon="@drawable/ic_flag_purple"/>
+         </menu>
+     </item>
+     <item
+@@ -135,7 +169,7 @@
+         <menu>
+             <item
+                 android:id="@+id/action_reschedule_card"
+-                tools:title="Set due date" />
++                android:title="@string/reschedule_card_dialog_message" />
+             <item
+                 android:id="@+id/action_reset_card_progress"
+                 android:title="@string/card_editor_reset_card" />
+@@ -148,7 +182,7 @@
+         ankidroid:showAsAction="ifRoom"/>
+     <item
+         android:id="@+id/action_toggle_mic_tool_bar"
+-        android:title="@string/menu_enable_voice_playback"
++        android:title="@string/menu_toggle_mic_tool_bar"
+         android:icon="@drawable/ic_action_mic"
+         ankidroid:showAsAction="never"/>
+     <item
+diff --git a/AnkiDroid/src/main/res/menu/reviewer2.xml b/AnkiDroid/src/main/res/menu/reviewer2.xml
+index f58f78c5a4..67d2be7806 100644
+--- a/AnkiDroid/src/main/res/menu/reviewer2.xml
++++ b/AnkiDroid/src/main/res/menu/reviewer2.xml
+@@ -59,12 +59,17 @@
+         android:icon="@drawable/ic_tune_white"
+         android:title="@string/menu__deck_options"
+         app:showAsAction="never"/>
++    <item
++        android:id="@+id/action_toggle_auto_advance"
++        android:title="@string/pause_auto_advance"
++        android:icon="@drawable/ic_reschedule"
++        app:showAsAction="never"/>
+     <item
+         android:id="@+id/action_add_note"
+         android:title="@string/menu_add_note"
+         android:icon="@drawable/ic_add"
+         app:showAsAction="never"/>
+-    <item
++<item
+         android:id="@+id/action_delete"
+         android:title="@string/menu_delete_note"
+         android:icon="@drawable/ic_delete_white"
+diff --git a/AnkiDroid/src/main/res/values/01-core.xml b/AnkiDroid/src/main/res/values/01-core.xml
+index 6a51dde669..f81f4b9c28 100644
+--- a/AnkiDroid/src/main/res/values/01-core.xml
++++ b/AnkiDroid/src/main/res/values/01-core.xml
+@@ -84,17 +84,25 @@
+     <string name="menu_suspend">Suspend</string>
+     <string name="menu_delete_note">Delete note</string>
+     <string name="menu_flag">Flag</string>
+-    <string name="rename_flag">Rename flags</string>
+     <string name="menu_flag_card">Flag card</string>
++    <string name="menu_flag_card_zero">No flag</string>
++    <string name="menu_flag_card_one">Red flag</string>
++    <string name="menu_flag_card_two">Orange flag</string>
++    <string name="menu_flag_card_three">Green flag</string>
++    <string name="menu_flag_card_four">Blue flag</string>
++    <string name="menu_flag_card_five">Pink flag</string>
++    <string name="menu_flag_card_six">Turquoise flag</string>
++    <string name="menu_flag_card_seven">Purple flag</string>
+     <string name="menu_edit_tags">Edit tags</string>
+     <string name="delete_note_message">Really delete this note and all its cards?\n%s</string>
+     <string name="menu_search">Lookup in %1$s</string>
+     <string name="menu_mark_note">Mark note</string>
+     <string name="menu_unmark_note">Unmark note</string>
+-    <string name="menu_enable_voice_playback">Enable voice playback</string>
+-    <string name="menu_disable_voice_playback">Disable voice playback</string>
++    <string name="menu_toggle_mic_tool_bar">Check pronunciation</string>
++    <string name="pause_auto_advance">Pause auto advance</string>
++    <string name="resume_auto_advance">Resume auto advance</string>
+     <string name="new_deck">Create deck</string>
+-    <string name="new_dynamic_deck">Create filtered deck</string>
++<string name="new_dynamic_deck">Create filtered deck</string>
+     <string name="directory_inaccessible">AnkiDroid directory is inaccessible</string>
+     <!--This is shown when AnkiDroid starts up with no storage permissions.
+     The user is taken to the "App Info" screen, and needs to click "Permissions" and
+@@ -108,12 +116,10 @@
+     <string name="empty_filtered_deck">Emptying filtered deck…</string>
+     <string name="custom_study_deck_name">Custom study session</string>
+     <string name="custom_study_deck_exists">Rename the existing custom study deck first</string>
+-    <string name="search_deck" comment="Deck search for selecting it">Deck Search</string>
+     <string name="empty_deck">This deck is empty</string>
++    <string name="search_deck" comment="Deck search for selecting it">Deck Search</string>
+     <string name="search_for_download_deck" comment="Deck search value for downloading deck">Deck Search</string>
+     <string name="invalid_deck_name">Invalid deck name</string>
+-    <string name="studyoptions_congrats_finished">Congratulations! You have finished for now.</string>
+-    <string name="studyoptions_congrats_next_due_in" comment="The param will be replaced with 'The next card will be ready in X time'">Deck finished for now! %s</string>
+     <string name="studyoptions_no_cards_due">No cards are due yet</string>
+ 
+     <string name="sd_card_not_mounted">Device storage not mounted</string>
+@@ -123,9 +129,7 @@
+     <string name="continue_sync" tools:ignore="UnusedResources">Continue sync</string>
+     <string name="sync_cancelled" tools:ignore="UnusedResources">Sync cancelled</string>
+     <string name="sync_cancel_message" tools:ignore="UnusedResources">Cancelling…\nThis may take some time.</string>
+-    <string name="syncing_media">Syncing media</string>
+     <string name="export_deck">Export deck</string>
+-    <string name="export_collection">Export collection</string>
+     <string name="nothing">Nothing</string>
+ 
+     <!-- Card template editor -->
+@@ -146,6 +150,7 @@
+         <item quantity="one">Delete the “%2$s” card type, and its %1$d card?</item>
+         <item quantity="other">Delete the “%2$s” card type, and its %1$d cards?</item>
+     </plurals>
++    <string name="card_template_editor_would_delete_note">Removing this card type would cause one or more notes to be deleted. Please create and save a new card type first.</string>
+     <string name="card_template_editor_save_error">Unable to save card template changes: %s</string>
+     <string name="template_for_current_card_deleted">The card type for the current card was deleted.</string>
+ 
+@@ -270,7 +275,6 @@
+ 
+     <string name="directory_inaccessible_after_uninstall" comment="Dialog title if AnkiDroid can't access the collection once the app is installed">Inaccessible collection</string>
+     <string name="directory_inaccessible_after_uninstall_summary" comment="the parameter is the path to the AnkiDroid folder. Typically /storage/emulated/0/AnkiDroid">We are unable to access your collection after AnkiDroid is uninstalled due to a change in Play Store Policy\n\nYour data is safe and can be restored. It is located at\n%s\n\nSelect an option below to restore:</string>
+-    <string name="directory_revoked_after_inactivity" comment="the first parameter is WRITE_EXTERNAL_STORAGE the second parameter is the path to the AnkiDroid folder. Typically /storage/emulated/0/AnkiDroid">Android has removed AnkiDroid\'s %1$s permission due to app inactivity.\n\nYour data is safe and can be restored. It is located at\n%2$s\n\nSelect an option below to restore:</string>
+     <string name="restore_data_from_ankiweb">Restore from AnkiWeb (recommended)</string>
+     <string name="install_non_play_store_ankidroid_recommended">Restore folder access (recommended)</string>
+     <string name="install_non_play_store_ankidroid">Restore folder access (advanced)</string>
+@@ -286,9 +290,4 @@
+     <string name="all_files_access_title"
+         comment="Name of the “All files access” permission from Android 10 and after">All files access</string>
+     <string name="image_occlusion">Image Occlusion</string>
+-
+-    <string name="remove_account" comment="open a website to start the deletion of an AnkiWeb account">Remove account</string>
+-
+-    <!-- Instant Note Editor -->
+-    <string name="instant_card" comment="This does not need to be translated literally, translate the concept of quickly adding a Cloze note with a popup. Used in the Android system context menu/share dialog.">Instant card</string>
+ </resources>
+diff --git a/AnkiDroid/src/main/res/values/11-arrays.xml b/AnkiDroid/src/main/res/values/11-arrays.xml
+index 407b6e075b..6c781c174d 100644
+--- a/AnkiDroid/src/main/res/values/11-arrays.xml
++++ b/AnkiDroid/src/main/res/values/11-arrays.xml
+@@ -83,8 +83,9 @@
+     <string name="gesture_page_down">Page Down</string>
+     <string name="gesture_abort_sync">Abort Learning and Sync</string>
+     <string name="gesture_toggle_whiteboard">Toggle Whiteboard</string>
++    <string name="gesture_toggle_auto_advance">Toggle Auto Advance</string>
+     <string name="gesture_show_hint">Show Hint</string>
+-    <string name="gesture_show_all_hints">Show All Hints</string>
++<string name="gesture_show_all_hints">Show All Hints</string>
+     <string name="record_voice">Record Voice</string>
+     <string name="replay_voice">Replay Voice</string>
+     <string name="save_voice">Save Recording</string>
+diff --git a/AnkiDroid/src/main/res/values/preferences.xml b/AnkiDroid/src/main/res/values/preferences.xml
+index e8291650df..cf350d2c9f 100644
+--- a/AnkiDroid/src/main/res/values/preferences.xml
++++ b/AnkiDroid/src/main/res/values/preferences.xml
+@@ -15,13 +15,14 @@
+     <string name="time_limit_preference">timeLimit</string>
+     <string name="timeout_answer_preference">timeoutAnswer</string>
+     <string name="keep_screen_on_preference">keepScreenOn</string>
++    <string name="new_timezone_handling_preference">newTimezoneHandling</string>
+     <string name="double_tap_time_interval_preference">doubleTapTimeInterval</string>
+     <!-- Sync -->
+     <string name="pref_sync_screen_key">syncScreen</string>
+     <string name="sync_account_key">syncAccount</string>
+     <string name="sync_fetch_media_key">syncFetchMedia</string>
+     <string name="automatic_sync_choice_key">automaticSyncMode</string>
+-    <string name="one_way_sync_key">one_way_sync</string>
++    <string name="force_full_sync_key">force_full_sync</string>
+     <string name="sync_status_badge_key">showSyncStatusBadge</string>
+     <string name="metered_sync_key">allowMetered</string>
+     <string name="custom_sync_server_key">custom_sync_server_link</string>
+@@ -60,8 +61,9 @@
+     <string name="custom_button_deck_options_key">customButtonDeckOptions</string>
+     <string name="custom_button_mark_card_key">customButtonMarkCard</string>
+     <string name="custom_button_toggle_mic_toolbar_key">customButtonToggleMicToolBar</string>
++    <string name="custom_button_toggle_auto_advance_key">customButtonToggleAutoAdvance</string>
+     <string name="custom_button_bury_key">customButtonBury</string>
+-    <string name="custom_button_suspend_key">customButtonSuspend</string>
++<string name="custom_button_suspend_key">customButtonSuspend</string>
+     <string name="custom_button_delete_key">customButtonDelete</string>
+     <string name="custom_button_enable_whiteboard_key">customButtonEnableWhiteboard</string>
+     <string name="custom_button_toggle_stylus_key">customButtonToggleStylus</string>
+@@ -117,13 +119,13 @@
+     <string name="replay_voice_command_key">binding_REPLAY_VOICE</string>
+     <string name="save_voice_command_key">binding_SAVE_VOICE</string>
+     <string name="toggle_whiteboard_command_key">binding_TOGGLE_WHITEBOARD</string>
++    <string name="toggle_auto_advance_command_key">binding_TOGGLE_AUTO_ADVANCE</string>
+     <string name="clear_whiteboard_command_key">binding_CLEAR_WHITEBOARD</string>
+-    <string name="change_whiteboard_pen_color_command_key">binding_CHANGE_WHITEBOARD_PEN_COLOR</string>
++<string name="change_whiteboard_pen_color_command_key">binding_CHANGE_WHITEBOARD_PEN_COLOR</string>
+     <string name="show_hint_command_key">binding_SHOW_HINT</string>
+     <string name="show_all_hints_command_key">binding_SHOW_ALL_HINTS</string>
+     <string name="add_note_command_key">binding_ADD_NOTE</string>
+     <string name="reschedule_command_key">binding_RESCHEDULE_NOTE</string>
+-    <string name="user_actions_controls_category_key">userActionsControls</string>
+     <string name="user_action_1_key">binding_USER_ACTION_1</string>
+     <string name="user_action_2_key">binding_USER_ACTION_2</string>
+     <string name="user_action_3_key">binding_USER_ACTION_3</string>
+@@ -143,7 +145,6 @@
+     <!-- Custom sync server -->
+     <string name="pref_custom_sync_server_screen_key">customSyncServerScreen</string>
+     <string name="custom_sync_server_collection_url_key">syncBaseUrl</string>
+-    <string name="custom_sync_certificate_key">customSyncCertificate</string>
+     <!-- Advanced -->
+     <string name="pref_advanced_screen_key">pref_screen_advanced</string>
+     <string name="pref_cat_workarounds_key">category_workarounds</string>
+@@ -175,9 +176,6 @@
+     <string name="pref_trigger_crash_key">trigger_crash_preference</string>
+     <string name="pref_analytics_debug_key">analytics_debug_preference</string>
+     <string name="pref_lock_database_key">debug_lock_database</string>
+-    <string name="new_congrats_screen_pref_key">new_congrats_screen</string>
+-    <string name="new_reviewer_pref_key">newReviewer</string>
+-    <string name="new_reviewer_options_key">newReviewerOptions</string>
+     <string name="pref_show_onboarding_key">showOnboarding</string>
+     <string name="pref_reset_onboarding_key">resetOnboarding</string>
+     <string name="dev_options_enabled_by_user_key">devOptionsEnabledByUser</string>
+@@ -196,11 +194,4 @@
+     <string name="pref_daily_backups_to_keep_key">daily_backups_to_keep</string>
+     <string name="pref_weekly_backups_to_keep_key">weekly_backups_to_keep</string>
+     <string name="pref_monthly_backups_to_keep_key">monthly_backups_to_keep</string>
+-
+-    <!-- Reviewer options -->
+-    <string name="hide_system_bars_key">hideSystemBars</string>
+-    <string name="ignore_display_cutout_key">ignoreDisplayCutout</string>
+-    <string name="hide_answer_buttons_key">hideAnswerButtons</string>
+-    <string name="hide_hard_and_easy_key">hideHardAndEasy</string>
+-
+ </resources>
+\ No newline at end of file
+diff --git a/AnkiDroid/src/main/res/values/sentence-case.xml b/AnkiDroid/src/main/res/values/sentence-case.xml
+index fcf11f1560..ded1cc2268 100644
+--- a/AnkiDroid/src/main/res/values/sentence-case.xml
++++ b/AnkiDroid/src/main/res/values/sentence-case.xml
+@@ -26,19 +26,8 @@ col.undoLabel()
+ col.redoLabel()
+ undoActionUndone()
+ -->
+-<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="DuplicateCrowdInStrings">
++<resources>
+     <string name="sentence_toggle_suspend">Toggle suspend</string>
+-    <string name="sentence_toggle_bury">Toggle bury</string>
+-    <string name="sentence_set_due_date">Set due date</string>
+-    <string name="sentence_gesture_flag_red">Toggle red flag</string>
+-    <string name="sentence_gesture_flag_orange">Toggle orange flag</string>
+-    <string name="sentence_gesture_flag_green">Toggle green flag</string>
+-    <string name="sentence_gesture_flag_blue">Toggle blue flag</string>
+-    <string name="sentence_gesture_flag_pink">Toggle pink flag</string>
+-    <string name="sentence_gesture_flag_turquoise">Toggle turquoise flag</string>
+-    <string name="sentence_gesture_flag_purple">Toggle purple flag</string>
+-    <string name="sentence_gesture_flag_remove">Remove flag</string>
+-    <string name="sentence_gesture_abort_sync">Abort learning and sync</string>
+-    <string name="sentence_gesture_toggle_whiteboard">Toggle whiteboard</string>
+-
++    <string name="sentence_gesture_toggle_auto_advance">Toggle auto advance</string>
++<string name="sentence_gesture_toggle_auto_advance">Toggle auto advance</string>
+ </resources>
+\ No newline at end of file
+diff --git a/AnkiDroid/src/main/res/xml/preferences_controls.xml b/AnkiDroid/src/main/res/xml/preferences_controls.xml
+index 5042269113..4f624c0b36 100644
+--- a/AnkiDroid/src/main/res/xml/preferences_controls.xml
++++ b/AnkiDroid/src/main/res/xml/preferences_controls.xml
+@@ -18,7 +18,6 @@
+ <!-- Key com.ichi2.ui.BindingPreferences -->
+ <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+     xmlns:app="http://schemas.android.com/apk/res-auto"
+-    xmlns:tools="http://schemas.android.com/tools"
+     android:title="@string/pref_cat_controls"
+     android:key="@string/pref_controls_screen_key">
+ 
+@@ -129,7 +128,7 @@
+             />
+         <com.ichi2.preferences.ControlPreference
+             android:key="@string/reschedule_command_key"
+-            tools:title="Set due date"
++            android:title="@string/card_editor_reschedule_card"
+             android:icon="@drawable/ic_reschedule"
+             />
+         <com.ichi2.preferences.ControlPreference
+@@ -255,10 +254,13 @@
+             android:key="@string/show_all_hints_command_key"
+             android:title="@string/gesture_show_all_hints"
+             />
++        <com.ichi2.preferences.ControlPreference
++            android:key="@string/toggle_auto_advance_command_key"
++            android:title="@string/gesture_toggle_auto_advance"
++            />
+     </PreferenceCategory>
+ 
+     <com.ichi2.anki.preferences.ExtendedPreferenceCategory
+-        android:key="@string/user_actions_controls_category_key"
+         android:title="@string/user_actions"
+         android:summary="@string/user_actions_summary"
+         app:helpLink="@string/link_user_actions_help">
+diff --git a/AnkiDroid/src/main/res/xml/preferences_custom_buttons.xml b/AnkiDroid/src/main/res/xml/preferences_custom_buttons.xml
+index b8bf97ab3a..ef47607420 100644
+--- a/AnkiDroid/src/main/res/xml/preferences_custom_buttons.xml
++++ b/AnkiDroid/src/main/res/xml/preferences_custom_buttons.xml
+@@ -27,7 +27,6 @@ TODO: Add a unit test
+ -->
+ <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+     xmlns:app="http://schemas.android.com/apk/res-auto"
+-    xmlns:tools="http://schemas.android.com/tools"
+     android:title="@string/custom_buttons"
+     android:key="@string/pref_app_bar_buttons_screen_key">
+     <Preference
+@@ -53,7 +52,7 @@ TODO: Add a unit test
+             android:entries="@array/custom_button_labels"
+             android:entryValues="@array/custom_button_values"
+             android:key="@string/custom_button_schedule_card_key"
+-            tools:title="Set due date"
++            android:title="@string/card_editor_reschedule_card"
+             app:useSimpleSummaryProvider="true"/>
+         <ListPreference
+             android:defaultValue="2"
+@@ -123,10 +122,17 @@ TODO: Add a unit test
+             android:entries="@array/custom_button_labels"
+             android:entryValues="@array/custom_button_values"
+             android:key="@string/custom_button_toggle_mic_toolbar_key"
+-            android:title="@string/menu_enable_voice_playback"
++            android:title="@string/menu_toggle_mic_tool_bar"
+             app:useSimpleSummaryProvider="true"/>
+-    </PreferenceCategory>
+-    <PreferenceCategory android:title="@string/menu_dismiss_note" >
++        <ListPreference
++            android:defaultValue="0"
++            android:entries="@array/custom_button_labels"
++            android:entryValues="@array/custom_button_values"
++            android:key="@string/custom_button_toggle_auto_advance_key"
++            android:title="@string/gesture_toggle_auto_advance"
++            app:useSimpleSummaryProvider="true"/>
++</PreferenceCategory>
++<PreferenceCategory android:title="@string/menu_dismiss_note" >
+         <ListPreference
+             android:defaultValue="0"
+             android:entries="@array/custom_button_labels"
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 2f64680e40..f8202bcc26 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -17,4 +17,4 @@ dependencyResolutionManagement {
+     }
+ }
+ 
+-include(":lint-rules", ":api", ":AnkiDroid", ":testlib", ":common")
+\ No newline at end of file
++include(":lint-rules", ":api", ":AnkiDroid", ":testlib", ":common")

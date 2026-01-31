@@ -1,0 +1,154 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index dc027c13..e3703ce5 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -246,6 +246,7 @@ Previously the default value for `.editorconfig` property `max_line_length` was
+ * When generating the `.editorconfig` use value `off` for the `max_line_length` property instead of value `-1` to denote that lines are not restricted to a maximum length ([#1824](https://github.com/pinterest/ktlint/issues/1824))
+ * Do not report an "unnecessary semicolon" after adding a trailing comma to an enum class containing a code element after the last enum entry `trailing-comma-on-declaration-site` ([#1786](https://github.com/pinterest/ktlint/issues/1786))
+ * A newline before a function return type should not be removed in case that leads to exceeding the maximum line length `function-return-type-spacing` ([#1764](https://github.com/pinterest/ktlint/issues/1764))
++* Ensure type arguments containing multiple annotations are wrapped consistently `annotation` ([#673](https://github.com/pinterest/ktlint/issues/673))
+ 
+ ### Changed
+ * Wrap the parameters of a function literal containing a multiline parameter list (only in `ktlint_official` code style) `parameter-list-wrapping` ([#1681](https://github.com/pinterest/ktlint/issues/1681)).
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+index 0530f0d2..0aa9107e 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+@@ -19,6 +19,8 @@ import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+ import com.pinterest.ktlint.rule.engine.core.api.lastChildLeafOrSelf
+ import com.pinterest.ktlint.rule.engine.core.api.nextCodeLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
++import com.pinterest.ktlint.rule.engine.core.api.noNewLineInClosedRange
++import com.pinterest.ktlint.rule.engine.core.api.prevCodeLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceBeforeMe
+@@ -66,8 +68,12 @@ public class AnnotationRule : StandardRule("annotation") {
+     ) {
+         require(node.elementType == ANNOTATION_ENTRY)
+ 
++        if (node.requiresTypeArgumentListWrappingBeforeFirstAnnotation()) {
++            ensureTypeArgumentAnnotationStartsOnNewLine(node, emit, autoCorrect)
++        }
++
+         if (node.isAnnotationEntryWithValueArgumentList() &&
+-            node.treeParent.treeParent.elementType != VALUE_PARAMETER && // fun fn(@Ann("blah") a: String)
++node.treeParent.treeParent.elementType != VALUE_PARAMETER && // fun fn(@Ann("blah") a: String)
+             node.treeParent.treeParent.elementType != VALUE_ARGUMENT && // fn(@Ann("blah") "42")
+             !node.isPartOf(TYPE_ARGUMENT_LIST) && // val property: Map<@Ann("blah") String, Int>
+             node.isNotReceiverTargetAnnotation()
+@@ -174,7 +180,14 @@ public class AnnotationRule : StandardRule("annotation") {
+             node
+                 .siblings(forward = false)
+                 .any { it.isWhiteSpaceWithNewline() }
+-        if (isFollowedWithAnnotationHavingValueArgumentList || isPrecededWithAnnotationOnOtherLine) {
++        val hasTypeArgumentAnnotationsOnSameLine =
++            node.isPartOf(TYPE_ARGUMENT_LIST) &&
++                node.isFollowedByOtherAnnotationEntry() &&
++                node.isOnSameLineAsNextAnnotationEntry()
++        if (isFollowedWithAnnotationHavingValueArgumentList ||
++            isPrecededWithAnnotationOnOtherLine ||
++            hasTypeArgumentAnnotationsOnSameLine
++        ) {
+             emit(
+                 node.startOffset,
+                 "Annotation must be placed on separate line",
+@@ -189,6 +202,34 @@ public class AnnotationRule : StandardRule("annotation") {
+         }
+     }
+ 
++    private fun ASTNode.requiresTypeArgumentListWrappingBeforeFirstAnnotation() =
++        isPartOf(TYPE_ARGUMENT_LIST) &&
++            !isPrecededByOtherAnnotationEntry() &&
++            isFollowedByOtherAnnotationEntry() &&
++            isOnSameLineAsPreviousCodeLeaf()
++
++    private fun ensureTypeArgumentAnnotationStartsOnNewLine(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        emit(
++            node.startOffset,
++            "Type argument with multiple annotations should be placed on a separate line",
++            true,
++        )
++        if (autoCorrect) {
++            node
++                .firstChildLeafOrSelf()
++                .upsertWhitespaceBeforeMe(getNewlineWithIndent(node.treeParent))
++        }
++    }
++
++    private fun ASTNode.isOnSameLineAsPreviousCodeLeaf(): Boolean {
++        val previousCodeLeaf = firstChildLeafOrSelf().prevCodeLeaf() ?: return true
++        return noNewLineInClosedRange(previousCodeLeaf, firstChildLeafOrSelf())
++    }
++
+     private fun ASTNode.isNotReceiverTargetAnnotation() = getAnnotationUseSiteTarget() != AnnotationUseSiteTarget.RECEIVER
+ 
+     private fun ASTNode.getAnnotationUseSiteTarget() =
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTypeArgumentListTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTypeArgumentListTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRuleTypeArgumentListTest.kt
+@@ -0,0 +1,50 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++class AnnotationRuleTypeArgumentListTest {
++    private val annotationRuleAssertThat = assertThatRule { AnnotationRule() }
++
++    @Test
++    fun `Given a type argument containing multiple annotations on the same line then wrap them`() {
++        val code =
++            """
++            data class FooRequestDto(
++                val data: List<@Valid @NotNull FooDto>,
++            )
++            """.trimIndent()
++        val formattedCode =
++            """
++            data class FooRequestDto(
++                val data: List<
++            @Valid
++            @NotNull
++            FooDto>,
++            )
++            """.trimIndent()
++annotationRuleAssertThat(code)
++            .hasLintViolations(
++                LintViolation(2, 20, "Type argument with multiple annotations should be placed on a separate line"),
++                LintViolation(2, 20, "Annotation must be placed on separate line"),
++                LintViolation(2, 20, "Multiple annotations should not be placed on the same line as the annotated construct"),
++).isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a type argument containing multiple annotations each on their own line then do not report`() {
++        val code =
++            """
++            data class FooRequestDto(
++                val data: List<
++                    @Valid
++                    @NotNull
++                    FooDto
++                >,
++            )
++            """.trimIndent()
++        annotationRuleAssertThat(code).hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

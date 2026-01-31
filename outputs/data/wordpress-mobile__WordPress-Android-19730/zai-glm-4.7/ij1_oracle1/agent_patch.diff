@@ -1,0 +1,142 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProvider.kt b/WordPress/src/main/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProvider.kt
+index 0600bbcff44..f5a9f4ae499 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProvider.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProvider.kt
+@@ -18,7 +18,7 @@ class BloggingPromptsPostTagProvider @Inject constructor(
+         tagUrl: String
+     ): ReaderTag = readerUtilsWrapper.getTagFromTagName(
+         promptIdTag(tagUrl),
+-        ReaderTagType.FOLLOWED,
++        ReaderTagType.DEFAULT,
+     )
+ 
+     companion object {
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderTest.kt
+index 8c901817c0f..80c36927306 100644
+--- a/WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderTest.kt
++++ b/WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderTest.kt
+@@ -23,7 +23,7 @@ class BloggingPromptsPostTagProviderTest : BaseUnitTest() {
+ 
+     @Before
+     fun setUp() {
+-        whenever(readerUtilsWrapper.getTagFromTagName(BLOGGING_PROMPT_ID_TAG, ReaderTagType.FOLLOWED))
++        whenever(readerUtilsWrapper.getTagFromTagName(BLOGGING_PROMPT_ID_TAG, ReaderTagType.DEFAULT))
+             .thenReturn(BLOGGING_PROMPT_ID_READER_TAG)
+ 
+         tagProvider = BloggingPromptsPostTagProvider(readerUtilsWrapper)
+
+diff --git a/PAGINATION_FIX_SUMMARY.md b/PAGINATION_FIX_SUMMARY.md
+new file mode 100644
+--- /dev/null
++++ b/PAGINATION_FIX_SUMMARY.md
+@@ -0,0 +1,110 @@
++# Fix for Blogging Prompts Pagination Regression
++
++## Problem Description
++
++When tapping "View all responses" and scrolling the response list for Blogging Prompts:
++- **Expected behavior**: Infinite scroll with proper pagination until all responses are shown. New posts are added to the end of the list when loaded.
++- **Actual behavior** (from v23.7+): Responses load once or twice but then no more posts are loaded. Posts shift places when a load happens. Pagination stops working properly.
++
++## Root Cause Analysis
++
++The issue is in `BloggingPromptsPostTagProvider.promptIdSearchReaderTag()` method:
++
++```kotlin
++fun promptIdSearchReaderTag(
++    tagUrl: String
++): ReaderTag = readerUtilsWrapper.getTagFromTagName(
++    promptIdTag(tagUrl),
++    ReaderTagType.FOLLOWED,  // ❌ PROBLEM
++)
++```
++
++**Key Issue**: The code creates a ReaderTag with `ReaderTagType.FOLLOWED`, even though:
++1. The tag (e.g., "dailyprompt-XXXX") is NOT followed by default
++2. The pagination logic in `ReaderPostListFragment` checks if more posts should be loaded using:
++   ```java
++   if (ReaderPostTable.getNumPostsWithTag(mCurrentTag) < READER_MAX_POSTS_TO_DISPLAY) {
++       updatePostsWithTag(getCurrentTag(), UpdateAction.REQUEST_OLDER);
++   }
++   ```
++
++3. `getNumPostsWithTag()` queries the database with:
++   ```sql
++   SELECT count(*) FROM tbl_posts WHERE tag_name=? AND tag_type=?
++   ```
++
++4. Because the tag type is `FOLLOWED` but the tag isn't actually followed, this creates inconsistent state:
++   - The database query may behave unpredictably for FOLLOWED tags that aren't followed
++   - Posts shift position on reload due to mixed state
++   - Pagination checks fail, preventing further loads
++
++## Solution
++
++Change `ReaderTagType.FOLLOWED` to `ReaderTagType.DEFAULT` in `promptIdSearchReaderTag()`:
++
++```kotlin
++fun promptIdSearchReaderTag(
++    tagUrl: String
++): ReaderTag = readerUtilsWrapper.getTagFromTagName(
++    promptIdTag(tagUrl),
++    ReaderTagType.DEFAULT,  // ✓ FIX
++)
++```
++
++## Why This Fix Works
++
++1. `ReaderTagType.DEFAULT` is the appropriate type for tags that are not followed but are being previewed
++2. Database queries become consistent and predictable
++3. Pagination logic works correctly with `DEFAULT` tags
++4. Posts are fetched and displayed in the correct order
++5. Infinite scroll functions properly as users scroll through the list
++
++## Impact Analysis
++
++### Files Modified:
++1. `WordPress/src/main/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProvider.kt`
++2. `WordPress/src/test/java/org/wordpress/android/ui/bloggingprompts/BloggingPromptsPostTagProviderTest.kt`
++
++### Test Updates:
++- Updated test mock to use `ReaderTagType.DEFAULT` instead of `FOLLOWED`
++
++### Behavior Changes:
++- **Before**: Blogging prompt responses pagination was broken from v23.7+
++- **After**: Proper infinite scroll pagination for blog prompt responses list
++- Posts will load correctly as users scroll
++- Posts will not shift positions on reload
++- All responses will eventually be loaded (up to `READER_MAX_POSTS_TO_DISPLAY` limit)
++
++## Verification Steps
++
++To verify the fix:
++1. Install and log into the Jetpack app (v23.7 or later)
++2. Make sure the `dailyprompt-XXXX` tag for the current day is NOT followed
++3. Go to the dashboard
++4. Tap `View all responses` on the Prompts card
++5. Scroll the prompt tag responses list for a while
++6. ✓ Pagination should work properly (no shifting posts)
++7. ✓ New posts should continue to load until all responses are shown
++
++## Related Code Flow
++
++```
++User taps "View all responses"
++    ↓
++BloggingPromptCardViewModelSlice.onBloggingPromptViewAnswersClick()
++    ↓
++BloggingPromptsPostTagProvider.promptIdSearchReaderTag(tagUrl)
++    ↓
++Creates ReaderTag with DEFAULT type
++    ↓
++ReaderActivityLauncher.showReaderTagPreview()
++    ↓
++ReaderPostListFragment displays posts with infinite scroll
++    ↓
++Pagination works correctly with DEFAULT tag type
++```
++
++## Release Notes
++
++This fix resolves a regression introduced in version 23.7 where the blog prompt responses list pagination was broken. Users were unable to scroll through all responses to a daily blogging prompt, and posts would shift positions unpredictably during loading. The issue is now resolved by using the correct ReaderTag type for unfollowed blog prompt tags.
++

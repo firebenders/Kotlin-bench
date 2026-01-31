@@ -1,0 +1,196 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6c63ef32..4b91bb9d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -15,6 +15,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ * Allow to disable ktlint in `.editorconfig` for a glob ([#2100](https://github.com/pinterest/ktlint/issues/2100))
+ * Fix wrapping of nested function literals `wrapping` ([#2106](https://github.com/pinterest/ktlint/issues/2106))
+ * Do not indent class body for classes having a long super type list in code style `ktlint_official` as it is inconsistent compared to other class bodies `indent` [#2115](https://github.com/pinterest/ktlint/issues/2115)
++* Prevent nullpointer exception when an if-else branch does not contain any statement `multiline-if-else`, `if-else-bracing`
+ * In code style `ktlint_official` do not indent the closing parenthesis of a PARENTHESIZED expression `indent` [#920](https://github.com/pinterest/ktlint/issues/920) 
+ * Log message `Format was not able to resolve all violations which (theoretically) can be autocorrected in file ... in 3 consecutive runs of format` is now only displayed in case a new ktlint rule is actually needed. [#2129](https://github.com/pinterest/ktlint/issues/2129)
+ * Fix wrapping of function signature in case the opening brace of the function body block exceeds the maximum line length. Fix upsert of whitespace into composite nodes. `function-signature` [#2130](https://github.com/pinterest/ktlint/issues/2130)
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IfElseBracingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IfElseBracingRule.kt
+index a88ba960..17cd24b7 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IfElseBracingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/IfElseBracingRule.kt
+@@ -116,8 +116,9 @@ public class IfElseBracingRule :
+         autoCorrect: Boolean,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+     ): Boolean {
++        val branchExpression = node.firstChildNode ?: return false
+         emit(
+-            node.firstChildNode.startOffset,
++            branchExpression.startOffset,
+             "All branches of the if statement should be wrapped between braces if at least one branch is wrapped between braces",
+             true,
+         )
+@@ -140,6 +141,7 @@ public class IfElseBracingRule :
+                 .takeWhile { it.isWhiteSpaceWithoutNewline() || it.isPartOfComment() }
+                 .toList()
+                 .dropLastWhile { it.isWhiteSpaceWithoutNewline() }
++        val branchExpression = node.firstChildNode ?: return
+ 
+         prevLeaves
+             .firstOrNull()
+@@ -148,14 +150,13 @@ public class IfElseBracingRule :
+                 (it as LeafPsiElement).rawReplaceWithText(" ")
+             }
+         KtBlockExpression(null).apply {
+-            val previousChild = node.firstChildNode
+-            node.replaceChild(node.firstChildNode, this)
++            node.replaceChild(branchExpression, this)
+             addChild(LeafPsiElement(LBRACE, "{"))
+             addChild(PsiWhiteSpaceImpl(indentConfig.childIndentOf(node)))
+             prevLeaves
+                 .dropWhile { it.isWhiteSpace() }
+                 .forEach(::addChild)
+-            addChild(previousChild)
++            addChild(branchExpression)
+             nextLeaves.forEach(::addChild)
+             addChild(PsiWhiteSpaceImpl(node.indent()))
+             addChild(LeafPsiElement(RBRACE, "}"))
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
+index 08f81d54..c1a80dac 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRule.kt
+@@ -64,11 +64,15 @@ public class MultiLineIfElseRule :
+             return
+         }
+ 
++        val branchExpression =
++            node.firstChildNode
++                ?: return
++
+         if (node.elementType == ELSE &&
+-            node.firstChildNode?.elementType == BINARY_EXPRESSION &&
+-            node.firstChildNode.firstChildNode?.elementType == IF
++            branchExpression.elementType == BINARY_EXPRESSION &&
++            branchExpression.firstChildNode?.elementType == IF
+         ) {
+-            // Allow
++// Allow
+             // val foo2 = if (bar1) {
+             //     "bar1"
+             // } else if (bar2) {
+@@ -80,10 +84,10 @@ public class MultiLineIfElseRule :
+         }
+ 
+         if (node.elementType == ELSE &&
+-            node.firstChildNode?.elementType == DOT_QUALIFIED_EXPRESSION &&
+-            node.firstChildNode.firstChildNode?.elementType == IF
++            branchExpression.elementType == DOT_QUALIFIED_EXPRESSION &&
++            branchExpression.firstChildNode?.elementType == IF
+         ) {
+-            // Allow
++// Allow
+             // val foo = if (bar1) {
+             //     "bar1"
+             // } else if (bar2) {
+@@ -95,12 +99,12 @@ public class MultiLineIfElseRule :
+         }
+ 
+         if (!node.treePrev.textContains('\n')) {
+-            if (node.firstChildNode.elementType == IF) {
++            if (branchExpression.elementType == IF) {
+                 // Allow single line for:
+                 // else if (...)
+                 return
+             }
+-            if (!node.treeParent.textContains('\n')) {
++if (!node.treeParent.textContains('\n')) {
+                 // Allow single line if statements as long as they are really simple (e.g. do not contain newlines)
+                 //    if (...) <statement> // no else statement
+                 //    if (...) <statement> else <statement>
+@@ -110,8 +114,8 @@ public class MultiLineIfElseRule :
+             Unit
+         }
+ 
+-        emit(node.firstChildNode.startOffset, "Missing { ... }", true)
+-        if (autoCorrect) {
++        emit(branchExpression.startOffset, "Missing { ... }", true)
++if (autoCorrect) {
+             autocorrect(node)
+         }
+     }
+@@ -129,6 +133,7 @@ public class MultiLineIfElseRule :
+                 .takeWhile { it.isWhiteSpaceWithoutNewline() || it.isPartOfComment() }
+                 .toList()
+                 .dropLastWhile { it.isWhiteSpaceWithoutNewline() }
++        val branchExpression = node.firstChildNode ?: return
+ 
+         prevLeaves
+             .firstOrNull()
+@@ -137,14 +142,13 @@ public class MultiLineIfElseRule :
+                 (it as LeafPsiElement).rawReplaceWithText(" ")
+             }
+         KtBlockExpression(null).apply {
+-            val previousChild = node.firstChildNode
+-            node.replaceChild(node.firstChildNode, this)
++            node.replaceChild(branchExpression, this)
+             addChild(LeafPsiElement(LBRACE, "{"))
+             addChild(PsiWhiteSpaceImpl(indentConfig.childIndentOf(node)))
+             prevLeaves
+                 .dropWhile { it.isWhiteSpace() }
+                 .forEach(::addChild)
+-            addChild(previousChild)
++            addChild(branchExpression)
+             nextLeaves.forEach(::addChild)
+             addChild(PsiWhiteSpaceImpl(node.indent()))
+             addChild(LeafPsiElement(RBRACE, "}"))
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleRegressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleRegressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MultiLineIfElseRuleRegressionTest.kt
+@@ -0,0 +1,42 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class MultiLineIfElseRuleRegressionTest {
++    private val multiLineIfElseRuleAssertThat = assertThatRule { MultiLineIfElseRule() }
++    private val ifElseBracingRuleAssertThat = assertThatRule { IfElseBracingRule() }
++
++    @Test
++    fun `Given an else-if statement in which the then-branch is empty then multiline-if-else rule does not crash`() {
++        val code =
++            """
++            fun subject() {
++                if ("a" == "b") {
++                } else if ("b" == "c") else {
++                }
++            }
++            """.trimIndent()
++
++        multiLineIfElseRuleAssertThat(code).hasNoLintViolations()
++    }
++
++    @Test
++    fun `Given an else-if statement in which the then-branch is empty then if-else-bracing rule does not crash`() {
++        val code =
++            """
++            fun subject() {
++                if ("a" == "b") {
++                } else if ("b" == "c") else {
++                }
++            }
++            """.trimIndent()
++
++        ifElseBracingRuleAssertThat(code)
++            .withEditorConfigOverride(CODE_STYLE_PROPERTY to ktlint_official)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

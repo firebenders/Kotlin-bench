@@ -22,7 +22,7 @@
 | 6 | Claude Sonnet 4 | 29% | 29/100 |
 | 7 | ZAI GLM-4.7-FP8 | 25% | 15/59 |
 | 8 | ZAI GLM-4.7 | 13% | 13/100 |
-
+ 
 ### Statistical Significance (McNemar's Test)
 
 **Statistically significant differences (p < 0.05):**

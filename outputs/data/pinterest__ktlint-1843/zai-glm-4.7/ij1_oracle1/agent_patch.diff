@@ -1,3 +1,235 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
+index 06a2f93e..d88899a8 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
+@@ -2,9 +2,15 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.COLON
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_PARAMETER_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
+ import com.pinterest.ktlint.rule.engine.core.api.Rule
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.children
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY_OFF
+ import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe
+@@ -12,8 +18,17 @@ import com.pinterest.ktlint.ruleset.standard.StandardRule
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+ 
+ public class FunctionReturnTypeSpacingRule :
+-    StandardRule("function-return-type-spacing"),
++    StandardRule(
++        id = "function-return-type-spacing",
++        usesEditorConfigProperties = setOf(MAX_LINE_LENGTH_PROPERTY),
++    ),
+     Rule.Experimental {
++    private var maxLineLength = MAX_LINE_LENGTH_PROPERTY.defaultValue
++
++    override fun beforeFirstNode(editorConfig: EditorConfig) {
++        maxLineLength = editorConfig[MAX_LINE_LENGTH_PROPERTY]
++    }
++
+     override fun beforeVisitChildNodes(
+         node: ASTNode,
+         autoCorrect: Boolean,
+@@ -25,7 +40,7 @@ public class FunctionReturnTypeSpacingRule :
+             ?.let { node.findChildByType(COLON) }
+             ?.let { colonNode ->
+                 removeWhiteSpaceBetweenClosingParenthesisAndColon(colonNode, emit, autoCorrect)
+-                fixWhiteSpaceBetweenColonAndReturnType(colonNode, emit, autoCorrect)
++                fixWhiteSpaceBetweenColonAndReturnType(colonNode, emit, autoCorrect, node)
+             }
+     }
+ 
+@@ -50,6 +65,7 @@ public class FunctionReturnTypeSpacingRule :
+         node: ASTNode,
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+         autoCorrect: Boolean,
++        functionNode: ASTNode,
+     ) {
+         require(node.elementType == COLON)
+         node
+@@ -57,6 +73,11 @@ public class FunctionReturnTypeSpacingRule :
+             ?.takeIf { it.elementType == WHITE_SPACE }
+             .let { whiteSpaceAfterColon ->
+                 if (whiteSpaceAfterColon?.text != " ") {
++                    // Check if this is a parameterless function and if the fix would exceed max line length
++                    if (isParameterlessFunction(functionNode) && wouldExceedMaxLineLength(node, whiteSpaceAfterColon)) {
++                        // Don't fix spacing in this case to avoid violating max-line-length
++                        return@let
++                    }
+                     emit(node.startOffset, "Single space expected between colon and return type", true)
+                     if (autoCorrect) {
+                         node.upsertWhitespaceAfterMe(" ")
+@@ -64,6 +85,66 @@ public class FunctionReturnTypeSpacingRule :
+                 }
+             }
+     }
++
++    private fun isParameterlessFunction(node: ASTNode): Boolean {
++        val valueParameterList = node.findChildByType(VALUE_PARAMETER_LIST) ?: return true
++        return valueParameterList
++            .children()
++            .none { it.elementType == VALUE_PARAMETER }
++    }
++
++    private fun wouldExceedMaxLineLength(
++        colonNode: ASTNode,
++        whiteSpaceAfterColon: ASTNode?,
++    ): Boolean {
++        if (maxLineLength == MAX_LINE_LENGTH_PROPERTY_OFF) {
++            return false
++        }
++
++        val isCurrentMultiline = (whiteSpaceAfterColon?.text ?: "").contains("\n")
++
++        return if (isCurrentMultiline) {
++            // Current format has newline after colon, converting to single line
++            // Calculate what the single line length would be
++            val singleLineLength = getFullFunctionSignatureLength(colonNode)
++
++            singleLineLength > maxLineLength
++        } else {
++            // Already on single line, no change
++            false
++        }
++    }
++
++    private fun getFullFunctionSignatureLength(colonNode: ASTNode): Int {
++        val rootNode = colonNode.treeParent?.treeParent ?: return 0
++        val nodeText = rootNode.text
++
++        val colonIndex = colonNode.startOffset - rootNode.startOffset
++        if (colonIndex < 0 || colonIndex >= nodeText.length) {
++            return 0
++        }
++
++        // Find the end of the return type
++        var returnTypeEndIndex = colonIndex
++        var currentIndex = colonIndex
++        while (currentIndex < nodeText.length) {
++            if (nodeText[currentIndex] == '\n') {
++                break
++            }
++            returnTypeEndIndex = currentIndex
++            currentIndex++
++        }
++
++        // Find the start of the function signature (start of line containing colon)
++        var startIndex = colonIndex
++        while (startIndex > 0 && nodeText[startIndex - 1] != '\n') {
++            startIndex--
++        }
++
++        // Calculate full signature length on a single line
++        val signatureText = nodeText.substring(startIndex, returnTypeEndIndex)
++        return signatureText.length
++    }
+ }
+ 
+ public val FUNCTION_RETURN_TYPE_SPACING_RULE_ID: RuleId = FunctionReturnTypeSpacingRule().ruleId
+
+diff --git a/FIX_SUMMARY.md b/FIX_SUMMARY.md
+new file mode 100644
+--- /dev/null
++++ b/FIX_SUMMARY.md
+@@ -0,0 +1,91 @@
++# Fix Summary: FunctionReturnTypeSpacingRule Max Line Length Issue
++
++## Problem
++The `experimental:function-return-type-spacing` rule was violating the `max-line-length` rule by forcing parameterless functions from multiline to single line format, even when the resulting line exceeded the configured maximum line length.
++
++Example:
++```kotlin
++// Before (multiline)
++fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction():
++        AndAlsoALongReturnType {
++}
++
++// After (rule forces single line, exceeding max_line_length=120)
++fun thisIsAVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongFunction(): AndAlsoALongReturnType {
++}
++```
++
++## Solution
++Modified `FunctionReturnTypeSpacingRule.kt` to:
++
++1. **Read max_line_length from editorconfig**: Added support for accessing the `MAX_LINE_LENGTH_PROPERTY` configuration.
++
++2. **Detect parameterless functions**: Added `isParameterlessFunction()` method to identify functions without parameters.
++
++3. **Check if reformatting would exceed max line length**: Added `wouldExceedMaxLineLength()` that calculates whether the resulting single-line function signature would exceed the configured limit。
++
++4. **Conditional fix application**: Modified `fixWhiteSpaceBetweenColonAndReturnType()` to skip the spacing fix for parameterless functions when applying it would cause the line to exceed max_line_length.
++
++## Key Changes in FunctionReturnTypeSpacingRule.kt
++
++### Added dependencies:
++```kotlin
++usesEditorConfigProperties = setOf(MAX_LINE_LENGTH_PROPERTY)
++```
++
++### Added state:
++```kotlin
++private var maxLineLength = MAX_LINE_LENGTH_PROPERTY.defaultValue
++```
++
++### Added initialization:
++```kotlin
++override fun beforeFirstNode(editorConfig: EditorConfig) {
++    maxLineLength = editorConfig[MAX_LINE_LENGTH_PROPERTY]
++}
++```
++
++### Modified whitespace fixing logic:
++```kotlin
++private fun fixWhiteSpaceBetweenColonAndReturnType(...) {
++    // ...
++    if (whiteSpaceAfterColon?.text != " ") {
++        // Check if this is a parameterless function and if the fix would exceed max line length
++        if (isParameterlessFunction(functionNode) && wouldExceedMaxLineLength(...)) {
++            // Don't fix spacing in this case to avoid violating max-line-length
++            return@let
++        }
++        // ... apply fix normally
++    }
++}
++```
++
++## Behavior
++
++### For parameterless functions:
++- **Before**: Always enforced single space after colon, even if it exceeded max_line_length
++- **After**: Only enforces single space if the resulting line won't exceed max_line_length
++
++### For functions with parameters:
++- **Before & After**: Always enforces single space (unchanged)
++- This preserves the consistency with `FunctionSignatureRule` which has special handling for parameterless functions
++
++## Testing
++All existing tests in `FunctionReturnTypeSpacingRuleTest` continue to pass, ensuring backward compatibility.
++
++## Alignment with FunctionSignatureRule
++This fix aligns with the philosophy in `FunctionSignatureRule.kt` which already checks `node.countParameters() > 0` to avoid auto-reformatting parameterless functions that would result in undesirable multiline signatures.
++
++Reference comment from FunctionSignatureRule.kt:
++```kotlin
++// Function signatures not having parameters, should not be reformatted automatically. It would result in function signatures
++// like below, which are not acceptable:
++//     fun aVeryLongFunctionName(
++//     ) = "some-value"
++//
++//     fun aVeryLongFunctionName(
++//     ): SomeVeryLongTypeName =
++//         SomeVeryLongTypeName(...)
++// Leave it up to the max-line-length rule to detect those violations so that the developer can handle it manually.
++```
++
 
 diff --git a/local.properties b/local.properties
 new file mode 100644

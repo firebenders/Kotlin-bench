@@ -1,0 +1,173 @@
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+index a14cb14bdb..eff1968506 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+@@ -17,6 +17,7 @@ internal class UserInputEmailAddressParser {
+             .mapNotNull { address ->
+                 when {
+                     address.isIncomplete() -> null
++                    !address.isValidEmailAddress() -> null
+                     address.isNonAsciiAddress() -> throw NonAsciiEmailAddressException(address.address)
+                     else -> Address.parse(address.toEncodedString()).firstOrNull()
+                 }
+@@ -26,6 +27,39 @@ internal class UserInputEmailAddressParser {
+     private fun Address.isIncomplete() = hostname.isNullOrBlank()
+ 
+     private fun Address.isNonAsciiAddress() = !CharsetUtil.isASCII(address)
++
++    /**
++     * Validates that the email address conforms to RFC 5321.
++     * The local part (before @) can contain various characters, but the domain part (after @)
++     * must be a valid hostname consisting of letters, digits, hyphens, and dots.
++     */
++    private fun Address.isValidEmailAddress(): Boolean {
++        val addressString = address ?: return false
++        val atIndex = addressString.lastIndexOf('@')
++        if (atIndex == -1 || atIndex == addressString.length - 1) return false
++
++        val domain = addressString.substring(atIndex + 1)
++
++        // Domain cannot be empty
++        if (domain.isEmpty()) return false
++
++        // Domain cannot contain characters that are invalid in hostnames
++        // Valid characters for domain: a-z, A-Z, 0-9, -, ., and brackets for IPv6 literals
++        // Invalid characters include: /, \, space, <, >, etc.
++        for (char in domain) {
++            when {
++                char.isLetterOrDigit() -> continue
++                char == '-' || char == '.' -> continue
++                char == '[' || char == ']' || char == ':' -> {
++                    // Allow IPv6 literals like [IPv6:2001:db8::1]
++                    continue
++                }
++                else -> return false
++            }
++        }
++
++        return true
++    }
+ }
+ 
+ internal class NonAsciiEmailAddressException(message: String) : Exception(message)
+
+diff --git a/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidAddressTest.kt b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidAddressTest.kt
+new file mode 100644
+--- /dev/null
++++ b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidAddressTest.kt
+@@ -0,0 +1,115 @@
++package com.fsck.k9.view
++
++import assertk.assertThat
++import assertk.assertions.isEmpty
++import assertk.assertions.containsExactly
++import com.fsck.k9.mail.Address
++import kotlin.test.Test
++
++/**
++ * Test cases for invalid email address validation.
++ * These tests verify that email addresses with invalid characters in the domain part
++ * (like trailing slashes) are rejected.
++ */
++class UserInputEmailAddressParserInvalidAddressTest {
++    private val parser = UserInputEmailAddressParser()
++
++    @Test
++    fun `email address with trailing slash should be rejected`() {
++        val addresses = parser.parse("xxx@gmail.com/")
++
++        assertThat(addresses).isEmpty()
++    }
++
++    @Test
++    fun `email address with trailing slash in angle brackets should be rejected`() {
++        val addresses = parser.parse("<xxx@gmail.com/>")
++
++        assertThat(addresses).isEmpty()
++    }
++
++    @Test
++    fun `email address with slash in middle of domain should be rejected`() {
++        val addresses = parser.parse("user@gm/ail.com")
++
++        assertThat(addresses).isEmpty()
++    }
++
++    @Test
++    fun `email address with backslash in domain should be rejected`() {
++        val addresses = parser.parse("user@gmail\\.com")
++
++        assertThat(addresses).isEmpty()
++    }
++
++    @Test
++    fun `email address with space in domain should be rejected`() {
++        val addresses = parser.parse("user@gmail .com")
++
++        assertThat(addresses).isEmpty()
++    }
++
++    @Test
++    fun `email address with less than in domain should be rejected`() {
++        val addresses = parser.parse("user@gmail<.com")
++
++        assertThat(addresses).isEmpty()
++    }
++
++    @Test
++    fun `email address with greater than in domain should be rejected`() {
++        val addresses = parser.parse("user@gmail>.com")
++
++        assertThat(addresses).isEmpty()
++    }
++
++    @Test
++    fun `valid email address should be accepted`() {
++        val addresses = parser.parse("user@gmail.com")
++
++        assertThat(addresses).containsExactly(Address("user@gmail.com"))
++    }
++
++    @Test
++    fun `valid email address with hyphen in domain should be accepted`() {
++        val addresses = parser.parse("user@my-domain.com")
++
++        assertThat(addresses).containsExactly(Address("user@my-domain.com"))
++    }
++
++    @Test
++    fun `valid email address with IPv6 literal should be accepted`() {
++        val addresses = parser.parse("user@[IPv6:2001:db8::1]")
++
++        assertThat(addresses).containsExactly(Address("user@[IPv6:2001:db8::1]"))
++    }
++
++    @Test
++    fun `valid email address with dots in domain should be accepted`() {
++        val addresses = parser.parse("user@sub.domain.example.com")
++
++        assertThat(addresses).containsExactly(Address("user@sub.domain.example.com"))
++    }
++
++    @Test
++    fun `valid email address with digits in domain should be accepted`() {
++        val addresses = parser.parse("user@example123.com")
++
++        assertThat(addresses).containsExactly(Address("user@example123.com"))
++    }
++
++    @Test
++    fun `valid email address with plus in local part should be accepted`() {
++        val addresses = parser.parse("user+tag@gmail.com")
++
++        assertThat(addresses).containsExactly(Address("user+tag@gmail.com"))
++    }
++
++    @Test
++    fun `valid email address with dot in local part should be accepted`() {
++        val addresses = parser.parse("first.last@gmail.com")
++
++        assertThat(addresses).containsExactly(Address("first.last@gmail.com"))
++    }
++}
++

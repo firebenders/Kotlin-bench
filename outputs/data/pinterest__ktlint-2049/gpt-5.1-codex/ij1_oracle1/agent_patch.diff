@@ -1,0 +1,116 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 8722a8cd..82e62a5d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -11,6 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ ### Fixed
+ 
+ * Do not flag a (potential) mutable extension property in case the getter is annotated or prefixed with a modifier `property-naming` ([#2024](https://github.com/pinterest/ktlint/issues/2024))
++* Prevent `function-signature` from merging annotated body expressions onto the signature line as it violates the `annotation` rule ([#2028](https://github.com/pinterest/ktlint/issues/2028))
+ 
+ ### Changed
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+index 28a6ebc7..191886b3 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+@@ -1,5 +1,6 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATED_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK
+@@ -47,6 +48,7 @@ import org.ec4j.core.model.PropertyType.PropertyValueParser.EnumValueParser
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+ import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafElement
+ import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
++import org.jetbrains.kotlin.com.intellij.psi.tree.IElementType
+ import org.jetbrains.kotlin.utils.addToStdlib.ifTrue
+ 
+ public class FunctionSignatureRule :
+@@ -531,17 +533,24 @@ public class FunctionSignatureRule :
+         val bodyNodes = node.getFunctionBody(lastNodeOfFunctionSignatureWithBodyExpression)
+         val whiteSpaceBeforeFunctionBodyExpression = bodyNodes.getStartingWhitespaceOrNull()
+         val functionBodyExpressionNodes = bodyNodes.dropWhile { it.isWhiteSpace() }
++        val functionBodyExpressionStartsWithAnnotation =
++            functionBodyExpressionNodes
++                .firstOrNull()
++                ?.hasParentOfType(ANNOTATION_ENTRY, ANNOTATION, ANNOTATED_EXPRESSION)
++                ?: false
+ 
+         val functionBodyExpressionLines =
+             functionBodyExpressionNodes
+-                .joinTextToString()
++.joinTextToString()
+                 .split("\n")
+         functionBodyExpressionLines
+             .firstOrNull()
+             ?.also { firstLineOfBodyExpression ->
+                 if (whiteSpaceBeforeFunctionBodyExpression.isWhiteSpaceWithNewline()) {
+                     val mergeWithFunctionSignature =
+-                        if (firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression) {
++                        if (!functionBodyExpressionStartsWithAnnotation &&
++                            firstLineOfBodyExpression.length < maxLengthRemainingForFirstLineOfBodyExpression
++                        ) {
+                             functionBodyExpressionWrapping == default ||
+                                 (functionBodyExpressionWrapping == multiline && functionBodyExpressionLines.size == 1) ||
+                                 node.isMultilineFunctionSignatureWithoutExplicitReturnType(
+@@ -550,7 +559,7 @@ public class FunctionSignatureRule :
+                         } else {
+                             false
+                         }
+-                    if (mergeWithFunctionSignature) {
++if (mergeWithFunctionSignature) {
+                         emit(
+                             whiteSpaceBeforeFunctionBodyExpression!!.startOffset,
+                             "First line of body expression fits on same line as function signature",
+@@ -701,6 +710,10 @@ public class FunctionSignatureRule :
+     private fun List<ASTNode>.joinTextToString(block: (ASTNode) -> String = { it.text }): String =
+         collectLeavesRecursively().joinToString(separator = "") { block(it) }
+ 
++    private fun ASTNode.hasParentOfType(vararg elementTypes: IElementType): Boolean =
++        generateSequence(this) { it.treeParent }
++            .any { node -> elementTypes.contains(node.elementType) }
++
+     private fun ASTNode.hasMinimumNumberOfParameters(): Boolean = countParameters() >= functionSignatureWrappingMinimumParameters
+ 
+     private fun ASTNode.countParameters(): Int {
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRuleAnnotatedExpressionTest.kt
+@@ -0,0 +1,24 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import org.junit.jupiter.api.Test
++
++class FunctionSignatureRuleAnnotatedExpressionTest {
++    private val functionSignatureRuleAssertThat = assertThatRule { FunctionSignatureRule() }
++
++    @Test
++    fun `Given expression body starting with annotation then keep newline before annotation`() {
++        val code =
++            """
++            private fun getErrorMessage(value: String): String =
++                @Suppress("DEPRECATION")
++                customMessage.takeUnless { it.isEmpty() } ?: String.format(DEFAULT_ERROR_MESSAGE_WITH_NO_REASON, value)
++            """.trimIndent()
++
++        functionSignatureRuleAssertThat(code)
++            .withEditorConfigOverride(MAX_LINE_LENGTH_PROPERTY to 200)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

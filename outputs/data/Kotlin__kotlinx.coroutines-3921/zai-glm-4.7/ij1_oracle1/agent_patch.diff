@@ -1,3 +1,22 @@
+diff --git a/kotlinx-coroutines-core/common/src/Delay.kt b/kotlinx-coroutines-core/common/src/Delay.kt
+index ba06d9778..98b1f3852 100644
+--- a/kotlinx-coroutines-core/common/src/Delay.kt
++++ b/kotlinx-coroutines-core/common/src/Delay.kt
+@@ -156,6 +156,12 @@ internal val CoroutineContext.delay: Delay get() = get(ContinuationInterceptor)
+ /**
+  * Convert this duration to its millisecond value.
+  * Positive durations are coerced at least `1`.
++ * The result is rounded up to the next whole millisecond if there is any sub-millisecond component
++ * to ensure the delay is at least as long as requested.
+  */
+ internal fun Duration.toDelayMillis(): Long =
+-    if (this > Duration.ZERO) inWholeMilliseconds.coerceAtLeast(1) else 0
++    if (this > Duration.ZERO) {
++        val millis = inWholeMilliseconds
++        // Round up if there is any sub-millisecond component
++        if (millis * 1_000_000 < inWholeNanoseconds) millis + 1 else millis
++    } else 0
+\ No newline at end of file
 diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
 index e7b039ce3..f19300707 100644
 --- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
@@ -13,3 +32,166 @@ index e7b039ce3..f19300707 100644
  
      override fun checkPermission(perm: Permission?) {
          /* allow everything else */
+
+diff --git a/FIX_SUMMARY.md b/FIX_SUMMARY.md
+new file mode 100644
+--- /dev/null
++++ b/FIX_SUMMARY.md
+@@ -0,0 +1,57 @@
++# Fix for `delay(Duration)` incorrectly coercing nanoseconds and microseconds
++
++## Problem
++
++The `delay(Duration)` function was truncating durations to milliseconds, losing nanosecond and microsecond precision. This caused delays to be shorter than requested when the duration had sub-millisecond components.
++
++**Example**: Delaying with `998.milliseconds + 902752.nanoseconds` would be truncated to `998ms` instead of the proper `999ms`, causing jobs scheduled with precise timing to invoke early.
++
++## Root Cause
++
++The issue was in the `toDelayMillis()` function in `kotlinx-coroutines-core/common/src/Delay.kt`:
++
++```kotlin
++// OLD IMPLEMENTATION (INCORRECT)
++internal fun Duration.toDelayMillis(): Long =
++    if (this > Duration.ZERO) inWholeMilliseconds.coerceAtLeast(1) else 0
++```
++
++This implementation truncated durations to whole milliseconds, discarding any nanosecond/microsecond components.
++
++## Solution
++
++The fix rounds up to the next whole millisecond when there's any sub-millisecond component, ensuring the delay is at least as long as requested:
++
++```kotlin
++// NEW IMPLEMENTATION (CORRECT)
++internal fun Duration.toDelayMillis(): Long =
++    if (this > Duration.ZERO) {
++        val millis = inWholeMilliseconds
++        // Round up if there is any sub-millisecond component
++        if (millis * 1_000_000 < inWholeNanoseconds) millis + 1 else millis
++    } else 0
++```
++
++The logic:
++1. Get the whole milliseconds (e.g., 998ms from 998.902752ms)
++2. Multiply by 1,000,000 to convert to nanoseconds (998,000,000 ns)
++3. Compare with actual nanoseconds (998,902,752 ns)
++4. If there's any sub-millisecond nanosecond remainder, increment the millisecond count (999ms)
++
++## Impact
++
++This fix affects all functions that use `toDelayMillis()`:
++- `delay(Duration)` - suspending delay function
++- `withTimeout(Duration)` - timeout with exception
++- `withTimeoutOrNull(Duration)` - timeout without exception  
++- `onTimeout(Duration)` - select clause
++- Flow operators: `debounce(Duration)`, `sample(Duration)`
++
++All these functions now correctly handle durations with sub-millisecond precision by rounding up to ensure delays are at least as long as requested.
++
++## Testing
++
++Created comprehensive test suite in `DelayRoundingTest.kt` covering:
++1. Rounding behavior with various sub-millisecond components
++2. Edge cases (zero, negative, exact millisecond values)
++3. Integration tests verifying actual delay duration meets expectations
+
+diff --git a/kotlinx-coroutines-core/common/test/DelayRoundingTest.kt b/kotlinx-coroutines-core/common/test/DelayRoundingTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/DelayRoundingTest.kt
+@@ -0,0 +1,94 @@
++/*
++ * Copyright 2016-2021 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines
++
++import kotlin.test.*
++import kotlin.time.*
++
++class DelayRoundingTest : TestBase() {
++
++    @Test
++    fun testToDelayMillisRoundsUp() {
++        // Test that sub-millisecond components cause rounding up
++        val duration1 = 998.milliseconds + 902752.nanoseconds
++        val millis1 = duration1.toDelayMillis()
++        // Should round up to 999ms since there's a nanosecond component
++        assertEquals(999L, millis1)
++
++        val duration2 = 1.milliseconds + 1.nanoseconds
++        val millis2 = duration2.toDelayMillis()
++        // Should round up to 2ms
++        assertEquals(2L, millis2)
++
++        val duration3 = 100.milliseconds + 500000.nanoseconds
++        val millis3 = duration3.toDelayMillis()
++        // Should round up to 101ms
++        assertEquals(101L, millis3)
++
++        // Exact millisecond values should not round up
++        val duration4 = 100.milliseconds
++        val millis4 = duration4.toDelayMillis()
++        assertEquals(100L, millis4)
++
++        // Microsecond durations should round up
++        val duration5 = 500.microseconds
++        val millis5 = duration5.toDelayMillis()
++        // 500 microseconds = 0.5ms, should round up to 1ms
++        assertEquals(1L, millis5)
++
++        // Small nanosecond durations should round up to 1ms
++        val duration6 = 1.nanoseconds
++        val millis6 = duration6.toDelayMillis()
++        assertEquals(1L, millis6)
++    }
++
++    @Test
++    fun testToDelayMillisEdgeCases() {
++        // Zero duration
++        assertEquals(0L, Duration.ZERO.toDelayMillis())
++
++        // Negative duration
++        assertEquals(0L, (-1).milliseconds.toDelayMillis())
++        assertEquals(0L, (-1).nanoseconds.toDelayMillis())
++
++        // Duration exactly at millisecond boundary
++        val exactMillisecond = 250.milliseconds
++        assertEquals(250L, exactMillisecond.toDelayMillis())
++    }
++
++    @Test
++    fun testDelayWithSubMillisecondPrecision() = runTest {
++        val expectedDuration = 998.milliseconds + 902752.nanoseconds
++        val actualDuration = measureTime {
++            delay(expectedDuration)
++        }
++        // The actual duration should be at least the expected duration
++        // (since we rounded up to ensure the delay is at least as long as requested)
++        val difference = actualDuration - expectedDuration
++        assertTrue(difference.isPositive(), "Actual duration $actualDuration should be at least expected duration $expectedDuration")
++    }
++
++    @Test
++    fun testDelayWithMicrosecondPrecision() = runTest {
++        val expectedDuration = 500.microseconds
++        val actualDuration = measureTime {
++            delay(expectedDuration)
++        }
++        // The actual duration should be at least the expected duration
++        val difference = actualDuration - expectedDuration
++        assertTrue(difference.isPositive(), "Actual duration $actualDuration should be at least expected duration $expectedDuration")
++    }
++
++    @Test
++    fun testDelayWithExactMillisecond() = runTest {
++        val expectedDuration = 100.milliseconds
++        val actualDuration = measureTime {
++            delay(expectedDuration)
++        }
++        // The actual duration should be at least the expected duration
++        val difference = actualDuration - expectedDuration
++        assertTrue(difference.isPositive(), "Actual duration $actualDuration should be at least expected duration $expectedDuration")
++    }
++}

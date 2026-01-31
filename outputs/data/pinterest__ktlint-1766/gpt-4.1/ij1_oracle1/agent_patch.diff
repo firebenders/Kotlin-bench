@@ -1,0 +1,104 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ea4b034e..e0e601cb 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -9,6 +9,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
+ ### Removed
+ 
+ ### Fixed
++* Array annotation syntax (`@[...]`) is now always forced onto a separate line before the annotated construct. See #1765.
+ * Do not enable the experimental rules by default when `.editorconfig` properties `disabled_rules` or `ktlint_disabled_rules` are set. ([#1771](https://github.com/pinterest/ktlint/issues/1771))
+ * A function signature not having any parameters which exceeds the `max-line-length` should be ignored by rule `function-signature` ([#1773](https://github.com/pinterest/ktlint/issues/1773))
+ * 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+index 7fdfdd88..ef2e04a1 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/AnnotationRule.kt
+@@ -51,6 +51,8 @@ public class AnnotationRule : Rule("annotation") {
+             }
+             ANNOTATION_ENTRY ->
+                 visitAnnotationEntry(node, emit, autoCorrect)
++            ANNOTATION ->
++                checkArrayAnnotationOnSameLine(node, emit, autoCorrect)
+         }
+     }
+ 
+@@ -271,4 +273,30 @@ public class AnnotationRule : Rule("annotation") {
+             newLineWithIndent
+         }
+     }
++
++    /**
++     * Forces array annotations (@[...]) onto separate lines before the annotated construct.
++     */
++    private fun checkArrayAnnotationOnSameLine(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean
++    ) {
++        if (node.elementType == ANNOTATION
++            && node.firstChildNode?.elementType?.toString() == "AT"
++            && node.lastChildNode?.elementType?.toString() == "RBRACKET"
++        ) {
++            val nextLeaf = node.lastChildLeafOrSelf().nextCodeLeaf()
++            if (nextLeaf != null && !node.lastChildLeafOrSelf().isWhiteSpaceWithNewline()) {
++                emit(
++                    node.startOffset,
++                    "Array annotation (@[…]) must be placed on a separate line prior to the annotated construct",
++                    true
++                )
++                if (autoCorrect) {
++                    node.lastChildLeafOrSelf().upsertWhitespaceBeforeMe(getNewlineWithIndent(node))
++                }
++            }
++        }
++    }
+ }
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/ArrayAnnotationRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/ArrayAnnotationRuleTest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/ArrayAnnotationRuleTest.kt
+@@ -0,0 +1,34 @@
++package com.pinterest.ktlint.ruleset.standard
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++class ArrayAnnotationRuleTest {
++    private val annotationRuleAssertThat = assertThatRule { AnnotationRule() }
++
++    @Test
++    fun `Given an array annotation and the annotated construct is on the same line, then violation is triggered`() {
++        val code = """
++            @[JvmStatic Provides] fun foo() = 42
++        """.trimIndent()
++        val formattedCode = """
++            @[JvmStatic Provides]
++            fun foo() = 42
++        """.trimIndent()
++        annotationRuleAssertThat(code)
++            .hasLintViolation(1, 1, "Array annotation (@[…]) must be placed on a separate line prior to the annotated construct")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given an array annotation already on a separate line then no violation occurs`() {
++        val code = """
++            @[JvmStatic Provides]
++            fun foo() = 42
++        """.trimIndent()
++        annotationRuleAssertThat(code)
++            .hasNoLintViolations()
++    }
++}
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

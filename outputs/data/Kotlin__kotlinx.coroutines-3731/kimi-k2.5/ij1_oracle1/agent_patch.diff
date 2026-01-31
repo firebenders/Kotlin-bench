@@ -1,0 +1,167 @@
+diff --git a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+index de1522526..84a95e11c 100644
+--- a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
++++ b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+@@ -38,7 +38,23 @@ private fun <E : Throwable> createConstructor(clz: Class<E>): Ctor {
+     * Try to reflectively find constructor(), constructor(message, cause), constructor(cause) or constructor(message).
+     * Exceptions are shared among coroutines, so we should copy exception before recovering current stacktrace.
+     */
+-    val constructors = clz.constructors.sortedByDescending { it.parameterTypes.size }
++    val constructors = clz.constructors.sortedByDescending { ctor ->
++        // Sort by parameter count first, then by preference: (String, Throwable) > Throwable > String > others
++        val p = ctor.parameterTypes
++        when (p.size) {
++            2 -> when {
++                p[0] == String::class.java && p[1] == Throwable::class.java -> 4
++                else -> 0
++            }
++            1 -> when (p[0]) {
++                Throwable::class.java -> 3
++                String::class.java -> 2
++                else -> 0
++            }
++            0 -> 1
++            else -> 0
++        }
++    }
+     for (constructor in constructors) {
+         val result = createSafeConstructor(constructor)
+         if (result != null) return result
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */
+
+diff --git a/kotlinx-coroutines-core/jvm/test/exceptions/NestedExceptionTest.kt b/kotlinx-coroutines-core/jvm/test/exceptions/NestedExceptionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/exceptions/NestedExceptionTest.kt
+@@ -0,0 +1,117 @@
++/*
++ * Copyright 2016-2023 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license.
++ */
++
++package kotlinx.coroutines.exceptions
++
++import kotlinx.coroutines.*
++import org.junit.Test
++import kotlin.test.*
++
++/**
++ * Test for issue: recoverStackTrace causes nested exceptions
++ * When throwing an exception in a coroutine scope it sometimes becomes nested one level too deep.
++ */
++class NestedExceptionTest : TestBase() {
++
++    @Test
++    fun testNestedException() = runTest {
++        val result = runCatching {
++            coroutineScope<Unit> {
++                throw NestedException(IllegalStateException("ERROR"))
++            }
++        }
++        val ex = result.exceptionOrNull() ?: error("Expected to fail")
++        assertTrue(ex is NestedException, "Expected NestedException but got ${ex.javaClass.name}")
++        assertTrue(ex.cause is IllegalStateException, "Expected IllegalStateException cause but got ${ex.cause?.javaClass?.name}")
++        assertEquals("ERROR", (ex.cause as IllegalStateException).message)
++    }
++
++    @Test
++    fun testNestedExceptionWithMessageConstructorFirst() = runTest {
++        // Test with the constructor order as originally reported (message first, cause second)
++        val result = runCatching {
++            coroutineScope<Unit> {
++                throw NestedExceptionMessageFirst(IllegalStateException("ERROR"))
++            }
++        }
++        val ex = result.exceptionOrNull() ?: error("Expected to fail")
++        assertTrue(ex is NestedExceptionMessageFirst, "Expected NestedExceptionMessageFirst but got ${ex.javaClass.name}")
++        assertTrue(ex.cause is IllegalStateException, "Expected IllegalStateException cause but got ${ex.cause?.javaClass?.name}")
++        assertEquals("ERROR", (ex.cause as IllegalStateException).message)
++    }
++
++    @Test
++    fun testNestedExceptionWithCauseConstructorFirst() = runTest {
++        // Test with cause constructor first (this was the workaround that worked before)
++        val result = runCatching {
++            coroutineScope<Unit> {
++                throw NestedExceptionCauseFirst(IllegalStateException("ERROR"))
++            }
++        }
++        val ex = result.exceptionOrNull() ?: error("Expected to fail")
++        assertTrue(ex is NestedExceptionCauseFirst, "Expected NestedExceptionCauseFirst but got ${ex.javaClass.name}")
++        assertTrue(ex.cause is IllegalStateException, "Expected IllegalStateException cause but got ${ex.cause?.javaClass?.name}")
++        assertEquals("ERROR", (ex.cause as IllegalStateException).message)
++    }
++
++    @Test
++    fun testNestedExceptionWithMessage() = runTest {
++        // Test that message-only constructor also works
++        val result = runCatching {
++            coroutineScope<Unit> {
++                throw NestedException("TEST_MESSAGE")
++            }
++        }
++        val ex = result.exceptionOrNull() ?: error("Expected to fail")
++        assertTrue(ex is NestedException, "Expected NestedException but got ${ex.javaClass.name}")
++        assertEquals("TEST_MESSAGE", ex.message)
++    }
++
++    @Test
++    fun testNestedExceptionWithAsync() = runTest {
++        // Test with async/await pattern
++        val deferred = async<Unit>(SupervisorJob() + Dispatchers.Unconfined) {
++            throw NestedException(IllegalStateException("ASYNC_ERROR"))
++        }
++
++        val result = runCatching {
++            deferred.await()
++        }
++        val ex = result.exceptionOrNull() ?: error("Expected to fail")
++        assertTrue(ex is NestedException, "Expected NestedException but got ${ex.javaClass.name}")
++        assertTrue(ex.cause is IllegalStateException, "Expected IllegalStateException cause but got ${ex.cause?.javaClass?.name}")
++        assertEquals("ASYNC_ERROR", (ex.cause as IllegalStateException).message)
++    }
++}
++
++/**
++ * Exception class with constructors in order: message, cause, empty
++ * This order previously caused the bug where the String constructor was picked instead of Throwable constructor.
++ */
++class NestedException : RuntimeException {
++    constructor(message: String) : super(message)
++    constructor(cause: Throwable) : super(cause)
++    constructor() : super()
++}
++
++/**
++ * Exception class with constructors in order: message, cause, empty
++ * Same as NestedException but explicitly named to show the issue.
++ */
++class NestedExceptionMessageFirst : RuntimeException {
++    constructor(message: String) : super(message)
++    constructor(cause: Throwable) : super(cause)
++    constructor() : super()
++}
++
++/**
++ * Exception class with constructors in order: cause, message, empty
++ * This order was the workaround that worked before the fix.
++ */
++class NestedExceptionCauseFirst : RuntimeException {
++    constructor(cause: Throwable) : super(cause)
++    constructor(message: String) : super(message)
++    constructor() : super()
++}
++

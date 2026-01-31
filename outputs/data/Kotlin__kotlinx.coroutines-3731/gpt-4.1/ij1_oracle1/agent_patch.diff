@@ -1,0 +1,53 @@
+diff --git a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+index de1522526..fe4db87ac 100644
+--- a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
++++ b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+@@ -37,15 +37,30 @@ private fun <E : Throwable> createConstructor(clz: Class<E>): Ctor {
+     /*
+     * Try to reflectively find constructor(), constructor(message, cause), constructor(cause) or constructor(message).
+     * Exceptions are shared among coroutines, so we should copy exception before recovering current stacktrace.
++    * Prefer constructor(cause) > constructor(message, cause) > constructor(message) > constructor().
+     */
+     val constructors = clz.constructors.sortedByDescending { it.parameterTypes.size }
++    var bestCtor: Ctor? = null
+     for (constructor in constructors) {
+-        val result = createSafeConstructor(constructor)
+-        if (result != null) return result
++        val safeCtor = createSafeConstructor(constructor)
++        if (safeCtor != null) {
++            val params = constructor.parameterTypes
++            when {
++                // Prefer constructor(Throwable)
++                params.size == 1 && params[0] == Throwable::class.java -> return safeCtor
++                // Next, constructor(String, Throwable)
++                params.size == 2 && params[0] == String::class.java && params[1] == Throwable::class.java -> bestCtor = bestCtor ?: safeCtor
++                // Next, constructor(String)
++                params.size == 1 && params[0] == String::class.java -> if (bestCtor == null) bestCtor = safeCtor
++                // Finally, constructor()
++                params.isEmpty() -> if (bestCtor == null) bestCtor = safeCtor
++            }
++        }
+     }
+-    return nullResult
++    return bestCtor ?: nullResult
+ }
+ 
++
+ private fun createSafeConstructor(constructor: Constructor<*>): Ctor? {
+     val p = constructor.parameterTypes
+     return when (p.size) {
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */

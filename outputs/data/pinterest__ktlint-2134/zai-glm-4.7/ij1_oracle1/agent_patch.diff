@@ -1,5 +1,5 @@
 diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
-index dbed1796..3b7504f9 100644
+index dbed1796..b773bdc7 100644
 --- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
 +++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
 @@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
@@ -18,85 +18,222 @@ index dbed1796..3b7504f9 100644
  import com.pinterest.ktlint.rule.engine.core.api.prevSibling
  import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceBeforeMe
  import com.pinterest.ktlint.ruleset.standard.StandardRule
-@@ -118,7 +120,10 @@ public class BinaryExpressionWrappingRule :
+@@ -117,6 +119,7 @@ public class BinaryExpressionWrappingRule :
+                 // (each) binary expression inside such a literal seems to create more chaos than it resolves.
                  binaryExpression.parent { it.elementType == LONG_STRING_TEMPLATE_ENTRY } == null
              }?.takeIf { it.isOnLineExceedingMaxLineLength() }
++            ?.takeUnless { it.isElvisOperatorAtStartOfLine() }
              ?.let { operationReference ->
--                if (node.isCallExpressionFollowedByLambdaArgument() || cannotBeWrappedAtOperationReference(operationReference)) {
-+                if (node.isCallExpressionFollowedByLambdaArgument() ||
-+                    cannotBeWrappedAtOperationReference(operationReference) ||
-+                    shouldNotWrapAfterElvisOperator(operationReference)
-+                ) {
+                 if (node.isCallExpressionFollowedByLambdaArgument() || cannotBeWrappedAtOperationReference(operationReference)) {
                      // Wrapping after operation reference might not be the best place in case of a call expression or just won't work as
-                     // the left hand side still does not fit on a single line
-                     emit(operationReference.startOffset, "Line is exceeding max line length", false)
-@@ -158,6 +163,41 @@ public class BinaryExpressionWrappingRule :
+@@ -158,6 +161,23 @@ public class BinaryExpressionWrappingRule :
              }
              ?: false
  
 +    /**
-+     * Checks whether wrapping should be avoided after an elvis operator.
-+     *
-+     * When the right-hand side of an elvis operator is already on a new line, wrapping after the operator
-+     * would cause the line to end with the elvis operator. This creates an endless loop because:
-+     * 1. BinaryExpressionWrappingRule wraps after the elvis operator
-+     * 2. ChainWrappingRule detects the line ending with elvis operator and moves it to the next line
-+     * 3. This causes the line to exceed max_line_length again
-+     * 4. BinaryExpressionWrappingRule wraps again
-+     * 5. Endless loop
++     * Checks if the operation reference is an elvis operator at the start of a line.
++     * This case needs to be skipped to avoid an endless loop with ChainWrappingRule.
++     * ChainWrappingRule moves the elvis operator to a new line, and if BinaryExpressionWrappingRule
++     * tries to wrap after it again, they will conflict in an endless loop.
 +     */
-+    private fun shouldNotWrapAfterElvisOperator(operationReference: ASTNode): Boolean {
-+        // Check if this is an elvis operator
-+        if (operationReference.firstChildLeafOrSelf().elementType != ELVIS) {
++    private fun ASTNode.isElvisOperatorAtStartOfLine(): Boolean {
++        if (elementType != OPERATION_REFERENCE) {
 +            return false
 +        }
-+
-+        // Check if the right-hand side is already on a new line
-+        val nextSibling = operationReference.nextSibling() ?: return false
-+        val nextSiblingFirstLeaf = nextSibling.firstChildLeafOrSelf()
-+
-+        // Look for whitespace before the next sibling
-+        var node: ASTNode? = nextSiblingFirstLeaf
-+        while (node != null && node != operationReference) {
-+            if (node.textContains('\n')) {
-+                // The right-hand side is already on a new line, so wrapping after the elvis operator
-+                // would cause the line to end with the elvis operator
-+                return true
-+            }
-+            node = node.prevLeaf()
++        if (firstChildLeafOrSelf().elementType != ELVIS) {
++            return false
 +        }
-+
-+        return false
++        // Check if the elvis operator is at the start of a line
++        return prevLeaf()?.textContains('\n') == true
 +    }
 +
      private fun ASTNode.isOnLineExceedingMaxLineLength() = leavesOnLine().lengthWithoutNewlinePrefix() > maxLineLength
  
      private fun Sequence<ASTNode>.lengthWithoutNewlinePrefix() =
 diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
-index c8e3a9f7..732fefed 100644
+index c8e3a9f7..20ab37f3 100644
 --- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
 +++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRuleTest.kt
-@@ -309,4 +309,20 @@ class BinaryExpressionWrappingRuleTest {
+@@ -309,4 +309,24 @@ class BinaryExpressionWrappingRuleTest {
              .addAdditionalRuleProvider { WrappingRule() }
              .hasLintViolationWithoutAutoCorrect(3, 17, "Line is exceeding max line length")
      }
 +
 +    @Test
-+    fun `Given an elvis operator with right-hand side on new line, and it exceeds max line length, then do not wrap after elvis operator to avoid endless loop`() {
++    fun `Given a binary expression with elvis operator that exceeds max line length, wrap before operator`() {
 +        val code =
 +            """
-+            // $MAX_LINE_LENGTH_MARKER                         $EOL_CHAR
++            // $MAX_LINE_LENGTH_MARKER                 $EOL_CHAR
++            val foo = bar ?: throw UnsupportedOperationException("xxxxxxxxxxx")
++            """.trimIndent()
++        val formattedCode =
++            """
++            // $MAX_LINE_LENGTH_MARKER                 $EOL_CHAR
 +            val foo =
 +                bar
-+                    ?:
-+                    throw UnsupportedOperationException("xxxxxxxxxxx")
++                    ?: throw UnsupportedOperationException("xxxxxxxxxxx")
 +            """.trimIndent()
 +        binaryExpressionWrappingRuleAssertThat(code)
 +            .setMaxLineLength()
 +            .addAdditionalRuleProvider { ChainWrappingRule() }
-+            .hasLintViolationWithoutAutoCorrect(4, 21, "Line is exceeding max line length")
++            .isFormattedAs(formattedCode)
 +    }
  }
+
+diff --git a/BinaryExpressionWrappingRuleElvisTest.kt b/BinaryExpressionWrappingRuleElvisTest.kt
+new file mode 100644
+--- /dev/null
++++ b/BinaryExpressionWrappingRuleElvisTest.kt
+@@ -0,0 +1,1 @@
++
+
+diff --git a/FIX_SUMMARY.md b/FIX_SUMMARY.md
+new file mode 100644
+--- /dev/null
++++ b/FIX_SUMMARY.md
+@@ -0,0 +1,52 @@
++# Fix for Endless Loop in Binary Expression Wrapping After Elvis Operator
++
++## Issue
++Fixed an endless loop issue in ktlint 0.50.0 that occurred when formatting code with elvis operator (`?:`) and long expressions.
++
++## Root Cause
++The endless loop occurred due to conflicting behavior between two rules:
++1. **ChainWrappingRule**: Detects `?:` at the end of a line and moves it to the start of the next line
++2. **BinaryExpressionWrappingRule**: Sees the long line with `?:` and tries to wrap after the operator
++
++This created a cycle where each rule kept undoing the other's changes.
++
++## Solution
++Modified `BinaryExpressionWrappingRule` to detect when an elvis operator is already at the start of a line (positioned by ChainWrappingRule) and skip wrapping in that case.
++
++## Files Changed
++
++### 1. BinaryExpressionWrappingRule.kt
++- **Added imports**: `ELVIS` and `prevLeaf`
++- **Added condition**: `.takeUnless { it.isElvisOperatorAtStartOfLine() }` at line 122
++- **Added helper function**: `isElvisOperatorAtStartOfLine()` to check if an elvis operator is at line start
++
++### 2. BinaryExpressionWrappingRuleTest.kt
++- **Added test**: "Given a binary expression with elvis operator that exceeds max line length, wrap before operator"
++
++## Verification
++- ✅ All existing tests pass
++- ✅ New test case passes  
++- ✅ Code compiles successfully
++- ✅ No endless loops occur during formatting
++
++## Example
++**Before the fix**: The following code would cause endless looping
++```kotlin
++val foo =
++    bar
++        ?:
++        throw UnsupportedOperationException("xxxxxxxxxxx")
++```
++
++**After the fix**: The code formats correctly to:
++```kotlin
++val foo =
++    bar
++        ?: throw UnsupportedOperationException("xxxxxxxxxxx")
++```
++
++## Impact
++- Minimal change that doesn't affect existing functionality
++- Fixes the reported endless loop issue
++- Maintains correct formatting behavior for elvis operators
++
+
+diff --git a/SOLUTION_SUMMARY.md b/SOLUTION_SUMMARY.md
+new file mode 100644
+--- /dev/null
++++ b/SOLUTION_SUMMARY.md
+@@ -0,0 +1,84 @@
++# Fix for Endless Loop in Binary Expression Wrapping After Elvis Operator
++
++## Problem
++When formatting Kotlin code with elvis operator (`?:`) and long expressions that exceed max line length, an endless loop occurs between `BinaryExpressionWrappingRule` and `ChainWrappingRule`.
++
++### Example Code
++```kotlin
++val foo =
++    bar
++        ?:
++        throw UnsupportedOperationException("xxxxxxxxxxx")
++```
++
++With `.editorconfig`:
++```
++max_line_length = 60
++ktlint_code_style = ktlint_official
++ktlint_experimental = enabled
++ktlint_standard = enabled
++```
++
++### Root Cause
++1. `ChainWrappingRule` detects `?:` at the end of a line and moves it to the start of the next line
++2. This creates: `bar\n        ?: throw UnsupportedOperationException(...)` (merging last two lines)
++3. `BinaryExpressionWrappingRule` sees the line with `?: throw` which exceeds `max_line_length` and tries to wrap after `?:` again
++4. This creates an endless loop
++
++## Solution
++Modified `BinaryExpressionWrappingRule` to detect when an elvis operator is at the start of a line (indicating it was positioned there by `ChainWrappingRule`) and skip wrapping to avoid the conflict.
++
++### Changes Made
++
++1. **BinaryExpressionWrappingRule.kt**:
++   - Added import for `ElementType.ELVIS`
++   - Added import for `prevLeaf`
++   - Added condition in `visitOperationReference` to skip wrapping if the operation reference is an elvis operator at the start of a line
++   - Added new helper function `isElvisOperatorAtStartOfLine()` to check this condition
++
++2. **BinaryExpressionWrappingRuleTest.kt**:
++   - Added new test case "Given a binary expression with elvis operator that exceeds max line length, wrap before operator" to verify the fix
++
++### Code Changes
++
++#### In BinaryExpressionWrappingRule.kt:
++```kotlin
++// Added imports
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
++import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
++
++// Added condition in visitOperationReference (around line 119)
++?.takeUnless { it.isElvisOperatorAtStartOfLine() }
++?.let { operationReference -> ... }
++
++// Added helper function (around line 142)
++/**
++ * Checks if the operation reference is an elvis operator at the start of a line.
++ * This case needs to be skipped to avoid an endless loop with ChainWrappingRule.
++ * ChainWrappingRule moves the elvis operator to a new line, and if BinaryExpressionWrappingRule
++ * tries to wrap after it again, they will conflict in an endless loop.
++ */
++private fun ASTNode.isElvisOperatorAtStartOfLine(): Boolean {
++    if (elementType != OPERATION_REFERENCE) {
++        return false
++    }
++    if (firstChildLeafOrSelf().elementType != ELVIS) {
++        return false
++    }
++    // Check if the elvis operator is at the start of a line
++    return prevLeaf()?.textContains('\n') == true
++}
++```
++
++## Test Results
++- All existing tests pass
++- New test case verifies the endless loop is prevented
++- The original issue code now formats correctly without endless looping
++
++## Verification
++The fix ensures that:
++1. `ChainWrappingRule` can still move elvis operators to new lines as needed
++2. `BinaryExpressionWrappingRule` detects when an elvis operator is at the start of a line and skips wrapping
++3. The resulting code format is stable after repeated formatting runs
++4. No endless loops occur during formatting
++
 
 diff --git a/local.properties b/local.properties
 new file mode 100644
@@ -104,4 +241,11 @@ new file mode 100644
 +++ b/local.properties
 @@ -0,0 +1,2 @@
 +sdk.dir=/root/android-sdk
++
+
+diff --git a/test_elvis_wrapper.kt b/test_elvis_wrapper.kt
+new file mode 100644
+--- /dev/null
++++ b/test_elvis_wrapper.kt
+@@ -0,0 +1,1 @@
 +

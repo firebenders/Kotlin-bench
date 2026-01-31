@@ -1,0 +1,153 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
+index a69565f211e..6771b2bca15 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
+@@ -7,7 +7,6 @@ import android.graphics.drawable.Drawable
+ import android.text.SpannableStringBuilder
+ import android.text.style.ImageSpan
+ import android.view.LayoutInflater
+-import android.view.Menu
+ import android.view.View
+ import android.view.ViewGroup
+ import android.view.ViewTreeObserver
+@@ -21,6 +20,7 @@ import androidx.annotation.LayoutRes
+ import androidx.constraintlayout.widget.ConstraintLayout
+ import androidx.core.content.ContextCompat
+ import androidx.core.graphics.drawable.DrawableCompat
++import androidx.core.view.MenuCompat
+ import androidx.recyclerview.widget.RecyclerView
+ import org.wordpress.android.R
+ import org.wordpress.android.WordPress
+@@ -36,12 +36,18 @@ import org.wordpress.android.viewmodel.posts.PostListItemAction
+ import org.wordpress.android.viewmodel.posts.PostListItemType.PostListItemUiState
+ import org.wordpress.android.viewmodel.posts.PostListItemUiStateData
+ import org.wordpress.android.viewmodel.uistate.ProgressBarUiState
++import org.wordpress.android.widgets.PostListButtonType
+ import java.util.concurrent.atomic.AtomicBoolean
+ import android.R as AndroidR
+ 
+ const val POST_LIST_ICON_PADDING = 8
+ const val MAX_TITLE_EXCERPT_LINES = 2
+ 
++private const val MENU_GROUP_PRIMARY = 0
++private const val MENU_GROUP_MANAGE = 1
++private const val MENU_GROUP_OFFLINE = 2
++private const val MENU_GROUP_DESTRUCTIVE = 3
++
+ sealed class PostListItemViewHolder(
+     @LayoutRes layout: Int,
+     parent: ViewGroup,
+@@ -150,8 +156,30 @@ sealed class PostListItemViewHolder(
+         moreButton.setOnClickListener { onMoreClicked(actions, moreButton) }
+     }
+ 
++    private fun getMenuItemGroupId(buttonType: PostListButtonType): Int {
++        return when (buttonType) {
++            PostListButtonType.BUTTON_EDIT,
++            PostListButtonType.BUTTON_PUBLISH,
++            PostListButtonType.BUTTON_SUBMIT,
++            PostListButtonType.BUTTON_SYNC,
++            PostListButtonType.BUTTON_RETRY,
++            PostListButtonType.BUTTON_PREVIEW,
++            PostListButtonType.BUTTON_VIEW,
++            PostListButtonType.BUTTON_STATS -> MENU_GROUP_PRIMARY
++            PostListButtonType.BUTTON_COPY,
++            PostListButtonType.BUTTON_COPY_URL,
++            PostListButtonType.BUTTON_MOVE_TO_DRAFT,
++            PostListButtonType.BUTTON_PROMOTE_WITH_BLAZE -> MENU_GROUP_MANAGE
++            PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD -> MENU_GROUP_OFFLINE
++            PostListButtonType.BUTTON_TRASH,
++            PostListButtonType.BUTTON_DELETE,
++            PostListButtonType.BUTTON_DELETE_PERMANENTLY -> MENU_GROUP_DESTRUCTIVE
++            else -> MENU_GROUP_PRIMARY
++        }
++    }
++
+     private fun updatePostInfoLabel(view: TextView, uiStrings: List<UiString>?) {
+-        val concatenatedText = uiStrings?.joinToString(separator = "  ·  ") {
++val concatenatedText = uiStrings?.joinToString(separator = "  ·  ") {
+             uiHelpers.getTextOfUiString(view.context, it)
+         }
+         uiHelpers.setTextOrHide(view, concatenatedText)
+@@ -159,11 +187,12 @@ sealed class PostListItemViewHolder(
+ 
+     protected fun onMoreClicked(actions: List<PostListItemAction>, v: View) {
+         val menu = PopupMenu(v.context, v)
+-        actions.forEach { singleItemAction ->
++        MenuCompat.setGroupDividerEnabled(menu.menu, true)
++        actions.forEachIndexed { index, singleItemAction ->
+             val menuItem = menu.menu.add(
+-                Menu.NONE,
++                getMenuItemGroupId(singleItemAction.buttonType),
+                 singleItemAction.buttonType.value,
+-                Menu.NONE,
++                index,
+                 getMenuItemTitleWithIcon(v.context, singleItemAction)
+             )
+             menuItem.setOnMenuItemClickListener {
+diff --git a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+index 5e3eed9be28..77503610bbd 100644
+--- a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
++++ b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+@@ -113,8 +113,9 @@ class PostListItemUiStateHelper @Inject constructor(
+                 post
+             ),
+         )
++        val orderedButtonTypes = orderButtonTypes(postStatus, buttonTypes)
+         // val defaultActions = createDefaultViewActions(buttonTypes, onButtonClicked)
+-        val moreActions = createMoreActions(buttonTypes, onButtonClicked)
++        val moreActions = createMoreActions(orderedButtonTypes, onButtonClicked)
+ 
+         val remotePostId = RemotePostId(RemoteId(post.remotePostId))
+         val localPostId = LocalPostId(LocalId(post.id))
+@@ -489,11 +490,49 @@ class PostListItemUiStateHelper @Inject constructor(
+         }
+     }
+ 
++    private fun orderButtonTypes(
++        postStatus: PostStatus,
++        buttonTypes: List<PostListButtonType>
++    ): List<PostListButtonType> {
++        val primaryOrder = when (postStatus) {
++            TRASHED -> listOf(BUTTON_MOVE_TO_DRAFT)
++            PUBLISHED -> listOf(BUTTON_VIEW, BUTTON_STATS, BUTTON_EDIT)
++            else -> listOf(BUTTON_EDIT)
++        }
++        val publishOrder = listOf(BUTTON_RETRY, BUTTON_SYNC, BUTTON_PUBLISH, BUTTON_SUBMIT)
++        val viewOrder = listOf(BUTTON_PREVIEW, BUTTON_VIEW, BUTTON_STATS)
++        val manageOrder = listOf(
++            BUTTON_COPY,
++            BUTTON_COPY_URL,
++            BUTTON_PROMOTE_WITH_BLAZE,
++            BUTTON_MOVE_TO_DRAFT
++        )
++        val offlineOrder = listOf(BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
++        val destructiveOrder = listOf(BUTTON_TRASH, BUTTON_DELETE, BUTTON_DELETE_PERMANENTLY)
++        val fullOrder = mutableListOf<PostListButtonType>()
++        fun addUnique(types: List<PostListButtonType>) {
++            types.forEach { type ->
++                if (!fullOrder.contains(type)) {
++                    fullOrder.add(type)
++                }
++            }
++        }
++        addUnique(primaryOrder)
++        addUnique(publishOrder)
++        addUnique(viewOrder)
++        addUnique(manageOrder)
++        addUnique(offlineOrder)
++        addUnique(destructiveOrder)
++        val orderIndex = fullOrder.withIndex().associate { it.value to it.index }
++
++        return buttonTypes.sortedBy { orderIndex[it] ?: Int.MAX_VALUE }
++}
++
+     private fun createMoreActions(
+         buttonTypes: List<PostListButtonType>,
+         onButtonClicked: (PostListButtonType) -> Unit
+     ): PostListItemAction.MoreItem {
+-        val allItems = buttonTypes.map { buttonType: PostListButtonType ->
++val allItems = buttonTypes.map { buttonType: PostListButtonType ->
+             PostListItemAction.SingleItem(buttonType, onButtonClicked)
+         }
+         return PostListItemAction.MoreItem(allItems, onButtonClicked)

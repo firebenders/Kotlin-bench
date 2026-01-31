@@ -1,0 +1,73 @@
+diff --git a/kotlinx-coroutines-core/common/src/internal/Scopes.kt b/kotlinx-coroutines-core/common/src/internal/Scopes.kt
+index 7e561c83d..1979c60a6 100644
+--- a/kotlinx-coroutines-core/common/src/internal/Scopes.kt
++++ b/kotlinx-coroutines-core/common/src/internal/Scopes.kt
+@@ -27,6 +27,14 @@ internal open class ScopeCoroutine<in T>(
+         // Resume direct because scope is already in the correct context
+         uCont.resumeWith(recoverResult(state, uCont))
+     }
++
++    /**
++     * Cleans up thread context elements if they were saved for recovery.
++     * This is called when the coroutine completes without suspension in [undispatchedResult].
++     */
++    protected open fun cleanupThreadContext() {
++        // Default implementation does nothing - only UndispatchedCoroutine needs this
++    }
+ }
+ 
+ internal class ContextScope(context: CoroutineContext) : CoroutineScope {
+diff --git a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+index 254182b38..d05364637 100644
+--- a/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
++++ b/kotlinx-coroutines-core/common/src/intrinsics/Undispatched.kt
+@@ -79,7 +79,9 @@ private inline fun <T> ScopeCoroutine<T>.undispatchedResult(
+     if (result === COROUTINE_SUSPENDED) return COROUTINE_SUSPENDED // (1)
+     val state = makeCompletingOnce(result)
+     if (state === COMPLETING_WAITING_CHILDREN) return COROUTINE_SUSPENDED // (2)
+-    return if (state is CompletedExceptionally) { // (3)
++    // (3) - coroutine completed without suspension, clean up thread context if needed
++    cleanupThreadContext()
++    return if (state is CompletedExceptionally) {
+         when {
+             shouldThrow(state.cause) -> throw recoverStackTrace(state.cause, uCont)
+             result is CompletedExceptionally -> throw recoverStackTrace(result.cause, uCont)
+diff --git a/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt b/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
+index ae8275f86..5ce91f21c 100644
+--- a/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
++++ b/kotlinx-coroutines-core/jvm/src/CoroutineContext.kt
+@@ -253,6 +253,18 @@ internal actual class UndispatchedCoroutine<in T>actual constructor (
+         }
+     }
+ 
++    /**
++     * Cleans up thread context elements if they were saved for recovery.
++     * This is called when the coroutine completes without suspension in [undispatchedResult].
++     */
++    override fun cleanupThreadContext() {
++        // Remove the thread local to prevent memory leaks when the coroutine completes without suspension
++        // (i.e., when afterResume is not called)
++        if (threadLocalIsSet) {
++            threadStateToRecover.remove()
++        }
++    }
++
+     override fun afterResume(state: Any?) {
+         if (threadLocalIsSet) {
+             threadStateToRecover.get()?.let { (ctx, value) ->
+diff --git a/kotlinx-coroutines-core/native/src/CoroutineContext.kt b/kotlinx-coroutines-core/native/src/CoroutineContext.kt
+index 3f4c8d9a0..a16b520e9 100644
+--- a/kotlinx-coroutines-core/native/src/CoroutineContext.kt
++++ b/kotlinx-coroutines-core/native/src/CoroutineContext.kt
+@@ -50,4 +50,11 @@ internal actual class UndispatchedCoroutine<in T> actual constructor(
+     uCont: Continuation<T>
+ ) : ScopeCoroutine<T>(context, uCont) {
+     override fun afterResume(state: Any?) = uCont.resumeWith(recoverResult(state, uCont))
++
++    /**
++     * No-op on native - no thread context elements to clean up.
++     */
++    override fun cleanupThreadContext() {
++        // Nothing to do on native
++    }
+ }

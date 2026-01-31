@@ -11,20 +11,164 @@ index e215349c..fc871a22 100644
              }
              ?: false
  }
-diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoConsecutiveBlankLinesRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoConsecutiveBlankLinesRuleTest.kt
-index db28d360..dbf942cf 100644
---- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoConsecutiveBlankLinesRuleTest.kt
-+++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoConsecutiveBlankLinesRuleTest.kt
-@@ -212,4 +212,22 @@ class NoConsecutiveBlankLinesRuleTest {
-                 """.trimIndent(),
-             )
-     }
+
+diff --git a/NPE_FIX_EXPLANATION.md b/NPE_FIX_EXPLANATION.md
+new file mode 100644
+--- /dev/null
++++ b/NPE_FIX_EXPLANATION.md
+@@ -0,0 +1,56 @@
++# Fix for NPE on Consecutive Blank Lines in End of File
++
++## Issue Description
++The `NoConsecutiveBlankLinesRule` was throwing a NullPointerException when processing files that have:
++- A class without a body (e.g., `sealed class Hello`)
++- Followed by blank lines at the end of the file
++
++Example code that triggered NPE:
++```kotlin
++sealed class Hello
++
++
++
++```
++
++## Root Cause
++In the `isBetweenClassAndPrimaryConstructor()` function, line 65 attempted:
++```kotlin
++this.treeNext.elementType == PRIMARY_CONSTRUCTOR
++```
++
++When at the end of the file, `treeNext` returns `null`, causing a NPE when trying to access `elementType`.
++
++## Fix Applied
++Changed line 65 from:
++```kotlin
++this.treeNext.elementType == PRIMARY_CONSTRUCTOR
++```
++
++To:
++```kotlin
++this.treeNext?.elementType == PRIMARY_CONSTRUCTOR
++```
++
++Using the safe call operator (`?`) ensures:
++- If `treeNext` is not null, it compares `elementType` with `PRIMARY_CONSTRUCTOR`
++- If `treeNext` is null, the expression evaluates to `null`, making the entire function return `false`
++
++## Why This Fix Is Correct
++When at the end of the file:
++- `treeNext` being null means there's no primary constructor after the whitespace
++- The function should return `false` (not between class and primary constructor)
++- The safe call operator provides the correct null handling behavior
++
++## Testing
++The fix should pass tests with code like:
++- `sealed class Hello` followed by blank lines
++- `abstract class MyClass` followed by blank lines
++- `data class User(val name: String)` followed by blank lines
++
++All should now report violations correctly without throwing NPE.
++
++## Files Changed
++- `ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoConsecutiveBlankLinesRule.kt`
++  - Line 65: Added safe call operator to prevent NPE
++
+
+diff --git a/demo_fix.sh b/demo_fix.sh
+new file mode 100644
+--- /dev/null
++++ b/demo_fix.sh
+@@ -0,0 +1,24 @@
++#!/bin/bash
++
++# Create test file with the exact issue from the bug report
++cat > /tmp/dummy.kt << 'EOF'
++sealed class Hello
++
++
++
++EOF
++
++echo "Running ktlint on the test file that previously caused NPE..."
++./ktlint-cli/build/install/ktlint/bin/ktlint /tmp/dummy.kt
++
++EXIT_CODE=$?
++
++if [ $EXIT_CODE -eq 0 ]; then
++    echo "✓ SUCCESS: No NPE occurred!"
++else
++    echo "Note: Exit code $EXIT_CODE (may report violations, but should not crash with NPE)"
++fi
++
++echo ""
++echo "Test completed."
++
+
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoConsecutiveBlankLinesRuleNPETest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoConsecutiveBlankLinesRuleNPETest.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoConsecutiveBlankLinesRuleNPETest.kt
+@@ -0,0 +1,1 @@
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++
+
+diff --git a/test_npe_fix.kt b/test_npe_fix.kt
+new file mode 100644
+--- /dev/null
++++ b/test_npe_fix.kt
+@@ -0,0 +1,2 @@
++sealed class Hello
++
+
+diff --git a/test_npe_test.kt b/test_npe_test.kt
+new file mode 100644
+--- /dev/null
++++ b/test_npe_test.kt
+@@ -0,0 +1,87 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.test.KtLintAssertThat.Companion.assertThatRule
++import com.pinterest.ktlint.test.LintViolation
++import org.junit.jupiter.api.Test
++
++/**
++ * Test for NPE fix on consecutive blank lines at end of file with class without body.
++ * This test verifies that the rule handles the edge case where treeNext is null
++ * when checking if we're between a class and primary constructor.
++ */
++class NoConsecutiveBlankLinesRuleNPETest {
++    private val noConsecutiveBlankLinesRuleAssertThat = assertThatRule { NoConsecutiveBlankLinesRule() }
 +
 +    @Test
-+    fun `Given consecutive blank lines at end of file with class without body then do return lint errors`() {
++    fun `Given a sealed class without body followed by blank lines at EOF should not throw NPE`() {
 +        val code =
 +            """
 +            sealed class Hello
++
++            """.trimIndent()
++        val formattedCode =
++            """
++            sealed class Hello
++
++            """.trimIndent()
++        noConsecutiveBlankLinesRuleAssertThat(code)
++            .hasLintViolation(2, 1, "Needless blank line(s)")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a class without body followed by three blank lines at EOF should not throw NPE`() {
++        val code =
++            """
++            sealed class Hello
++
 +
 +
 +            """.trimIndent()
@@ -37,12 +181,41 @@ index db28d360..dbf942cf 100644
 +            .hasLintViolation(2, 1, "Needless blank line(s)")
 +            .isFormattedAs(formattedCode)
 +    }
- }
-
-diff --git a/local.properties b/local.properties
-new file mode 100644
---- /dev/null
-+++ b/local.properties
-@@ -0,0 +1,2 @@
-+sdk.dir=/root/android-sdk
++
++    @Test
++    fun `Given an abstract class without body followed by blank lines at EOF should not throw NPE`() {
++        val code =
++            """
++            abstract class MyAbstractClass
++
++
++
++            """.trimIndent()
++        val formattedCode =
++            """
++            abstract class MyAbstractClass
++
++            """.trimIndent()
++        noConsecutiveBlankLinesRuleAssertThat(code)
++            .hasLintViolation(2, 1, "Needless blank line(s)")
++            .isFormattedAs(formattedCode)
++    }
++
++    @Test
++    fun `Given a data class without body followed by blank lines at EOF should not throw NPE`() {
++        val code =
++            """
++            data class User(val name: String)
++
++            """.trimIndent()
++        val formattedCode =
++            """
++            data class User(val name: String)
++
++            """.trimIndent()
++        noConsecutiveBlankLinesRuleAssertThat(code)
++            .hasLintViolation(2, 1, "Needless blank line(s)")
++            .isFormattedAs(formattedCode)
++    }
++}
 +

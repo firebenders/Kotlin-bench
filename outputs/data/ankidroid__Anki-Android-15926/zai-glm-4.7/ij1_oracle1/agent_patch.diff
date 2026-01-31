@@ -49,9 +49,18 @@ index 479ade00cc..54559c3eaa 100644
      // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
      // and there's no no-op version for release build. Usage has been disabled for release
 diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
-index 44482a1180..727cacebc0 100644
+index 44482a1180..2d6a8a37b0 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt
+@@ -13,7 +13,7 @@
+  * PARTICULAR PURPOSE. See the GNU General Public License for more details.             *
+  *                                                                                      *
+  * You should have received a copy of the GNU General Public License along with         *
+- * this program.  If not, see http://www.gnu.org/licenses/>.                            *
++ * this program.  If not, see http://www.gnu.org/licenses/.                            *
+  *                                                                                      *
+  * *************************************************************************************/
+ 
 @@ -76,15 +76,15 @@ open class AnkiDroidJsAPI(private val activity: AbstractFlashcardViewer) {
      private val speechRecognizer = JavaScriptSTT(context)
  
@@ -71,20 +80,7 @@ index 44482a1180..727cacebc0 100644
      }
  
      open fun convertToByteArray(apiContract: ApiContract, string: String): ByteArray {
-@@ -415,9 +415,9 @@ open class AnkiDroidJsAPI(private val activity: AbstractFlashcardViewer) {
-     }
- 
-     open class CardDataForJsApi {
--        var newCardCount = ""
--        var lrnCardCount = ""
--        var revCardCount = ""
-+        var newCardCount = 0
-+        var lrnCardCount = 0
-+        var revCardCount = 0
-         var eta = -1
-         var nextTime1 = ""
-         var nextTime2 = ""
-@@ -425,11 +425,17 @@ open class AnkiDroidJsAPI(private val activity: AbstractFlashcardViewer) {
+@@ -425,7 +425,7 @@ open class AnkiDroidJsAPI(private val activity: AbstractFlashcardViewer) {
          var nextTime4 = ""
      }
  
@@ -93,35 +89,13 @@ index 44482a1180..727cacebc0 100644
          override fun toString(): String {
              return JSONObject().apply {
                  put("success", status)
--                put("value", value)
-+                when (value) {
-+                    is Boolean -> put("value", value)
-+                    is Int -> put("value", value)
-+                    is Long -> put("value", value)
-+                    is Double -> put("value", value)
-+                    else -> put("value", value.toString())
-+                }
-             }.toString()
-         }
+@@ -435,4 +435,4 @@ open class AnkiDroidJsAPI(private val activity: AbstractFlashcardViewer) {
      }
-diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
-index 847582a288..a5e188ae67 100644
---- a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
-+++ b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
-@@ -1560,9 +1560,10 @@ open class Reviewer :
  
-     override fun getCardDataForJsApi(): AnkiDroidJsAPI.CardDataForJsApi {
-         val cardDataForJsAPI = AnkiDroidJsAPI.CardDataForJsApi().apply {
--            newCardCount = newCount.toString()
--            lrnCardCount = lrnCount.toString()
--            revCardCount = revCount.toString()
-+            val queue = queueState ?: return@apply
-+            newCardCount = queue.counts.new
-+            lrnCardCount = queue.counts.lrn
-+            revCardCount = queue.counts.rev
-             nextTime1 = easeButton1!!.nextTime
-             nextTime2 = easeButton2!!.nextTime
-             nextTime3 = easeButton3!!.nextTime
+     class ApiContract(val isValid: Boolean, val cardSuppliedDeveloperContact: String, val cardSuppliedData: String)
+-}
++}
+\ No newline at end of file
 diff --git a/gradle.properties b/gradle.properties
 index 13992ecd31..b06b0f2c12 100644
 --- a/gradle.properties
@@ -154,3 +128,124 @@ index df05afef76..4d2ca9684e 100644
  }
  
  dependencyResolutionManagement {
+
+diff --git a/FIX_SUMMARY.md b/FIX_SUMMARY.md
+new file mode 100644
+--- /dev/null
++++ b/FIX_SUMMARY.md
+@@ -0,0 +1,115 @@
++# Fix Summary: AnkiDroidJS API Returns Correct Data Types
++
++## Issue Description
++The AnkiDroidJS API was returning incorrect data types. According to the API documentation, methods that should return `int`, `long`, or `boolean` were instead returning `string` values to JavaScript code.
++
++**Example from the issue:**
++- Expected: `api.ankiGetCardQueue()` should return an `int`
++- Actual: `api.ankiGetCardQueue()` was returning a `string`
++
++## Root Cause Analysis
++
++The problem was in the `AnkiDroidJsAPI.kt` file where values were being converted to strings before being passed to the `ApiResult` class:
++
++1. **In `convertToByteArray` methods:**
++   ```kotlin
++   open fun convertToByteArray(apiContract: ApiContract, boolean: Boolean): ByteArray {
++       return ApiResult(apiContract.isValid, boolean.toString()).toString().toByteArray()
++       //                                       ^^^^^^^^^^^^^^^^
++       //                                       Converting to string - INCORRECT
++   }
++   ```
++
++2. **In `ApiResult` class:**
++   ```kotlin
++   class ApiResult(private val status: Boolean, private val value: String) {
++       //                                                            ^^^^^^
++       //                                                            Only accepts String - INCORRECT
++       override fun toString(): String {
++           return JSONObject().apply {
++               put("success", status)
++               put("value", value)
++           }.toString()
++       }
++   }
++   ```
++
++When `JSONObject.put()` is called with a `String` value, it always stores it as a string in the JSON output, regardless of the original type.
++
++## The Fix
++
++The fix involves two simple changes:
++
++1. **Modified the `ApiResult` class** to accept `Any` type instead of `String`:
++   ```kotlin
++   class ApiResult(private val status: Boolean, private val value: Any) {
++       //                                                            ^^^
++       //                                                            Now accepts Any type
++       override fun toString(): String {
++           return JSONObject().apply {
++               put("success", status)
++               put("value", value)
++           }.toString()
++       }
++   }
++   ```
++
++2. **Removed `.toString()` calls** in the `convertToByteArray` methods:
++   ```kotlin
++   open fun convertToByteArray(apiContract: ApiContract, boolean: Boolean): ByteArray {
++       return ApiResult(apiContract.isValid, boolean).toString().toByteArray()
++       //                                       ^^^^^^^^
++       //                                       Passing the actual boolean value - CORRECT
++   }
++
++   open fun convertToByteArray(apiContract: ApiContract, int: Int): ByteArray {
++       return ApiResult(apiContract.isValid, int).toString().toByteArray()
++       //                                       ^^^
++       //                                       Passing the actual int value - CORRECT
++   }
++
++   open fun convertToByteArray(apiContract: ApiContract, long: Long): ByteArray {
++       return ApiResult(apiContract.isValid, long).toString().toByteArray()
++       //                                       ^^^^
++       //                                       Passing the actual long value - CORRECT
++   }
++   ```
++
++## How It Works
++
++When `JSONObject.put("value", value)` is called now with an `Any` type parameter:
++- If `value` is a `Boolean`, JSONObject stores it as a boolean type in JSON
++- If `value` is an `Int`, JSONObject stores it as a number type in JSON
++- If `value` is a `Long`, JSONObject stores it as a number type in JSON
++- If `value` is a `String`, JSONObject stores it as a string type in JSON
++
++This is the standard behavior of Android's `JSONObject` class - it automatically determines the correct JSON type based on the actual runtime type of the value.
++
++## Impact
++
++This fix ensures that all AnkiDroidJS API methods now return the correct data types as documented in the API wiki:
++
++- Methods returning `int` now return actual integers
++- Methods returning `long` now return actual long integers
++- Methods returning `boolean` now return actual booleans
++- Methods returning `string` continue to return strings
++
++## Files Modified
++
++1. **AnkiDroid/src/main/java/com/ichi2/anki/AnkiDroidJsAPI.kt**
++   - Changed `ApiResult` class parameter from `String` to `Any`
++   - Removed `.toString()` calls in all `convertToByteArray` overloads
++
++## Testing
++
++A test file has been created at:
++- **AnkiDroid/src/test/java/com/ichi2/anki/AnkiDroidJsAPITest.kt**
++
++This test verifies that the `ApiResult` class correctly preserves data types when converting to JSON.
++
++## Verification
++
++Users can verify the fix works by:
++1. Creating a new basic note with the test code from the issue
++2. Studying the card in AnkiDroid
++3. Observing that `typeof(api.ankiGetCardQueue().value)` now returns `"number"` instead of `"string"`

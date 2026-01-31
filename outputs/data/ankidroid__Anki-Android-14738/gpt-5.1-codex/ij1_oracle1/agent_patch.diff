@@ -1,0 +1,432 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 69d3620e4a..02224bb709 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.5'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -161,9 +160,6 @@ android {
+         play {
+             dimension "appStore"
+         }
+-        amazon {
+-            dimension "appStore"
+-        }
+         // A 'full' build has no restrictions on storage/camera. Distributed on GitHub/F-Droid
+         full {
+             dimension "appStore"
+@@ -226,12 +222,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -246,12 +242,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ task installGitHook(type: Copy) {
+@@ -360,7 +350,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+     implementation 'com.github.AppIntro:AppIntro:6.3.1'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+index e9446837f2..af7b71329b 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+@@ -766,8 +766,14 @@ abstract class AbstractFlashcardViewer :
+         }
+     }
+ 
++    open fun redo(): Job {
++        return launchCatchingTask {
++            redoAndShowSnackbar(duration = Reviewer.ACTION_SNACKBAR_TIME)
++        }
++    }
++
+     private fun finishNoStorageAvailable() {
+-        this@AbstractFlashcardViewer.setResult(DeckPicker.RESULT_MEDIA_EJECTED)
++this@AbstractFlashcardViewer.setResult(DeckPicker.RESULT_MEDIA_EJECTED)
+         finish()
+     }
+ 
+@@ -1681,8 +1687,12 @@ abstract class AbstractFlashcardViewer :
+                     undo()
+                     true
+                 }
++                ViewerCommand.REDO -> {
++                    redo()
++                    true
++                }
+                 ViewerCommand.EDIT -> {
+-                    editCard(fromGesture)
++editCard(fromGesture)
+                     true
+                 }
+                 ViewerCommand.TAG -> {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
+index 300cf43fc7..7470167113 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
+@@ -323,8 +323,12 @@ open class Reviewer :
+                     undo()
+                 }
+             }
++            R.id.action_redo -> {
++                Timber.i("Reviewer:: Redo button pressed")
++                redo()
++            }
+             R.id.action_reset_card_progress -> {
+-                Timber.i("Reviewer:: Reset progress button pressed")
++Timber.i("Reviewer:: Reset progress button pressed")
+                 showResetCardDialog()
+             }
+             R.id.action_mark_card -> {
+@@ -722,8 +726,23 @@ open class Reviewer :
+         if (undoEnabled) {
+             mOnboarding.onUndoButtonEnabled()
+         }
++
++        val redoIcon = menu.findItem(R.id.action_redo)
++        val redoEnabled = colIsOpenUnsafe() && getColUnsafe.redoAvailable()
++        val redoAlpha = if (redoEnabled && super.controlBlocked !== ReviewerUi.ControlBlock.SLOW) Themes.ALPHA_ICON_ENABLED_LIGHT else Themes.ALPHA_ICON_DISABLED_LIGHT
++        redoIcon.setIcon(R.drawable.ic_redo)
++        redoIcon.setEnabled(redoEnabled).iconAlpha = redoAlpha
++        redoIcon.actionView!!.isEnabled = redoEnabled
++        if (colIsOpenUnsafe()) {
++            if (redoEnabled) {
++                redoIcon.title = getColUnsafe.redoLabel()
++            } else {
++                redoIcon.title = resources.getString(R.string.redo)
++            }
++        }
++
+         val toggleWhiteboardIcon = menu.findItem(R.id.action_toggle_whiteboard)
+-        val toggleStylusIcon = menu.findItem(R.id.action_toggle_stylus)
++val toggleStylusIcon = menu.findItem(R.id.action_toggle_stylus)
+         val hideWhiteboardIcon = menu.findItem(R.id.action_hide_whiteboard)
+         val changePenColorIcon = menu.findItem(R.id.action_change_whiteboard_pen_color)
+         // White board button
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/Undo.kt b/AnkiDroid/src/main/java/com/ichi2/anki/Undo.kt
+index 09159098ad..ef678d3968 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/Undo.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/Undo.kt
+@@ -20,7 +20,9 @@ import androidx.fragment.app.FragmentActivity
+ import anki.collection.OpChangesAfterUndo
+ import com.google.android.material.snackbar.Snackbar
+ import com.ichi2.anki.CollectionManager.TR
++import com.ichi2.anki.R
+ import com.ichi2.anki.snackbar.showSnackbar
++import com.ichi2.libanki.redo
+ import com.ichi2.libanki.undo
+ import com.ichi2.libanki.undoableOp
+ 
+@@ -42,3 +44,22 @@ suspend fun FragmentActivity.undoAndShowSnackbar(duration: Int = Snackbar.LENGTH
+         showSnackbar(message, duration)
+     }
+ }
++
++/** If there's an action available for redo, redo it and show a snackbar */
++suspend fun FragmentActivity.redoAndShowSnackbar(duration: Int = Snackbar.LENGTH_SHORT) {
++    withProgress {
++        val changes = undoableOp {
++            if (!redoAvailable()) {
++                OpChangesAfterUndo.getDefaultInstance()
++            } else {
++                redo()
++            }
++        }
++        val message = if (changes.operation.isEmpty()) {
++            getString(R.string.redo_nothing_to_redo)
++        } else {
++            getString(R.string.redo_action_redone, changes.operation)
++        }
++        showSnackbar(message, duration)
++    }
++}
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt b/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
+index a55e26f888..b5f98c8508 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
+@@ -500,8 +500,9 @@ object UsageAnalytics {
+         "binding_FLIP_OR_ANSWER_EASE3",
+         "binding_FLIP_OR_ANSWER_EASE4",
+         "binding_UNDO",
++        "binding_REDO",
+         "binding_EDIT",
+-        "binding_MARK",
++"binding_MARK",
+         "binding_BURY_CARD",
+         "binding_SUSPEND_CARD",
+         "binding_DELETE",
+@@ -553,8 +554,9 @@ object UsageAnalytics {
+         // App bar buttons
+         "reset_custom_buttons",
+         "customButtonUndo",
++        "customButtonRedo",
+         "customButtonScheduleCard",
+-        "customButtonFlag",
++"customButtonFlag",
+         "customButtonEditCard",
+         "customButtonTags",
+         "customButtonAddCard",
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
+index b851c8be28..6653ccf742 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
+@@ -40,8 +40,9 @@ enum class ViewerCommand(val resourceId: Int) {
+     FLIP_OR_ANSWER_EASE3(R.string.answer_good),
+     FLIP_OR_ANSWER_EASE4(R.string.answer_easy),
+     UNDO(R.string.undo),
++    REDO(R.string.redo),
+     EDIT(R.string.cardeditor_title_edit_card),
+-    MARK(R.string.menu_mark_note),
++MARK(R.string.menu_mark_note),
+     BURY_CARD(R.string.menu_bury_card),
+     SUSPEND_CARD(R.string.menu_suspend_card),
+     DELETE(R.string.menu_delete_note),
+@@ -157,8 +158,9 @@ enum class ViewerCommand(val resourceId: Int) {
+                 REPLAY_VOICE -> from(keyCode(KeyEvent.KEYCODE_V, CardSide.BOTH))
+                 RECORD_VOICE -> from(keyCode(KeyEvent.KEYCODE_V, CardSide.BOTH, shift()))
+                 UNDO -> from(keyCode(KeyEvent.KEYCODE_Z, CardSide.BOTH))
++                REDO -> from(keyCode(KeyEvent.KEYCODE_Z, CardSide.BOTH, shift()))
+                 TOGGLE_FLAG_RED -> from(keyCode(KeyEvent.KEYCODE_1, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_1, CardSide.BOTH, ctrl()))
+-                TOGGLE_FLAG_ORANGE -> from(keyCode(KeyEvent.KEYCODE_2, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_2, CardSide.BOTH, ctrl()))
++TOGGLE_FLAG_ORANGE -> from(keyCode(KeyEvent.KEYCODE_2, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_2, CardSide.BOTH, ctrl()))
+                 TOGGLE_FLAG_GREEN -> from(keyCode(KeyEvent.KEYCODE_3, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_3, CardSide.BOTH, ctrl()))
+                 TOGGLE_FLAG_BLUE -> from(keyCode(KeyEvent.KEYCODE_4, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_4, CardSide.BOTH, ctrl()))
+                 TOGGLE_FLAG_PINK -> from(keyCode(KeyEvent.KEYCODE_5, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_5, CardSide.BOTH, ctrl()))
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/CustomButtonsSettingsFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/CustomButtonsSettingsFragment.kt
+index 71ba923310..527906597b 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/CustomButtonsSettingsFragment.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/CustomButtonsSettingsFragment.kt
+@@ -40,8 +40,9 @@ class CustomButtonsSettingsFragment : SettingsFragment() {
+                     // Reset the settings to default
+                     requireContext().sharedPrefs().edit {
+                         remove("customButtonUndo")
++                        remove("customButtonRedo")
+                         remove("customButtonScheduleCard")
+-                        remove("customButtonEditCard")
++remove("customButtonEditCard")
+                         remove("customButtonTags")
+                         remove("customButtonAddCard")
+                         remove("customButtonReplay")
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt b/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt
+index 3bfba69ca8..786ad56c62 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt
+@@ -34,8 +34,9 @@ class ActionButtonStatus(private val reviewerUi: ReviewerUi) {
+     fun setup(preferences: SharedPreferences) {
+         // NOTE: the default values below should be in sync with preferences_custom_buttons.xml and reviewer.xml
+         setupButton(preferences, R.id.action_undo, "customButtonUndo", SHOW_AS_ACTION_ALWAYS)
++        setupButton(preferences, R.id.action_redo, "customButtonRedo", SHOW_AS_ACTION_IF_ROOM)
+         setupButton(preferences, R.id.action_schedule, "customButtonScheduleCard", SHOW_AS_ACTION_NEVER)
+-        setupButton(preferences, R.id.action_flag, "customButtonFlag", SHOW_AS_ACTION_ALWAYS)
++setupButton(preferences, R.id.action_flag, "customButtonFlag", SHOW_AS_ACTION_ALWAYS)
+         setupButton(preferences, R.id.action_tag, "customButtonTags", SHOW_AS_ACTION_NEVER)
+         setupButton(preferences, R.id.action_edit, "customButtonEditCard", SHOW_AS_ACTION_IF_ROOM)
+         setupButton(preferences, R.id.action_add_note_reviewer, "customButtonAddCard", MENU_DISABLED)
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt
+index 47b323fc73..588e04581e 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/Collection.kt
+@@ -497,8 +497,19 @@ JOIN cards AS c ON card_with_min_ord.nid = c.nid AND card_with_min_ord.ord = c.o
+         return status.undo != null
+     }
+ 
++    /** eg "Redo suspend card" if redo available */
++    fun redoLabel(): String? {
++        val action = undoStatus().redo
++        return action?.let { tr.undoRedoAction(it) }
++    }
++
++    fun redoAvailable(): Boolean {
++        val status = undoStatus()
++        return status.redo != null
++    }
++
+     open fun onCreate() {
+-        sched.useNewTimezoneCode()
++sched.useNewTimezoneCode()
+         config.set("schedVer", 2)
+         // we need to reload the scheduler: this was previously loaded as V1
+         _loadScheduler()
+diff --git a/AnkiDroid/src/main/java/com/ichi2/ui/RtlCompliantActionProvider.kt b/AnkiDroid/src/main/java/com/ichi2/ui/RtlCompliantActionProvider.kt
+index 66114d5be4..a5042bfa59 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/ui/RtlCompliantActionProvider.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/ui/RtlCompliantActionProvider.kt
+@@ -21,7 +21,6 @@ import android.widget.ImageButton
+ import androidx.annotation.VisibleForTesting
+ import androidx.appcompat.widget.TooltipCompat
+ import com.ichi2.anki.ActionProviderCompat
+-import com.ichi2.anki.R
+ 
+ /**
+  * An Rtl version of a normal action view, where the drawable is mirrored
+@@ -46,8 +45,8 @@ class RtlCompliantActionProvider(context: Context) : ActionProviderCompat(contex
+             it.isAutoMirrored = true
+             actionView.setImageDrawable(it)
+         }
+-        actionView.id = R.id.action_undo
+-        actionView.setOnClickListener {
++        actionView.id = forItem.itemId
++actionView.setOnClickListener {
+             if (!forItem.isEnabled) {
+                 return@setOnClickListener
+             }
+diff --git a/AnkiDroid/src/main/res/values/01-core.xml b/AnkiDroid/src/main/res/values/01-core.xml
+index 8e147795ff..350977115c 100644
+--- a/AnkiDroid/src/main/res/values/01-core.xml
++++ b/AnkiDroid/src/main/res/values/01-core.xml
+@@ -36,7 +36,6 @@
+     <!-- DeckPicker.kt -->
+     <string name="expand">Expand</string>
+     <string name="collapse">Collapse</string>
+-    <string name="study_more">Study more</string>
+     <plurals name="reviewer_window_title">
+         <item quantity="one">%d minute left</item>
+         <item quantity="other">%d minutes left</item>
+@@ -65,12 +64,16 @@
+     <string name="ease_button_easy">Easy</string>
+     <string name="menu_import">Import</string>
+     <string name="undo">Undo</string>
++    <string name="redo">Redo</string>
++    <string name="redo_action_redone">Redid %1$s</string>
++    <string name="redo_nothing_to_redo">Nothing to redo</string>
+     <string name="undo_action_whiteboard_last_stroke" comment="One of the display patterns of 'Undo' item on the action menu in Reviewer. It is shown as the title of the item when the whiteboard (handwriting) feature is enabled and visible and has any strokes (handwritten lines)">Undo stroke</string>
+-    <string name="move_all_to_deck">Move all to deck</string>
++<string name="move_all_to_deck">Move all to deck</string>
+     <string name="unbury">Unbury</string>
+     <string name="rename_deck">Rename deck</string>
+     <string name="create_shortcut">Create shortcut</string>
+     <string name="browse_cards">Browse cards</string>
++    <string name="edit_deck_description" comment="edit the deck description">Edit description</string>
+     <string name="menu_add" comment="A generic add button. Please inform us if you need more specific strings">Add</string>
+     <string name="menu_add_note">Add note</string>
+     <string name="menu_my_account" comment="Label of the window in which the user should enter their account. This text can't be found in AnkiDroid directly.">Sync account</string>
+@@ -117,10 +120,6 @@
+     <string name="search_deck" comment="Deck search for selecting it">Deck Search</string>
+     <string name="search_for_download_deck" comment="Deck search value for downloading deck">Deck Search</string>
+     <string name="invalid_deck_name">Invalid deck name</string>
+-    <string name="studyoptions_empty">This deck is empty. Press the + button to add new content.</string>
+-    <string name="studyoptions_limit_reached">Daily study limit reached</string>
+-    <string name="studyoptions_empty_schedule">No cards scheduled to study</string>
+-    <string name="studyoptions_congrats_finished">Congratulations! You have finished for now.</string>
+     <string name="studyoptions_no_cards_due">No cards are due yet</string>
+ 
+     <string name="sd_card_not_mounted">Device storage not mounted</string>
+@@ -130,8 +129,6 @@
+     <string name="continue_sync" tools:ignore="UnusedResources">Continue sync</string>
+     <string name="sync_cancelled" tools:ignore="UnusedResources">Sync cancelled</string>
+     <string name="sync_cancel_message" tools:ignore="UnusedResources">Cancelling…\nThis may take some time.</string>
+-    <string name="export">Export</string>
+-    <string name="export_collection">Export collection</string>
+     <string name="export_deck">Export deck</string>
+     <string name="nothing">Nothing</string>
+ 
+@@ -153,7 +150,6 @@
+         <item quantity="one">Delete the “%2$s” card type, and its %1$d card?</item>
+         <item quantity="other">Delete the “%2$s” card type, and its %1$d cards?</item>
+     </plurals>
+-    <string name="invalid_template">A card could not be generated</string>
+     <string name="card_template_editor_would_delete_note">Removing this card type would cause one or more notes to be deleted. Please create and save a new card type first.</string>
+     <string name="card_template_editor_save_error">Unable to save card template changes: %s</string>
+     <string name="template_for_current_card_deleted">The card type for the current card was deleted.</string>
+@@ -293,4 +289,5 @@
+     <string name="storage_access_summary">Saves your collection in a safe place that will not be deleted if the app is uninstalled</string>
+     <string name="all_files_access_title"
+         comment="Name of the “All files access” permission from Android 10 and after">All files access</string>
++    <string name="image_occlusion">Image Occlusion</string>
+ </resources>
+diff --git a/AnkiDroid/src/test/java/com/ichi2/anki/cardviewer/ViewerCommandTest.kt b/AnkiDroid/src/test/java/com/ichi2/anki/cardviewer/ViewerCommandTest.kt
+index 53a8afed88..e77f87f441 100644
+--- a/AnkiDroid/src/test/java/com/ichi2/anki/cardviewer/ViewerCommandTest.kt
++++ b/AnkiDroid/src/test/java/com/ichi2/anki/cardviewer/ViewerCommandTest.kt
+@@ -32,8 +32,8 @@ class ViewerCommandTest {
+         assertEquals(
+             "binding_SHOW_ANSWER, binding_FLIP_OR_ANSWER_EASE1, " +
+                 "binding_FLIP_OR_ANSWER_EASE2, binding_FLIP_OR_ANSWER_EASE3, binding_FLIP_OR_ANSWER_EASE4, " +
+-                "binding_UNDO, binding_EDIT, binding_MARK, binding_BURY_CARD, " +
+-                "binding_SUSPEND_CARD, binding_DELETE, binding_PLAY_MEDIA, " +
++                "binding_UNDO, binding_REDO, binding_EDIT, binding_MARK, binding_BURY_CARD, " +
++"binding_SUSPEND_CARD, binding_DELETE, binding_PLAY_MEDIA, " +
+                 "binding_EXIT, binding_BURY_NOTE, binding_SUSPEND_NOTE, binding_TOGGLE_FLAG_RED, " +
+                 "binding_TOGGLE_FLAG_ORANGE, binding_TOGGLE_FLAG_GREEN, binding_TOGGLE_FLAG_BLUE, " +
+                 "binding_TOGGLE_FLAG_PINK, binding_TOGGLE_FLAG_TURQUOISE, binding_TOGGLE_FLAG_PURPLE, " +
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {
+
+diff --git a/AnkiDroid/src/main/res/drawable/ic_redo.xml b/AnkiDroid/src/main/res/drawable/ic_redo.xml
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/main/res/drawable/ic_redo.xml
+@@ -0,0 +1,11 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24"
++    android:tint="?attr/colorControlNormal">
++    <path
++        android:fillColor="#FFFFFF"
++        android:pathData="M7,7v4h7.55c-0.5,2.28 -2.48,4 -4.86,4 -2.76,0 -5,-2.24 -5,-5H2c0,3.87 3.13,7 7,7 3.87,0 7,-3.13 7,-7V7H7z" />
++</vector>
++

@@ -1,0 +1,241 @@
+diff --git a/core/common/src/format/UtcOffsetFormat.kt b/core/common/src/format/UtcOffsetFormat.kt
+index 1310626..a6bff06 100644
+--- a/core/common/src/format/UtcOffsetFormat.kt
++++ b/core/common/src/format/UtcOffsetFormat.kt
+@@ -131,27 +131,33 @@ private object OffsetFields {
+         override fun isZero(obj: UtcOffsetFieldContainer): Boolean =
+             (obj.totalHoursAbs ?: 0) == 0 && (obj.minutesOfHour ?: 0) == 0 && (obj.secondsOfMinute ?: 0) == 0
+     }
+-    val totalHoursAbs = UnsignedFieldSpec(
+-        PropertyAccessor(UtcOffsetFieldContainer::totalHoursAbs),
++    val totalHoursAbs = object : UnsignedFieldSpec(
++        accessor = PropertyAccessor(UtcOffsetFieldContainer::totalHoursAbs),
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 18,
+         sign = sign,
+-    )
+-    val minutesOfHour = UnsignedFieldSpec(
+-        PropertyAccessor(UtcOffsetFieldContainer::minutesOfHour),
++    ) {
++        override val displayName: String get() = "offsetHours"
++    }
++    val minutesOfHour = object : UnsignedFieldSpec(
++        accessor = PropertyAccessor(UtcOffsetFieldContainer::minutesOfHour),
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 59,
+         sign = sign,
+-    )
+-    val secondsOfMinute = UnsignedFieldSpec(
+-        PropertyAccessor(UtcOffsetFieldContainer::secondsOfMinute),
++    ) {
++        override val displayName: String get() = "offsetMinutesOfHour"
++    }
++    val secondsOfMinute = object : UnsignedFieldSpec(
++        accessor = PropertyAccessor(UtcOffsetFieldContainer::secondsOfMinute),
+         defaultValue = 0,
+         minValue = 0,
+         maxValue = 59,
+         sign = sign,
+-    )
++    ) {
++        override val displayName: String get() = "offsetSecondsOfMinute"
++    }
+ }
+ 
+ internal class IncompleteUtcOffset(
+@@ -276,4 +282,4 @@ internal val FOUR_DIGIT_OFFSET by lazy {
+     }
+ }
+ 
+-private val emptyIncompleteUtcOffset = IncompleteUtcOffset()
++private val emptyIncompleteUtcOffset = IncompleteUtcOffset()
+\ No newline at end of file
+diff --git a/core/common/src/internal/format/FieldSpec.kt b/core/common/src/internal/format/FieldSpec.kt
+index cbb2d76..8acf81f 100644
+--- a/core/common/src/internal/format/FieldSpec.kt
++++ b/core/common/src/internal/format/FieldSpec.kt
+@@ -24,7 +24,13 @@ internal interface Accessor<in Object, Field>: AssignableField<Object, Field> {
+      * This function is used to access fields during formatting.
+      */
+     fun getterNotNull(container: Object): Field =
+-        getter(container) ?: throw IllegalStateException("Field $name is not set")
++        getter(container) ?: throw IllegalStateException("Field $displayName is not set")
++
++    /**
++     * The user-facing display name of the field, used in error messages.
++     * Defaults to the accessor's name if not specified.
++     */
++    val displayName: String get() = name
+ }
+ 
+ /**
+@@ -95,6 +101,12 @@ internal interface FieldSpec<in Target, Type> {
+      */
+     val name: String
+ 
++    /**
++     * The user-facing display name of the field, used in error messages.
++     * Defaults to [name] if not specified.
++     */
++    val displayName: String get() = name
++
+     /**
+      * The sign corresponding to the field value, or `null` if the field has none.
+      */
+@@ -145,4 +157,4 @@ internal class UnsignedFieldSpec<in Target>(
+         maxValue < 1000 -> 3
+         else -> throw IllegalArgumentException("Max value $maxValue is too large")
+     }
+-}
++}
+\ No newline at end of file
+
+diff --git a/core/common/test/format/ErrorMessageFixTest.kt b/core/common/test/format/ErrorMessageFixTest.kt
+new file mode 100644
+--- /dev/null
++++ b/core/common/test/format/ErrorMessageFixTest.kt
+@@ -0,0 +1,142 @@
++/*
++ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
++ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
++ */
++
++package kotlinx.datetime.test.format
++
++import kotlinx.datetime.*
++import kotlinx.datetime.format.*
++import kotlin.test.*
++
++/**
++ * Test to verify that error messages use user-facing field names instead of internal property names.
++ * This test specifically addresses the issue where obscure error messages like
++ * "Field totalHoursAbs is not set" were shown instead of "Field offsetHours is not set".
++ */
++class ErrorMessageFixTest {
++
++    @Test
++    fun errorMessageForOffsetHoursUsesUserFacingName() {
++        // Create a minimal format that will trigger an error
++        val format = DateTimeComponents.Format {
++            offsetHours()
++        }
++
++        // Try to format without setting offset - should mention "offsetHours" not "totalHoursAbs"
++        val exception = assertFailsWith<IllegalStateException> {
++            format.format {
++                // Intentionally not setting offset to trigger the error
++            }
++        }
++
++        // The error message should mention the user-facing name "offsetHours"
++        val errorMessage = exception.message!!
++        assertTrue(errorMessage.contains("offsetHours"),
++            "Expected error message to contain 'offsetHours' but got: $errorMessage")
++        assertFalse(errorMessage.contains("totalHoursAbs"),
++            "Error message should not contain internal property name 'totalHoursAbs': $errorMessage")
++    }
++
++    @Test
++    fun errorMessageForOffsetMinutesOfHourUsesUserFacingName() {
++        val format = DateTimeComponents.Format {
++            offsetMinutesOfHour()
++        }
++
++        val exception = assertFailsWith<IllegalStateException> {
++            format.format {
++                // Not setting offset
++            }
++        }
++
++        val errorMessage = exception.message!!
++        assertTrue(errorMessage.contains("offsetMinutesOfHour"),
++            "Expected error message to contain 'offsetMinutesOfHour' but got: $errorMessage")
++        assertFalse(errorMessage.contains("minutesOfHour"),
++            "Error message should not contain internal property name 'minutesOfHour': $errorMessage")
++    }
++
++    @Test
++    fun errorMessageForOffsetSecondsOfMinuteUsesUserFacingName() {
++        val format = DateTimeComponents.Format {
++            offsetSecondsOfMinute()
++        }
++
++        val exception = assertFailsWith<IllegalStateException> {
++            format.format {
++                // Not setting offset
++            }
++        }
++
++        val errorMessage = exception.message!!
++        assertTrue(errorMessage.contains("offsetSecondsOfMinute"),
++            "Expected error message to contain 'offsetSecondsOfMinute' but got: $errorMessage")
++        assertFalse(errorMessage.contains("secondsOfMinute"),
++            "Error message should not contain internal property name 'secondsOfMinute': $errorMessage")
++    }
++
++    @Test
++    fun complexFormatWithAlternativeParsingShowsReadableError() {
++        // This is the format from the original issue report
++        val readableFormat = DateTimeComponents.Format {
++            year()
++            char('-')
++            monthNumber()
++            char('-')
++            dayOfMonth()
++            char(' ')
++            hour()
++            char(':')
++            minute()
++            char(':')
++            second()
++            alternativeParsing({
++                char(' ')
++            }) {
++                alternativeParsing({ timeZoneId() }, { offset(UtcOffset.Formats.ISO) }) {
++                    offsetHours()
++                    char(':')
++                    offsetMinutesOfHour()
++                    optional {
++                        char(':')
++                        offsetSecondsOfMinute()
++                    }
++                }
++            }
++        }
++
++        val zone = TimeZone.of("Europe/Berlin")
++        val instant = Instant.parse("2020-01-01T12:00:00Z")
++
++        // This should work properly when the offset is set on the second alternative
++        val result = readableFormat.format {
++            setDateTime(instant.toLocalDateTime(zone))
++            timeZoneId = zone.id
++            setOffset(zone.offsetAt(instant))
++        }
++
++        // Verify the result contains expected parts
++        assertTrue(result.length > 0, "Expected non-empty formatted string")
++        assertTrue(result.contains("2020"), "Expected year in formatted result")
++    }
++
++    @Test
++    fun errorInAlternativeParsingShowsUserFacingName() {
++        // Format that uses alternative parsing
++        val format = DateTimeComponents.Format {
++            alternativeParsing({ }) { char(' ') }
++        }
++
++        val exception = assertFailsWith<IllegalStateException> {
++            format.format {
++                // Not setting any fields
++            }
++        }
++
++        val errorMessage = exception.message!!
++        assertTrue(errorMessage.contains("is not set"), "Expected error message to mention missing field")
++        assertFalse(errorMessage.contains("totalHoursAbs"), 
++            "Error message should not contain internal property name 'totalHoursAbs'")
++    }
++}

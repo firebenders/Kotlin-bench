@@ -1,0 +1,120 @@
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt
+index 98f113c3..bc819877 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/Code.kt
+@@ -23,6 +23,15 @@ public class Code private constructor(
+             fileName.orEmpty()
+         }
+ 
++    internal fun copyWithContent(newContent: String): Code =
++        Code(
++            content = newContent,
++            fileName = fileName,
++            filePath = filePath,
++            script = script,
++            isStdIn = isStdIn,
++        )
++
+     public companion object {
+         /**
+          * Create [Code] from a [file] containing valid Kotlin code or script. The '.editorconfig' files on the path to [file] are taken
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+index eec63c77..c00002bc 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+@@ -132,7 +132,32 @@ public class KtLintRuleEngine(
+     ): String {
+         LOGGER.debug { "Starting with formatting file '${code.fileNameOrStdin()}'" }
+ 
+-        val hasUTF8BOM = code.content.startsWith(UTF8_BOM)
++        var currentCode = code
++        var reruns = 0
++        var formatResult = formatOnce(currentCode)
++        while (formatResult.hasAutocorrectableViolation && reruns < MAX_FORMAT_RERUNS) {
++            reruns++
++            currentCode = currentCode.copyWithContent(formatResult.formattedCode)
++            formatResult = formatOnce(currentCode)
++        }
++
++        formatResult.errors
++            .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
++            .forEach { (e, corrected) -> callback(e, corrected) }
++
++        return formatResult.formattedCode.also {
++            LOGGER.debug("Finished with formatting file '${code.fileNameOrStdin()}'")
++        }
++    }
++
++    private data class FormatResult(
++        val formattedCode: String,
++        val errors: Set<Pair<LintError, Boolean>>,
++        val hasAutocorrectableViolation: Boolean,
++    )
++
++    private fun formatOnce(code: Code): FormatResult {
++val hasUTF8BOM = code.content.startsWith(UTF8_BOM)
+         val ruleExecutionContext = createRuleExecutionContext(this, code)
+ 
+         var tripped = false
+@@ -191,26 +216,26 @@ public class KtLintRuleEngine(
+                 }
+         }
+ 
+-        errors
+-            .sortedWith { (l), (r) -> if (l.line != r.line) l.line - r.line else l.col - r.col }
+-            .forEach { (e, corrected) -> callback(e, corrected) }
+-
+-        if (!mutated) {
+-            return code.content
+-        }
+-
+         val formattedCode =
+-            ruleExecutionContext
+-                .rootNode
+-                .text
+-                .replace("\n", ruleExecutionContext.determineLineSeparator(code.content))
+-        return if (hasUTF8BOM) {
+-            UTF8_BOM + formattedCode
+-        } else {
+-            formattedCode
+-        }.also {
+-            LOGGER.debug("Finished with formatting file '${code.fileNameOrStdin()}'")
+-        }
++            if (!mutated) {
++                code.content
++            } else {
++                val codeWithLineSeparators =
++                    ruleExecutionContext
++                        .rootNode
++                        .text
++                        .replace("\n", ruleExecutionContext.determineLineSeparator(code.content))
++                if (hasUTF8BOM) {
++                    UTF8_BOM + codeWithLineSeparators
++                } else {
++                    codeWithLineSeparators
++                }
++            }
++        return FormatResult(
++            formattedCode = formattedCode,
++            errors = errors,
++            hasAutocorrectableViolation = errors.any { (_, corrected) -> corrected },
++        )
+     }
+ 
+     private fun RuleExecutionContext.determineLineSeparator(fileContent: String): String {
+@@ -283,6 +308,7 @@ public class KtLintRuleEngine(
+ 
+     public companion object {
+         internal const val UTF8_BOM = "\uFEFF"
++        private const val MAX_FORMAT_RERUNS = 3
+ 
+         public const val STDIN_FILE: String = "<stdin>"
+     }
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

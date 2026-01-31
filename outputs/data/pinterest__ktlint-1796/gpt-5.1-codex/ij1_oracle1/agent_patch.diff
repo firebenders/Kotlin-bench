@@ -1,0 +1,121 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index a7239144..585255bc 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -61,6 +61,7 @@ If you do want to ignore the value of `ktlint_experimental` as set by the user,
+ * Prevent violation of `file-name` rule on code snippets ([#1768](https://github.com/pinterest/ktlint/issues/1768))
+ * Clarify that API Consumers have to enable experimental rules ([#1768](https://github.com/pinterest/ktlint/issues/1768))
+ * Trim spaces in the `.editorconfig` property `ij_kotlin_imports_layout`'s entries ([#1770](https://github.com/pinterest/ktlint/pull/1770))
++* Prevent `no-semi` from flagging the semicolon that is inserted while enforcing trailing commas on enum entries that are followed by declarations
+ 
+ ### Changed
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt
+index 11d7bf81..8acb7b6a 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/NoSemicolonsRule.kt
+@@ -2,9 +2,11 @@ package com.pinterest.ktlint.ruleset.standard
+ 
+ import com.pinterest.ktlint.core.Rule
+ import com.pinterest.ktlint.core.ast.ElementType.CLASS_BODY
++import com.pinterest.ktlint.core.ast.ElementType.COMMA
+ import com.pinterest.ktlint.core.ast.ElementType.ENUM_ENTRY
+ import com.pinterest.ktlint.core.ast.ElementType.OBJECT_KEYWORD
+ import com.pinterest.ktlint.core.ast.ElementType.SEMICOLON
++import com.pinterest.ktlint.core.ast.ElementType.WHITE_SPACE
+ import com.pinterest.ktlint.core.ast.isWhiteSpace
+ import com.pinterest.ktlint.core.ast.lastChildLeafOrSelf
+ import com.pinterest.ktlint.core.ast.nextLeaf
+@@ -92,13 +94,31 @@ public class NoSemicolonsRule : Rule("no-semi") {
+             return false
+         }
+         // In case of an enum entry the semicolon (e.g. the node) is a direct child node of enum entry
+-        if (node.treeParent.elementType == ENUM_ENTRY) {
++        if (node.treeParent.elementType == ENUM_ENTRY || node.isClassBodySemicolonAfterEnumEntry()) {
+             return node.isLastCodeLeafBeforeClosingOfClassBody()
+         }
+ 
+         return true
+     }
+ 
++    private fun ASTNode.isClassBodySemicolonAfterEnumEntry(): Boolean {
++        if (treeParent?.elementType != CLASS_BODY) {
++            return false
++        }
++        return previousSiblingExcludingWhitespaceCommentsAndCommas()?.elementType == ENUM_ENTRY
++    }
++
++    private fun ASTNode.previousSiblingExcludingWhitespaceCommentsAndCommas(): ASTNode? {
++        var sibling = treePrev
++        while (sibling != null && sibling.shouldBeIgnoredWhenCheckingForEnumEntry()) {
++            sibling = sibling.treePrev
++        }
++        return sibling
++    }
++
++    private fun ASTNode.shouldBeIgnoredWhenCheckingForEnumEntry() =
++        elementType == WHITE_SPACE || elementType == COMMA || psi is PsiComment
++
+     private fun ASTNode?.isLastCodeLeafBeforeClosingOfClassBody() =
+         getLastCodeLeafBeforeClosingOfClassBody() == this
+ 
+diff --git a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRuleTest.kt b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRuleTest.kt
+index 50b80aff..fde75d82 100644
+--- a/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRuleTest.kt
++++ b/ktlint-ruleset-standard/src/test/kotlin/com/pinterest/ktlint/ruleset/standard/TrailingCommaOnDeclarationSiteRuleTest.kt
+@@ -658,6 +658,38 @@ class TrailingCommaOnDeclarationSiteRuleTest {
+             .isFormattedAs(formattedCode)
+     }
+ 
++    @Test
++    fun `Given enum entries followed by declarations, then adding trailing comma does not require multiple runs`() {
++        val code =
++            """
++            enum class TestEnum() {
++                A,
++                B;
++
++                companion object {
++                    const val A_NUMBER = 1L
++                }
++            }
++            """.trimIndent()
++        val formattedCode =
++            """
++            enum class TestEnum() {
++                A,
++                B,
++                ;
++
++                companion object {
++                    const val A_NUMBER = 1L
++                }
++            }
++            """.trimIndent()
++        trailingCommaOnDeclarationSiteRuleAssertThat(code)
++            .addAdditionalRuleProvider { NoSemicolonsRule() }
++            .withEditorConfigOverride(TRAILING_COMMA_ON_DECLARATION_SITE_PROPERTY to true)
++            .hasLintViolation(3, 9, "Missing trailing comma before \";\"")
++            .isFormattedAs(formattedCode)
++    }
++
+     @Test
+     fun `Given that a trailing comma is is not allowed then remove comma after last enum member`() {
+         val code =
+@@ -667,7 +699,7 @@ class TrailingCommaOnDeclarationSiteRuleTest {
+                 TRIANGLE,
+             }
+             """.trimIndent()
+-        val formattedCode =
++val formattedCode =
+             """
+             enum class Shape {
+                 SQUARE,
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

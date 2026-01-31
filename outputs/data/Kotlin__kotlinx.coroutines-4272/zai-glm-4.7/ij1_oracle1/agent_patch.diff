@@ -1,0 +1,300 @@
+diff --git a/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt b/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
+index e00c1fdd6..46a1a7730 100644
+--- a/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
++++ b/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
+@@ -219,8 +219,14 @@ internal suspend fun <T, V> withContextUndispatched(
+     block: suspend (V) -> T
+ ): T =
+     suspendCoroutineUninterceptedOrReturn { uCont ->
+-        withCoroutineContext(newContext, countOrElement) {
+-            block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))
++        try {
++            withCoroutineContext(newContext, countOrElement) {
++                block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))
++            }
++        } catch (e: Throwable) {
++            val reportException = if (e is DispatchException) e.cause else e
++            uCont.resumeWithException(reportException)
++            COROUTINE_SUSPENDED
+         }
+     }
+ 
+@@ -237,4 +243,4 @@ private class StackFrameContinuation<T>(
+     }
+ 
+     override fun getStackTraceElement(): StackTraceElement? = null
+-}
++}
+\ No newline at end of file
+
+diff --git a/FIX_EXPLANATION.md b/FIX_EXPLANATION.md
+new file mode 100644
+--- /dev/null
++++ b/FIX_EXPLANATION.md
+@@ -0,0 +1,94 @@
++# Fix for Flow Collection Hanging When Dispatcher Throws Exception
++
++## Problem
++
++When using `flowOn` with a dispatcher that throws an exception (e.g., missing `Dispatchers.Main`), the flow collection would silently hang instead of throwing the exception. This was reported in https://github.com/JetBrains/compose-multiplatform/issues/4835.
++
++### Example Code That Would Hang (Before Fix):
++```kotlin
++flowOf(1, 2, 3)
++    .flowOn(Dispatchers.Main.immediate) // Not available in classpath
++    .collect {
++        println("collect: $it")
++    }
++// Would hang indefinitely instead of throwing
++```
++
++## Root Cause
++
++The issue was in the `withContextUndispatched` function in `ChannelFlow.kt`. This function is used by `flowOn` to change the context where a flow is executed. When the dispatcher throws an exception during context setup (e.g., when accessing `Dispatchers.Main` when it's not available), the exception was not caught, preventing the flow collection from properly handling the error.
++
++The `withContextUndispatched` function uses `suspendCoroutineUninterceptedOrReturn` and `withCoroutineContext` to execute code in a different context. Unlike `startCoroutineUndispatched` in `Undispatched.kt` which properly catches and handles `DispatchException`, `withContextUndispatched` lacked this error handling.
++
++## Solution
++
++The fix adds a try-catch block to `withContextUndispatched` that:
++
++1. Catches any `Throwable` thrown during context setup
++2. Extracts the underlying cause if it's a `DispatchException` (similar pattern to `startCoroutineUndispatched`)
++3. Properly resumes the continuation with the exception
++4. Returns `COROUTINE_SUSPENDED` to indicate the continuation has been handled
++
++### Modified Code:
++
++```kotlin
++@project/kotlinx-coroutines-core/common/src/flow/internal/ChannelFlow.kt
++
++// Before:
++internal suspend fun <T, V> withContextUndispatched(
++    newContext: CoroutineContext,
++    value: V,
++    countOrElement: Any = threadContextElements(newContext),
++    block: suspend (V) -> T
++): T =
++    suspendCoroutineUninterceptedOrReturn { uCont ->
++        withCoroutineContext(newContext, countOrElement) {
++            block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))
++        }
++    }
++
++// After:
++internal suspend fun <T, V> withContextUndispatched(
++    newContext: CoroutineContext,
++    value: V,
++    countOrElement: Any = threadContextElements(newContext),
++    block: suspend (V) -> T
++): T =
++    suspendCoroutineUninterceptedOrReturn { uCont ->
++        try {
++            withCoroutineContext(newContext, countOrElement) {
++                block.startCoroutineUninterceptedOrReturn(value, StackFrameContinuation(uCont, newContext))
++            }
++        } catch (e: Throwable) {
++            val reportException = if (e is DispatchException) e.cause else e
++            uCont.resumeWithException(reportException)
++            COROUTINE_SUSPENDED
++        }
++    }
++```
++
++## How It Works
++
++1. When `flowOn` is used with a failing dispatcher, it calls `collectWithContextUndispatched`
++2. This function calls `withContextUndispatched` to switch contexts
++3. Inside `withContextUndispatched`, `withCoroutineContext` is called to update the thread context
++4. If the dispatcher is missing or throws an exception, the exception is caught
++5. The continuation is resumed with the exception, propagating it properly to the caller
++6. The exception is now properly thrown and can be caught in a try-catch block
++
++## Testing
++
++A comprehensive test file was created at:
++`/project/kotlinx-coroutines-core/common/test/flow/FlowDispatcherExceptionTest.kt`
++
++The test verifies:
++1. Dispatcher exceptions during `dispatch()` are properly thrown
++2. Dispatcher exceptions during `isDispatchNeeded()` are properly thrown
++3. Normal flow operation continues to work correctly
++
++## Impact
++
++- **Minimal**: Only one function modified
++- **Backward Compatible**: No API changes, only adds exception handling
++- **Consistent**: Follows the same pattern as `startCoroutineUndispatched`
++- **Safe**: Only affects error path, normal operation unchanged
+
+diff --git a/kotlinx-coroutines-core/common/test/flow/FlowDispatcherExceptionTest.kt b/kotlinx-coroutines-core/common/test/flow/FlowDispatcherExceptionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/common/test/flow/FlowDispatcherExceptionTest.kt
+@@ -0,0 +1,83 @@
++package kotlinx.coroutines.flow
++
++import kotlinx.coroutines.*
++import kotlinx.coroutines.testing.*
++import kotlin.test.*
++
++/**
++ * Tests for flow collection when dispatchers throw exceptions.
++ */
++class FlowDispatcherExceptionTest : TestBase() {
++
++    @Test
++    fun testFlowOnDispatcherException() = runTest {
++        // Create a dispatcher that throws when trying to access it
++        val failingDispatcher = object : CoroutineDispatcher() {
++            override fun dispatch(context: CoroutineContext, block: Runnable) {
++                throw IllegalArgumentException("Main dispatcher not available")
++            }
++
++            override fun isDispatchNeeded(context: CoroutineContext): Boolean = true
++        }
++
++        var caughtException: Throwable? = null
++        try {
++            flowOf(1, 2, 3)
++                .flowOn(failingDispatcher)
++                .collect {
++                    // Should not reach here
++                    fail("Should not collect any values")
++                }
++        } catch (e: Exception) {
++            caughtException = e
++        }
++
++        assertNotNull(caughtException, "Expected an exception to be thrown")
++        assertTrue(caughtException is IllegalArgumentException, "Expected IllegalArgumentException, got ${caughtException!!.javaClass}")
++        assertEquals("Main dispatcher not available", caughtException!!.message, "Expected exception message 'Main dispatcher not available'")
++    }
++
++    @Test
++    fun testFlowOnDispatcherExceptionInSafeDispatchNeeded() = runTest {
++        // Create a dispatcher that throws when checking if dispatch is needed
++        val failingDispatcher = object : CoroutineDispatcher() {
++            override fun dispatch(context: CoroutineContext, block: Runnable) {
++                // This shouldn't be called
++                throw IllegalStateException("Unexpected dispatch call")
++            }
++
++            override fun isDispatchNeeded(context: CoroutineContext): Boolean {
++                throw RuntimeException("Failed to check dispatch needed")
++            }
++        }
++
++        var caughtException: Throwable? = null
++        try {
++            flowOf(1, 2, 3)
++                .flowOn(failingDispatcher)
++                .collect {
++                    // Should not reach here
++                    fail("Should not collect any values")
++                }
++        } catch (e: Exception) {
++            caughtException = e
++        }
++
++        assertNotNull(caughtException, "Expected an exception to be thrown")
++        assertTrue(caughtException is RuntimeException, "Expected RuntimeException, got ${caughtException!!.javaClass}")
++        assertEquals("Failed to check dispatch needed", caughtException!!.message)
++    }
++
++    @Test
++    fun testFlowOnNormalDispatcherWorks() = runTest {
++        // Verify normal operation still works
++        val values = mutableListOf<Int>()
++        flowOf(1, 2, 3)
++            .flowOn(Dispatchers.Default)
++            .collect {
++                values.add(it)
++            }
++
++        assertEquals(listOf(1, 2, 3), values)
++    }
++}
+
+diff --git a/test_fix_verification.kt b/test_fix_verification.kt
+new file mode 100644
+--- /dev/null
++++ b/test_fix_verification.kt
+@@ -0,0 +1,1 @@
++
+
+diff --git a/test_flow_hang_reproduction.kt b/test_flow_hang_reproduction.kt
+new file mode 100644
+--- /dev/null
++++ b/test_flow_hang_reproduction.kt
+@@ -0,0 +1,70 @@
++package kotlinx.coroutines.test
++
++import kotlinx.coroutines.*
++import kotlinx.coroutines.flow.*
++import kotlin.test.*
++
++/**
++ * Test to reproduce the flow hanging issue when dispatcher throws an exception.
++ *
++ * Steps to reproduce:
++ * When using flowOn with a dispatcher that throws an exception (e.g., missing Main dispatcher),
++ * the flow collection should throw the exception instead of silently hanging.
++ */
++fun main() {
++    testFlowHangOnDispatcherException()
++}
++
++class FlowDispatcherExceptionTest {
++
++    companion object {
++        private var testPassed = false
++    }
++
++    @Test
++    fun testFlowHangOnDispatcherException() {
++        runBlocking {
++            var caughtException: Throwable? = null
++
++            // Create a dispatcher that throws when trying to access it
++            val failingDispatcher = object : CoroutineDispatcher() {
++                override fun dispatch(context: CoroutineContext, block: Runnable) {
++                    throw IllegalArgumentException("Main dispatcher not available")
++                }
++
++                override fun isDispatchNeeded(context: CoroutineContext): Boolean = true
++            }
++
++            try {
++                flowOf(1, 2, 3)
++                    .flowOn(failingDispatcher)
++                    .collect {
++                        println("collect: $it")
++                    }
++            } catch (e: Exception) {
++                caughtException = e
++                println("Caught expected exception: $e")
++            }
++
++            if (caughtException == null) {
++                throw AssertionError("Expected an exception to be thrown, but none was thrown")
++            }
++
++            if (caughtException !is IllegalArgumentException) {
++                throw AssertionError("Expected IllegalArgumentException, got ${caughtException.javaClass}")
++            }
++
++            if (caughtException.message != "Main dispatcher not available") {
++                throw AssertionError("Expected exception message 'Main dispatcher not available', got '${caughtException.message}'")
++            }
++
++            println("Test passed!")
++        }
++    }
++}
++
++// Simple test runner
++fun testFlowHangOnDispatcherException() {
++    val test = FlowDispatcherExceptionTest()
++    test.testFlowHangOnDispatcherException()
++}

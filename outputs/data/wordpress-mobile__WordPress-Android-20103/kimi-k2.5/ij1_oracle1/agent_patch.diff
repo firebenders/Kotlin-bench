@@ -1,0 +1,274 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt
+index c9b02681ea8..6c264cd0748 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModel.kt
+@@ -10,6 +10,7 @@ import org.wordpress.android.R
+ import org.wordpress.android.analytics.AnalyticsTracker
+ import org.wordpress.android.models.ReaderPost
+ import org.wordpress.android.models.ReaderTagType.FOLLOWED
++import org.wordpress.android.ui.bloggingprompts.BloggingPromptsPostTagProvider
+ import org.wordpress.android.models.discover.ReaderDiscoverCard.InterestsYouMayLikeCard
+ import org.wordpress.android.models.discover.ReaderDiscoverCard.ReaderPostCard
+ import org.wordpress.android.models.discover.ReaderDiscoverCard.ReaderRecommendedBlogsCard
+@@ -149,7 +150,12 @@ class ReaderDiscoverViewModel @Inject constructor(
+         _uiState.addSource(readerDiscoverDataProvider.discoverFeed) { posts ->
+             launch {
+                 val userTags = getFollowedTagsUseCase.get()
+-                if (userTags.isEmpty()) {
++                val filteredTags = userTags.filter { tag ->
++                    val slug = tag.tagSlug
++                    slug != BloggingPromptsPostTagProvider.BLOGGING_PROMPT_TAG &&
++                            !slug.startsWith(BloggingPromptsPostTagProvider.BLOGGING_PROMPT_ID_TAG_PREFIX)
++                }
++                if (filteredTags.isEmpty()) {
+                     _uiState.value = DiscoverUiState.EmptyUiState.ShowNoFollowedTagsUiState {
+                         parentViewModel.onShowReaderInterests()
+                     }
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt
+index fc06dca994c..b0ebd61ee0b 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/reader/discover/interests/ReaderInterestsViewModel.kt
+@@ -22,6 +22,7 @@ import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewMod
+ import org.wordpress.android.ui.reader.discover.interests.ReaderInterestsViewModel.UiState.InitialLoadingUiState
+ import org.wordpress.android.ui.reader.repository.ReaderRepositoryCommunication
+ import org.wordpress.android.ui.reader.repository.ReaderTagRepository
++import org.wordpress.android.ui.bloggingprompts.BloggingPromptsPostTagProvider
+ import org.wordpress.android.ui.reader.tracker.ReaderTracker
+ import org.wordpress.android.ui.reader.viewmodels.ReaderViewModel
+ import org.wordpress.android.ui.utils.UiString.UiStringRes
+@@ -92,7 +93,12 @@ class ReaderInterestsViewModel @Inject constructor(
+     }
+ 
+     private fun checkAndLoadInterests(userTags: ReaderTagList) {
+-        if (userTags.isEmpty()) {
++        val filteredTags = userTags.filter { tag ->
++            val slug = tag.tagSlug
++            slug != BloggingPromptsPostTagProvider.BLOGGING_PROMPT_TAG &&
++                    !slug.startsWith(BloggingPromptsPostTagProvider.BLOGGING_PROMPT_ID_TAG_PREFIX)
++        }
++        if (filteredTags.isEmpty()) {
+             loadInterests(userTags)
+         } else {
+             parentViewModel?.onCloseReaderInterests()
+
+diff --git a/WordPress/src/test/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModelOnboardingTest.kt b/WordPress/src/test/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModelOnboardingTest.kt
+new file mode 100644
+--- /dev/null
++++ b/WordPress/src/test/java/org/wordpress/android/ui/reader/discover/ReaderDiscoverViewModelOnboardingTest.kt
+@@ -0,0 +1,216 @@
++package org.wordpress.android.ui.reader.discover
++
++import androidx.lifecycle.MutableLiveData
++import kotlinx.coroutines.ExperimentalCoroutinesApi
++import org.assertj.core.api.Assertions.assertThat
++import org.junit.Before
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.mockito.Mock
++import org.mockito.junit.MockitoJUnitRunner
++import org.mockito.kotlin.mock
++import org.mockito.kotlin.whenever
++import org.wordpress.android.BaseUnitTest
++import org.wordpress.android.models.ReaderTag
++import org.wordpress.android.models.ReaderTagList
++import org.wordpress.android.models.ReaderTagType
++import org.wordpress.android.models.discover.ReaderDiscoverCards
++import org.wordpress.android.ui.bloggingprompts.BloggingPromptsPostTagProvider
++import org.wordpress.android.ui.reader.discover.ReaderDiscoverViewModel.DiscoverUiState.EmptyUiState.ShowNoFollowedTagsUiState
++import org.wordpress.android.ui.reader.repository.ReaderDiscoverCommunication
++import org.wordpress.android.ui.reader.repository.ReaderDiscoverDataProvider
++import org.wordpress.android.ui.reader.repository.usecases.tags.GetFollowedTagsUseCase
++import org.wordpress.android.ui.reader.tracker.ReaderTracker
++import org.wordpress.android.ui.reader.utils.ReaderUtilsWrapper
++import org.wordpress.android.ui.reader.viewmodels.ReaderViewModel
++import org.wordpress.android.util.DisplayUtilsWrapper
++import org.wordpress.android.util.config.ReaderImprovementsFeatureConfig
++import org.wordpress.android.viewmodel.Event
++import org.wordpress.android.viewmodel.ReactiveMutableData
++
++/**
++ * Tests for verifying the Discover Onboarding behavior for new users.
++ *
++ * These tests verify that the onboarding screen (ShowNoFollowedTagsUiState) is shown when:
++ * 1. The user has no followed tags at all
++ * 2. The user only has auto-subscribed tags like 'dailyprompt'
++ *
++ * This is important because new users are now auto-subscribed to the 'dailyprompt' tag,
++ * which previously caused the onboarding to be skipped.
++ */
++@ExperimentalCoroutinesApi
++@RunWith(MockitoJUnitRunner::class)
++class ReaderDiscoverViewModelOnboardingTest : BaseUnitTest() {
++    @Mock
++    private lateinit var readerDiscoverDataProvider: ReaderDiscoverDataProvider
++
++    @Mock
++    private lateinit var uiStateBuilder: ReaderPostUiStateBuilder
++
++    @Mock
++    private lateinit var menuUiStateBuilder: ReaderPostMoreButtonUiStateBuilder
++
++    @Mock
++    private lateinit var readerPostCardActionsHandler: ReaderPostCardActionsHandler
++
++    @Mock
++    private lateinit var reblogUseCase: ReblogUseCase
++
++    @Mock
++    private lateinit var readerUtilsWrapper: ReaderUtilsWrapper
++
++    @Mock
++    private lateinit var getFollowedTagsUseCase: GetFollowedTagsUseCase
++
++    @Mock
++    private lateinit var readerTracker: ReaderTracker
++
++    @Mock
++    private lateinit var displayUtilsWrapper: DisplayUtilsWrapper
++
++    @Mock
++    private lateinit var parentViewModel: ReaderViewModel
++
++    @Mock
++    private lateinit var readerImprovementsFeatureConfig: ReaderImprovementsFeatureConfig
++
++    private val fakeDiscoverFeed = ReactiveMutableData<ReaderDiscoverCards>()
++    private val fakeCommunicationChannel = MutableLiveData<Event<ReaderDiscoverCommunication>>()
++    private val fakeNavigationFeed = MutableLiveData<Event<ReaderNavigationEvents>>()
++    private val fakeSnackBarFeed = MutableLiveData<Event<org.wordpress.android.ui.pages.SnackbarMessageHolder>>()
++    private val fakePreloadPostFeed = MutableLiveData<Event<org.wordpress.android.ui.reader.usecases.BookmarkPostState.PreLoadPostContent>>()
++
++    private lateinit var viewModel: ReaderDiscoverViewModel
++
++    @Before
++    fun setUp() = test {
++        viewModel = ReaderDiscoverViewModel(
++            uiStateBuilder,
++            menuUiStateBuilder,
++            readerPostCardActionsHandler,
++            readerDiscoverDataProvider,
++            reblogUseCase,
++            readerUtilsWrapper,
++            readerTracker,
++            displayUtilsWrapper,
++            getFollowedTagsUseCase,
++            readerImprovementsFeatureConfig,
++            testDispatcher(),
++            testDispatcher()
++        )
++        whenever(readerDiscoverDataProvider.discoverFeed).thenReturn(fakeDiscoverFeed)
++        whenever(readerPostCardActionsHandler.navigationEvents).thenReturn(fakeNavigationFeed)
++        whenever(readerPostCardActionsHandler.snackbarEvents).thenReturn(fakeSnackBarFeed)
++        whenever(readerPostCardActionsHandler.preloadPostEvents).thenReturn(fakePreloadPostFeed)
++        whenever(readerPostCardActionsHandler.followStatusUpdated).thenReturn(mock())
++        whenever(readerDiscoverDataProvider.communicationChannel).thenReturn(fakeCommunicationChannel)
++        whenever(readerImprovementsFeatureConfig.isEnabled()).thenReturn(false)
++    }
++
++    @Test
++    fun `onboarding is shown when user has no followed tags`() = test {
++        // Arrange - empty tag list
++        whenever(getFollowedTagsUseCase.get()).thenReturn(ReaderTagList())
++        val uiStates = mutableListOf<ReaderDiscoverViewModel.DiscoverUiState>()
++        viewModel.uiState.observeForever { uiStates.add(it) }
++
++        // Act
++        viewModel.start(parentViewModel)
++        fakeDiscoverFeed.value = ReaderDiscoverCards(listOf())
++
++        // Assert
++        assertThat(uiStates.size).isGreaterThanOrEqualTo(2)
++        assertThat(uiStates[1]).isInstanceOf(ShowNoFollowedTagsUiState::class.java)
++    }
++
++    @Test
++    fun `onboarding is shown when user only has dailyprompt tag`() = test {
++        // Arrange - only dailyprompt tag
++        val tagList = ReaderTagList().apply {
++            add(createTag(BloggingPromptsPostTagProvider.BLOGGING_PROMPT_TAG))
++        }
++        whenever(getFollowedTagsUseCase.get()).thenReturn(tagList)
++        val uiStates = mutableListOf<ReaderDiscoverViewModel.DiscoverUiState>()
++        viewModel.uiState.observeForever { uiStates.add(it) }
++
++        // Act
++        viewModel.start(parentViewModel)
++        fakeDiscoverFeed.value = ReaderDiscoverCards(listOf())
++
++        // Assert - should show onboarding because dailyprompt is filtered out
++        assertThat(uiStates.size).isGreaterThanOrEqualTo(2)
++        assertThat(uiStates[1]).isInstanceOf(ShowNoFollowedTagsUiState::class.java)
++    }
++
++    @Test
++    fun `onboarding is shown when user only has dailyprompt-id tag`() = test {
++        // Arrange - only a dailyprompt-id tag (e.g., dailyprompt-123)
++        val tagList = ReaderTagList().apply {
++            add(createTag("${BloggingPromptsPostTagProvider.BLOGGING_PROMPT_ID_TAG_PREFIX}123"))
++        }
++        whenever(getFollowedTagsUseCase.get()).thenReturn(tagList)
++        val uiStates = mutableListOf<ReaderDiscoverViewModel.DiscoverUiState>()
++        viewModel.uiState.observeForever { uiStates.add(it) }
++
++        // Act
++        viewModel.start(parentViewModel)
++        fakeDiscoverFeed.value = ReaderDiscoverCards(listOf())
++
++        // Assert - should show onboarding because dailyprompt-id is filtered out
++        assertThat(uiStates.size).isGreaterThanOrEqualTo(2)
++        assertThat(uiStates[1]).isInstanceOf(ShowNoFollowedTagsUiState::class.java)
++    }
++
++    @Test
++    fun `onboarding is shown when user has only auto-subscribed tags`() = test {
++        // Arrange - multiple auto-subscribed tags
++        val tagList = ReaderTagList().apply {
++            add(createTag(BloggingPromptsPostTagProvider.BLOGGING_PROMPT_TAG))
++            add(createTag("${BloggingPromptsPostTagProvider.BLOGGING_PROMPT_ID_TAG_PREFIX}456"))
++        }
++        whenever(getFollowedTagsUseCase.get()).thenReturn(tagList)
++        val uiStates = mutableListOf<ReaderDiscoverViewModel.DiscoverUiState>()
++        viewModel.uiState.observeForever { uiStates.add(it) }
++
++        // Act
++        viewModel.start(parentViewModel)
++        fakeDiscoverFeed.value = ReaderDiscoverCards(listOf())
++
++        // Assert - should show onboarding because all tags are auto-subscribed
++        assertThat(uiStates.size).isGreaterThanOrEqualTo(2)
++        assertThat(uiStates[1]).isInstanceOf(ShowNoFollowedTagsUiState::class.java)
++    }
++
++    @Test
++    fun `content is shown when user has at least one non-auto-subscribed tag`() = test {
++        // Arrange - mix of auto-subscribed and regular tags
++        val tagList = ReaderTagList().apply {
++            add(createTag(BloggingPromptsPostTagProvider.BLOGGING_PROMPT_TAG))
++            add(createTag("technology"))
++        }
++        whenever(getFollowedTagsUseCase.get()).thenReturn(tagList)
++        val uiStates = mutableListOf<ReaderDiscoverViewModel.DiscoverUiState>()
++        viewModel.uiState.observeForever { uiStates.add(it) }
++
++        // Act
++        viewModel.start(parentViewModel)
++        fakeDiscoverFeed.value = createDummyReaderCardsList()
++
++        // Assert - should show content because user has a non-auto-subscribed tag
++        assertThat(uiStates.size).isGreaterThanOrEqualTo(2)
++        assertThat(uiStates[1]).isInstanceOf(ReaderDiscoverViewModel.DiscoverUiState.ContentUiState::class.java)
++    }
++
++    private fun createTag(slug: String) = ReaderTag(
++        slug,
++        slug,
++        slug,
++        "/read/tags/$slug/posts",
++        ReaderTagType.FOLLOWED
++    )
++
++    private fun createDummyReaderCardsList(): ReaderDiscoverCards {
++        return ReaderDiscoverCards(listOf())
++    }
++}
++

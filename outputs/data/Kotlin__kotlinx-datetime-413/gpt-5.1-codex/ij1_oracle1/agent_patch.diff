@@ -1,0 +1,125 @@
+diff --git a/core/common/src/internal/format/FormatStructure.kt b/core/common/src/internal/format/FormatStructure.kt
+index 64644e8..7b0e8e5 100644
+--- a/core/common/src/internal/format/FormatStructure.kt
++++ b/core/common/src/internal/format/FormatStructure.kt
+@@ -37,21 +37,21 @@ internal class ConstantFormatStructure<in T>(
+         operations = when {
+             string.isEmpty() -> emptyList()
+             else -> buildList {
+-                val suffix = if (string[0].isDigit()) {
+-                    add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(string.takeWhile { it.isDigit() }))))
+-                    string.dropWhile { it.isDigit() }
++                val suffix = if (string[0].isAsciiDigit()) {
++                    add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(string.takeWhile { it.isAsciiDigit() }))))
++                    string.dropWhile { it.isAsciiDigit() }
+                 } else {
+                     string
+                 }
+                 if (suffix.isNotEmpty()) {
+-                    if (suffix[suffix.length - 1].isDigit()) {
+-                        add(PlainStringParserOperation(suffix.dropLastWhile { it.isDigit() }))
+-                        add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(suffix.takeLastWhile { it.isDigit() }))))
++                    if (suffix[suffix.length - 1].isAsciiDigit()) {
++                        add(PlainStringParserOperation(suffix.dropLastWhile { it.isAsciiDigit() }))
++                        add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(suffix.takeLastWhile { it.isAsciiDigit() }))))
+                     } else {
+                         add(PlainStringParserOperation(suffix))
+                     }
+                 }
+-            }
++}
+         },
+         followedBy = emptyList()
+     )
+diff --git a/core/common/src/internal/format/parser/NumberConsumer.kt b/core/common/src/internal/format/parser/NumberConsumer.kt
+index 6813e2e..92198e2 100644
+--- a/core/common/src/internal/format/parser/NumberConsumer.kt
++++ b/core/common/src/internal/format/parser/NumberConsumer.kt
+@@ -66,6 +66,7 @@ internal class UnsignedIntConsumer<in Receiver>(
+     override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when {
+         maxLength != null && input.length > maxLength -> NumberConsumptionError.TooManyDigits(maxLength)
+         minLength != null && input.length < minLength -> NumberConsumptionError.TooFewDigits(minLength)
++        !input.hasOnlyAsciiDigits() -> NumberConsumptionError.ExpectedInt
+         else -> when (val result = input.toIntOrNull()) {
+             null -> NumberConsumptionError.ExpectedInt
+             else -> setter.setWithoutReassigning(storage, if (multiplyByMinus1) -result else result)
+@@ -84,13 +85,16 @@ internal class ReducedIntConsumer<in Receiver>(
+     private val baseMod = base % modulo
+     private val baseFloor = base - baseMod
+ 
+-    override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when (val result = input.toIntOrNull()) {
+-        null -> NumberConsumptionError.ExpectedInt
+-        else -> setter.setWithoutReassigning(storage, if (result >= baseMod) {
+-            baseFloor + result
+-        } else {
+-            baseFloor + modulo + result
+-        })
++    override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when {
++        !input.hasOnlyAsciiDigits() -> NumberConsumptionError.ExpectedInt
++        else -> when (val result = input.toIntOrNull()) {
++            null -> NumberConsumptionError.ExpectedInt
++            else -> setter.setWithoutReassigning(storage, if (result >= baseMod) {
++                baseFloor + result
++            } else {
++                baseFloor + modulo + result
++            })
++        }
+     }
+ }
+ 
+@@ -121,12 +125,15 @@ internal class FractionPartConsumer<in Receiver>(
+     override fun consume(storage: Receiver, input: String): NumberConsumptionError? = when {
+         minLength != null && input.length < minLength -> NumberConsumptionError.TooFewDigits(minLength)
+         maxLength != null && input.length > maxLength -> NumberConsumptionError.TooManyDigits(maxLength)
++        !input.hasOnlyAsciiDigits() -> NumberConsumptionError.ExpectedInt
+         else -> when (val numerator = input.toIntOrNull()) {
+             null -> NumberConsumptionError.TooManyDigits(9)
+             else -> setter.setWithoutReassigning(storage, DecimalFraction(numerator, input.length))
+         }
+-    }
+ }
++}
++
++private fun CharSequence.hasOnlyAsciiDigits(): Boolean = isNotEmpty() && all(Char::isAsciiDigit)
+ 
+ private fun <Object, Type> AssignableField<Object, Type>.setWithoutReassigning(
+     receiver: Object,
+diff --git a/core/common/src/internal/format/parser/ParserOperation.kt b/core/common/src/internal/format/parser/ParserOperation.kt
+index 6ac3a1c..25e69cb 100644
+--- a/core/common/src/internal/format/parser/ParserOperation.kt
++++ b/core/common/src/internal/format/parser/ParserOperation.kt
+@@ -15,9 +15,9 @@ internal interface ParserOperation<in Output> {
+ internal class PlainStringParserOperation<Output>(val string: String) : ParserOperation<Output> {
+     init {
+         require(string.isNotEmpty()) { "Empty string is not allowed" }
+-        require(!string[0].isDigit()) { "String '$string' starts with a digit" }
+-        require(!string[string.length - 1].isDigit()) { "String '$string' ends with a digit" }
+-    }
++        require(!string[0].isAsciiDigit()) { "String '$string' starts with a digit" }
++        require(!string[string.length - 1].isAsciiDigit()) { "String '$string' ends with a digit" }
++}
+ 
+     override fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult {
+         if (startIndex + string.length > input.length)
+@@ -77,10 +77,10 @@ internal class NumberSpanParserOperation<Output>(
+         if (startIndex + minLength > input.length)
+             return ParseResult.Error(startIndex) { "Unexpected end of input: yet to parse $whatThisExpects" }
+         var digitsInRow = 0
+-        while (startIndex + digitsInRow < input.length && input[startIndex + digitsInRow].isDigit()) {
++        while (startIndex + digitsInRow < input.length && input[startIndex + digitsInRow].isAsciiDigit()) {
+             ++digitsInRow
+         }
+-        if (digitsInRow < minLength)
++if (digitsInRow < minLength)
+             return ParseResult.Error(startIndex) {
+                 "Only found $digitsInRow digits in a row, but need to parse $whatThisExpects"
+             }
+@@ -414,6 +414,8 @@ internal interface AssignableField<in Object, Type> {
+     val name: String
+ }
+ 
++internal fun Char.isAsciiDigit(): Boolean = this in '0'..'9'
++
+ private fun <Object, Type> AssignableField<Object, Type>.setWithoutReassigning(
+     receiver: Object,
+     value: Type,

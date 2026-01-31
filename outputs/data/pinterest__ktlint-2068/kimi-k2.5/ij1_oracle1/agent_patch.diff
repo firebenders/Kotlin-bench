@@ -1,0 +1,300 @@
+diff --git a/documentation/snapshot/docs/faq.md b/documentation/snapshot/docs/faq.md
+index c7343c8f..15758a9e 100644
+--- a/documentation/snapshot/docs/faq.md
++++ b/documentation/snapshot/docs/faq.md
+@@ -45,67 +45,24 @@ See [adding a custom rule set](../api/custom-rule-set/) for more information.
+ 
+ To disable a specific rule you'll need the rule identifier which is displayed at the end of the lint error.
+ 
+-An error can be suppressed using:
++An error can be suppressed using the `@Suppress` annotation:
+ 
+-* EOL comments
+-* Block comments
+-* @Suppress annotations
+-
+-=== "[:material-heart:](#) Suppress annotation"
+-
+-    ```kotlin
+-    // Suppressing all rules for the entire file
+-    @file:Suppress("ktlint")
+-
+-    // Suppress a single rule (with id 'rule-id', defined in rule set with id 'rule-set-id') from the annotated construct
+-    @Suppress("ktlint:rule-set-id:rule-id")
+-    class Foo {}
+-
+-    // Suppress multiple rules for the annotated construct
+-    @Suppress("ktlint:standard:no-wildcard-imports", "ktlint:custom-rule-set-id:custom-rule-id")
+-    import foo.*
+-
+-    // Suppress all rules for the annotated construct
+-    @Suppress("ktlint")
+-    import foo.*
+-    ```
+-=== "[:material-heart:](#) EOL comments"
+-
+-    ```kotlin
+-    // Suppress a single rule for the commented line
+-    import foo.* // ktlint-disable standard_no-wildcard-imports
+-
+-    // Suppress multiple rules for the commented line
+-    import foo.* // ktlint-disable standard_no-wildcard-imports standard_other-rule-id
+-
+-    // Suppress all rules for the commented line
+-    import foo.* // ktlint-disable
+-    ```
+-
+-=== "[:material-heart-off-outline:](#) Block comments"
+-
+-    ```kotlin
+-    // Suppress a single rule for all code between the start and end tag
+-    /* ktlint-disable standard_no-wildcard-imports */
+-    import foo.*
+-    /* ktlint-disable standard_no-wildcard-imports */
+-
+-    // Suppress multiple rules for all code between the start and end tag
+-    /* ktlint-disable standard_no-wildcard-imports standard_no-wildcard-imports */
+-    import foo.*
+-    /* ktlint-enable standard_no-wildcard-imports standard_no-wildcard-imports */
++```kotlin
++// Suppressing all rules for the entire file
++@file:Suppress("ktlint")
+ 
+-    // Suppress all rules for all code between the start and end tag
+-    /* ktlint-disable */
+-    import foo.*
+-    /* ktlint-enable */
+-    ```
++// Suppress a single rule (with id 'rule-id', defined in rule set with id 'rule-set-id') from the annotated construct
++@Suppress("ktlint:rule-set-id:rule-id")
++class Foo {}
+ 
+-!!! important
+-    When using the block comments, the `ktlint-enable` directive needs to specify the exact same rule-id's and in the same order as the `ktlint-disable` directive.
++// Suppress multiple rules for the annotated construct
++@Suppress("ktlint:standard:no-wildcard-imports", "ktlint:custom-rule-set-id:custom-rule-id")
++import foo.*
+ 
+-!!! warning
+-    From a consistency perspective seen, it might be best to **not** mix the (EOL/Block) comment style with the annotation style in the same project.
++// Suppress all rules for the annotated construct
++@Suppress("ktlint")
++import foo.*
++```
+ 
+ ## How do I globally disable a rule without `.editorconfig`?
+ 
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
+index 3a70af99..1dce4729 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
+@@ -3,12 +3,9 @@ package com.pinterest.ktlint.rule.engine.internal
+ import com.pinterest.ktlint.logger.api.initKtLintKLogger
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+-import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+-import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+ import com.pinterest.ktlint.rule.engine.core.util.safeAs
+ import com.pinterest.ktlint.rule.engine.internal.SuppressionLocatorBuilder.CommentSuppressionHint.Type.BLOCK_END
+ import com.pinterest.ktlint.rule.engine.internal.SuppressionLocatorBuilder.CommentSuppressionHint.Type.BLOCK_START
+-import com.pinterest.ktlint.rule.engine.internal.SuppressionLocatorBuilder.CommentSuppressionHint.Type.EOL
+ import mu.KotlinLogging
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+ import org.jetbrains.kotlin.com.intellij.psi.PsiComment
+@@ -82,7 +79,7 @@ internal object SuppressionLocatorBuilder {
+         rootNode.collect { node ->
+             node
+                 .takeIf { it is PsiComment }
+-                ?.createSuppressionHintFromComment(formatterTags)
++                ?.createSuppressionHintFromFormatterTag(formatterTags)
+                 ?.let { commentSuppressionsHints.add(it) }
+ 
+             // Extract all Suppress annotations and create SuppressionHints
+@@ -105,7 +102,7 @@ internal object SuppressionLocatorBuilder {
+             .forEach { it.collect(block) }
+     }
+ 
+-    private fun ASTNode.createSuppressionHintFromComment(formatterTags: FormatterTags): CommentSuppressionHint? =
++    private fun ASTNode.createSuppressionHintFromFormatterTag(formatterTags: FormatterTags): CommentSuppressionHint? =
+         if (text.startsWith("//")) {
+             createSuppressionHintFromEolComment(formatterTags)
+         } else {
+@@ -116,14 +113,12 @@ internal object SuppressionLocatorBuilder {
+         text
+             .removePrefix("//")
+             .trim()
+-            .split(" ")
+-            .takeIf { it.isNotEmpty() }
+-            ?.takeIf { it[0] == KTLINT_DISABLE || it[0] == formatterTags.formatterTagOff }
+-            ?.let { parts ->
++            .takeIf { it == formatterTags.formatterTagOff }
++            ?.let {
+                 CommentSuppressionHint(
+                     this,
+-                    HashSet(parts.tailToRuleIds()),
+-                    EOL,
++                    emptySet(),
++                    CommentSuppressionHint.Type.EOL,
+                 )
+             }
+ 
+@@ -132,23 +127,21 @@ internal object SuppressionLocatorBuilder {
+             .removePrefix("/*")
+             .removeSuffix("*/")
+             .trim()
+-            .split(" ")
+-            .takeIf { it.isNotEmpty() }
+-            ?.let { parts ->
+-                if (parts[0] == KTLINT_DISABLE || parts[0] == formatterTags.formatterTagOff) {
+-                    CommentSuppressionHint(
+-                        this,
+-                        HashSet(parts.tailToRuleIds()),
+-                        BLOCK_START,
+-                    )
+-                } else if (parts[0] == KTLINT_ENABLE || parts[0] == formatterTags.formatterTagOn) {
+-                    CommentSuppressionHint(
+-                        this,
+-                        HashSet(parts.tailToRuleIds()),
+-                        BLOCK_END,
+-                    )
+-                } else {
+-                    null
++            .let { text ->
++                when (text) {
++                    formatterTags.formatterTagOff ->
++                        CommentSuppressionHint(
++                            this,
++                            emptySet(),
++                            BLOCK_START,
++                        )
++                    formatterTags.formatterTagOn ->
++                        CommentSuppressionHint(
++                            this,
++                            emptySet(),
++                            BLOCK_END,
++                        )
++                    else -> null
+                 }
+             }
+ 
+@@ -157,11 +150,11 @@ internal object SuppressionLocatorBuilder {
+         val blockCommentSuppressionHints = mutableListOf<CommentSuppressionHint>()
+         forEach { commentSuppressionHint ->
+             when (commentSuppressionHint.type) {
+-                EOL -> {
++                CommentSuppressionHint.Type.EOL -> {
+                     val commentNode = commentSuppressionHint.node
+                     suppressionHints.add(
+                         SuppressionHint(
+-                            IntRange(commentNode.prevNewLineOffset(), commentNode.startOffset),
++                            IntRange(commentNode.startOffset, commentNode.startOffset + commentNode.textLength),
+                             commentSuppressionHint.disabledRuleIds,
+                         ),
+                     )
+@@ -173,9 +166,8 @@ internal object SuppressionLocatorBuilder {
+ 
+                 BLOCK_END -> {
+                     // match open hint
+-                    Unit
+                     blockCommentSuppressionHints
+-                        .lastOrNull { it.disabledRuleIds == commentSuppressionHint.disabledRuleIds }
++                        .lastOrNull()
+                         ?.let { openHint ->
+                             blockCommentSuppressionHints.remove(openHint)
+                             suppressionHints.add(
+@@ -199,15 +191,6 @@ internal object SuppressionLocatorBuilder {
+         return suppressionHints
+     }
+ 
+-    private fun ASTNode.prevNewLineOffset(): Int =
+-        prevLeaf { it.isWhiteSpaceWithNewline() }
+-            ?.let { it.startOffset + it.text.lastIndexOf('\n') + 1 }
+-            ?: 0
+-
+-    private fun List<String>.tailToRuleIds() = tail().mapNotNull { createRuleIdOrNull(it) }
+-
+-    private fun <T> List<T>.tail() = this.subList(1, this.size)
+-
+     /**
+      * Creates [SuppressionHint] from annotations of given [PsiElement]. Returns null if no targetAnnotations are
+      * present or no mapping exists between annotations' values and ktlint rules
+@@ -304,7 +287,4 @@ internal object SuppressionLocatorBuilder {
+             BLOCK_END,
+         }
+     }
+-
+-    private const val KTLINT_DISABLE = "ktlint-disable"
+-    private const val KTLINT_ENABLE = "ktlint-enable"
+ }
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRule.kt
+index 25fd1092..a61d5f24 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/MaxLineLengthRule.kt
+@@ -79,23 +79,16 @@ public class MaxLineLengthRule :
+                                 // fixme:
+                                 // normally we would emit here but due to API limitations we need to hold off until
+                                 // node spanning the same offset is 'visit'ed
+-                                // (for ktlint-disable directive to have effect (when applied))
+-                                // this will be rectified in the upcoming release(s)
+                                 errorOffset.add(parsedLine.offset)
+                             }
+                         } else {
+-                            // Allow ktlint-disable comments to exceed max line length
+-                            if (!el.text.startsWith("// ktlint-disable")) {
+-                                // if comment is the only thing on the line - fine, otherwise emit an error
+-                                val prevLeaf = el.prevCodeSibling()
+-                                if (prevLeaf != null && prevLeaf.startOffset >= parsedLine.offset) {
+-                                    // fixme:
+-                                    // normally we would emit here but due to API limitations we need to hold off until
+-                                    // node spanning the same offset is 'visit'ed
+-                                    // (for ktlint-disable directive to have effect (when applied))
+-                                    // this will be rectified in the upcoming release(s)
+-                                    errorOffset.add(parsedLine.offset)
+-                                }
++                            // if comment is the only thing on the line - fine, otherwise emit an error
++                            val prevLeaf = el.prevCodeSibling()
++                            if (prevLeaf != null && prevLeaf.startOffset >= parsedLine.offset) {
++                                // fixme:
++                                // normally we would emit here but due to API limitations we need to hold off until
++                                // node spanning the same offset is 'visit'ed
++                                errorOffset.add(parsedLine.offset)
+                             }
+                         }
+                     }
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRule.kt
+index 08b99363..e51babde 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/NoSingleLineBlockCommentRule.kt
+@@ -47,7 +47,6 @@ public class NoSingleLineBlockCommentRule :
+                     ?: node.lastChildLeafOrSelf()
+ 
+             if (!node.textContains('\n') &&
+-                !node.isKtlintSuppressionDirective() &&
+                 afterBlockComment.nextLeaf().isWhitespaceWithNewlineOrNull()
+             ) {
+                 emit(node.startOffset, "Replace the block comment with an EOL comment", true)
+@@ -66,16 +65,6 @@ public class NoSingleLineBlockCommentRule :
+     }
+ 
+     private fun ASTNode?.isWhitespaceWithNewlineOrNull() = this == null || this.isWhiteSpaceWithNewline()
+-
+-    // TODO: Remove when ktlint suppression directive in comments are no longer supported
+-    private fun ASTNode?.isKtlintSuppressionDirective() =
+-        this
+-            ?.text
+-            ?.removePrefix("/*")
+-            ?.removeSuffix("*/")
+-            ?.trim()
+-            ?.let { it.startsWith("ktlint-enable") || it.startsWith("ktlint-disable") }
+-            ?: false
+ }
+ 
+ public val NO_SINGLE_LINE_BLOCK_COMMENT_RULE_ID: RuleId = NoSingleLineBlockCommentRule().ruleId
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

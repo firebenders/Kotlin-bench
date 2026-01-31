@@ -1,0 +1,180 @@
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
+index a90f133eda..e560dc04a8 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/RecipientSelectView.java
+@@ -186,9 +186,11 @@ public class RecipientSelectView extends TokenCompleteTextView<Recipient> implem
+         } catch (NonAsciiEmailAddressException e) {
+             setError(getContext().getString(R.string.recipient_error_non_ascii));
+             return null;
++        } catch (InvalidEmailAddressException e) {
++            setError(getContext().getString(R.string.recipient_error_invalid_address));
++            return null;
+         }
+     }
+-
+     public void setLoaderManager(@Nullable LoaderManager loaderManager) {
+         this.loaderManager = loaderManager;
+     }
+diff --git a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+index a14cb14bdb..c1f0981629 100644
+--- a/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
++++ b/legacy/ui/legacy/src/main/java/com/fsck/k9/view/UserInputEmailAddressParser.kt
+@@ -11,13 +11,14 @@ import org.apache.james.mime4j.util.CharsetUtil
+  */
+ internal class UserInputEmailAddressParser {
+ 
+-    @Throws(NonAsciiEmailAddressException::class)
++    @Throws(NonAsciiEmailAddressException::class, InvalidEmailAddressException::class)
+     fun parse(input: String): List<Address> {
+         return Address.parseUnencoded(input)
+             .mapNotNull { address ->
+                 when {
+                     address.isIncomplete() -> null
+                     address.isNonAsciiAddress() -> throw NonAsciiEmailAddressException(address.address)
++                    address.hasInvalidCharacters() -> throw InvalidEmailAddressException(address.address)
+                     else -> Address.parse(address.toEncodedString()).firstOrNull()
+                 }
+             }
+@@ -26,6 +27,15 @@ internal class UserInputEmailAddressParser {
+     private fun Address.isIncomplete() = hostname.isNullOrBlank()
+ 
+     private fun Address.isNonAsciiAddress() = !CharsetUtil.isASCII(address)
++
++    private fun Address.hasInvalidCharacters(): Boolean {
++        // Check for characters that are not allowed in email addresses according to RFC 5322
++        // Common invalid characters that users accidentally add: /, *, etc.
++        val invalidChars = setOf('/', '*', '|', '`', '"')
++        return address.any { it in invalidChars }
++    }
+ }
+ 
+ internal class NonAsciiEmailAddressException(message: String) : Exception(message)
++
++internal class InvalidEmailAddressException(message: String) : Exception(message)
+diff --git a/legacy/ui/legacy/src/main/res/values/strings.xml b/legacy/ui/legacy/src/main/res/values/strings.xml
+index a40685e598..06c9164483 100644
+--- a/legacy/ui/legacy/src/main/res/values/strings.xml
++++ b/legacy/ui/legacy/src/main/res/values/strings.xml
+@@ -292,8 +292,8 @@
+     <string name="general_settings_swipe_action_delete">Delete</string>
+     <!-- Name of the swipe action to move a message to the spam folder -->
+     <string name="general_settings_swipe_action_spam">Spam</string>
+-    <!-- Name of the swipe action to move a message to another folder -->
+-    <string name="general_settings_swipe_action_move">Move</string>
++    <!-- Name of the swipe action to move a message -->
++    <string name="general_settings_swipe_action_move">Move…</string>
+ 
+     <!-- Title of the setting to specify the density of the message list -->
+     <string name="general_settings_message_list_density_title">Density</string>
+@@ -527,7 +527,7 @@
+     <string name="account_settings_folder_target_mode_not_second_class">All except 2nd Class folders</string>
+ 
+     <string name="account_settings_sync_remote_deletetions_label">Sync server deletions</string>
+-    <string name="account_settings_sync_remote_deletetions_summary">Remove messages when deleted on server</string>
++    <string name="account_settings_sync_remote_deletions_summary">Remove messages when deleted on server</string>
+ 
+     <string name="account_settings_openpgp_missing">Missing OpenPGP app - was it uninstalled?</string>
+ 
+@@ -792,12 +792,12 @@
+     <string name="dialog_confirm_mark_all_as_read_title">Confirm mark all as read</string>
+     <string name="dialog_confirm_mark_all_as_read_message">Do you want to mark all messages as read?</string>
+ 
+-    <string name="dialog_confirm_empty_trash_title">Confirm empty trash</string>
+-    <string name="dialog_confirm_empty_trash_message">Do you want to empty the trash folder?</string>
+-
+     <string name="dialog_confirm_mark_all_as_read_confirm_button">Yes</string>
+     <string name="dialog_confirm_mark_all_as_read_cancel_button">No</string>
+ 
++    <string name="dialog_confirm_empty_trash_title">Confirm empty trash</string>
++    <string name="dialog_confirm_empty_trash_message">Do you want to empty the trash folder?</string>
++
+     <string name="dialog_confirm_spam_title">Confirm move to spam folder</string>
+     <plurals name="dialog_confirm_spam_message">
+         <item quantity="one">Do you really want to move this message to the spam folder?</item>
+@@ -991,6 +991,7 @@
+     <string name="messageview_crypto_error_title">Error decrypting email</string>
+ 
+     <string name="recipient_error_non_ascii">Special characters are currently not supported!</string>
++    <string name="recipient_error_invalid_address">Invalid email address!</string>
+     <string name="recipient_error_parse_failed">Error parsing address!</string>
+     <string name="account_settings_crypto_hide_sign_only">Hide unencrypted signatures</string>
+     <string name="account_settings_crypto_hide_sign_only_on">Only encrypted signatures will be displayed</string>
+
+diff --git a/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidCharTest.kt b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidCharTest.kt
+new file mode 100644
+--- /dev/null
++++ b/legacy/ui/legacy/src/test/java/com/fsck/k9/view/UserInputEmailAddressParserInvalidCharTest.kt
+@@ -0,0 +1,73 @@
++package com.fsck.k9.view
++
++import assertk.assertFailure
++import assertk.assertThat
++import assertk.assertions.isEmpty
++import assertk.assertions.isInstanceOf
++import com.fsck.k9.mail.Address
++import kotlin.test.Test
++
++class UserInputEmailAddressParserInvalidCharTest {
++    private val parser = UserInputEmailAddressParser()
++
++    @Test
++    fun `invalid address ending with slash should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user@gmail.com/")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `address with asterisk should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user*gmail.com")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `address with pipe should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user|gmail.com")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `address with backtick should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user`gmail.com")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `address with quote should throw InvalidEmailAddressException`() {
++        assertFailure {
++            parser.parse("user\"gmail.com")
++        }.isInstanceOf<InvalidEmailAddressException>()
++    }
++
++    @Test
++    fun `valid email address should not throw exception`() {
++        val addresses = parser.parse("user@gmail.com")
++        assertThat(addresses).containsExactly(Address("user@gmail.com"))
++    }
++
++    @Test
++    fun `incomplete address should return empty list`() {
++        val addresses = parser.parse("user")
++        assertThat(addresses).isEmpty()
++    }
++
++    @Test
++    fun `address ending in at symbol should return empty list`() {
++        val addresses = parser.parse("user@")
++        assertThat(addresses).isEmpty()
++    }
++
++    @Test
++    fun `address with non-ASCII characters should throw NonAsciiEmailAddressException`() {
++        assertFailure {
++            parser.parse("müller@domain.example")
++        }.isInstanceOf<NonAsciiEmailAddressException>()
++    }
++}
++

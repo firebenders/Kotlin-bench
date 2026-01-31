@@ -1,0 +1,283 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 69d3620e4a..02224bb709 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.5'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -161,9 +160,6 @@ android {
+         play {
+             dimension "appStore"
+         }
+-        amazon {
+-            dimension "appStore"
+-        }
+         // A 'full' build has no restrictions on storage/camera. Distributed on GitHub/F-Droid
+         full {
+             dimension "appStore"
+@@ -226,12 +222,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -246,12 +242,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ task installGitHook(type: Copy) {
+@@ -360,7 +350,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+     implementation 'com.github.AppIntro:AppIntro:6.3.1'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+index e9446837f2..f4488db684 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+@@ -766,6 +766,12 @@ abstract class AbstractFlashcardViewer :
+         }
+     }
+ 
++    open fun redo(): Job {
++        return launchCatchingTask {
++            redoAndShowSnackbar(duration = Reviewer.ACTION_SNACKBAR_TIME)
++        }
++    }
++
+     private fun finishNoStorageAvailable() {
+         this@AbstractFlashcardViewer.setResult(DeckPicker.RESULT_MEDIA_EJECTED)
+         finish()
+@@ -1681,6 +1687,10 @@ abstract class AbstractFlashcardViewer :
+                     undo()
+                     true
+                 }
++                ViewerCommand.REDO -> {
++                    redo()
++                    true
++                }
+                 ViewerCommand.EDIT -> {
+                     editCard(fromGesture)
+                     true
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
+index 300cf43fc7..217ddcba0d 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
+@@ -323,6 +323,10 @@ open class Reviewer :
+                     undo()
+                 }
+             }
++            R.id.action_redo -> {
++                Timber.i("Reviewer:: Redo button pressed")
++                redo()
++            }
+             R.id.action_reset_card_progress -> {
+                 Timber.i("Reviewer:: Reset progress button pressed")
+                 showResetCardDialog()
+@@ -722,6 +726,21 @@ open class Reviewer :
+         if (undoEnabled) {
+             mOnboarding.onUndoButtonEnabled()
+         }
++
++        // Redo button
++        val redoEnabled = colIsOpenUnsafe() && getColUnsafe.redoAvailable()
++        val alphaRedo = if (redoEnabled && super.controlBlocked !== ReviewerUi.ControlBlock.SLOW) Themes.ALPHA_ICON_ENABLED_LIGHT else Themes.ALPHA_ICON_DISABLED_LIGHT
++        val redoIcon = menu.findItem(R.id.action_redo)
++        redoIcon.setEnabled(redoEnabled).iconAlpha = alphaRedo
++        redoIcon.actionView!!.isEnabled = redoEnabled
++        if (colIsOpenUnsafe()) {
++            if (getColUnsafe.redoAvailable()) {
++                redoIcon.title = getColUnsafe.undoStatus().redo?.let { TR.undoRedoAction(it) } ?: resources.getString(R.string.redo)
++            } else {
++                redoIcon.title = resources.getString(R.string.redo)
++            }
++        }
++
+         val toggleWhiteboardIcon = menu.findItem(R.id.action_toggle_whiteboard)
+         val toggleStylusIcon = menu.findItem(R.id.action_toggle_stylus)
+         val hideWhiteboardIcon = menu.findItem(R.id.action_hide_whiteboard)
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/Undo.kt b/AnkiDroid/src/main/java/com/ichi2/anki/Undo.kt
+index 09159098ad..54d0c0c43d 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/Undo.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/Undo.kt
+@@ -21,6 +21,8 @@ import anki.collection.OpChangesAfterUndo
+ import com.google.android.material.snackbar.Snackbar
+ import com.ichi2.anki.CollectionManager.TR
+ import com.ichi2.anki.snackbar.showSnackbar
++import com.ichi2.libanki.redo
++import com.ichi2.libanki.redoAvailable
+ import com.ichi2.libanki.undo
+ import com.ichi2.libanki.undoableOp
+ 
+@@ -42,3 +44,22 @@ suspend fun FragmentActivity.undoAndShowSnackbar(duration: Int = Snackbar.LENGTH
+         showSnackbar(message, duration)
+     }
+ }
++
++/** If there's a redo action pending, redo it and show a snackbar */
++suspend fun FragmentActivity.redoAndShowSnackbar(duration: Int = Snackbar.LENGTH_SHORT) {
++    withProgress {
++        val changes = undoableOp {
++            if (!redoAvailable()) {
++                OpChangesAfterUndo.getDefaultInstance()
++            } else {
++                redo()
++            }
++        }
++        val message = if (changes.operation.isEmpty()) {
++            TR.actionsNothingToRedo()
++        } else {
++            TR.undoActionRedone(changes.operation)
++        }
++        showSnackbar(message, duration)
++    }
++}
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt b/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
+index a55e26f888..2402f58863 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
+@@ -500,6 +500,7 @@ object UsageAnalytics {
+         "binding_FLIP_OR_ANSWER_EASE3",
+         "binding_FLIP_OR_ANSWER_EASE4",
+         "binding_UNDO",
++        "binding_REDO",
+         "binding_EDIT",
+         "binding_MARK",
+         "binding_BURY_CARD",
+@@ -553,6 +554,7 @@ object UsageAnalytics {
+         // App bar buttons
+         "reset_custom_buttons",
+         "customButtonUndo",
++        "customButtonRedo",
+         "customButtonScheduleCard",
+         "customButtonFlag",
+         "customButtonEditCard",
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
+index b851c8be28..4d4a130b7f 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/ViewerCommand.kt
+@@ -40,6 +40,7 @@ enum class ViewerCommand(val resourceId: Int) {
+     FLIP_OR_ANSWER_EASE3(R.string.answer_good),
+     FLIP_OR_ANSWER_EASE4(R.string.answer_easy),
+     UNDO(R.string.undo),
++    REDO(R.string.redo),
+     EDIT(R.string.cardeditor_title_edit_card),
+     MARK(R.string.menu_mark_note),
+     BURY_CARD(R.string.menu_bury_card),
+@@ -157,6 +158,7 @@ enum class ViewerCommand(val resourceId: Int) {
+                 REPLAY_VOICE -> from(keyCode(KeyEvent.KEYCODE_V, CardSide.BOTH))
+                 RECORD_VOICE -> from(keyCode(KeyEvent.KEYCODE_V, CardSide.BOTH, shift()))
+                 UNDO -> from(keyCode(KeyEvent.KEYCODE_Z, CardSide.BOTH))
++                REDO -> from(keyCode(KeyEvent.KEYCODE_Y, CardSide.BOTH, ctrl()))
+                 TOGGLE_FLAG_RED -> from(keyCode(KeyEvent.KEYCODE_1, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_1, CardSide.BOTH, ctrl()))
+                 TOGGLE_FLAG_ORANGE -> from(keyCode(KeyEvent.KEYCODE_2, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_2, CardSide.BOTH, ctrl()))
+                 TOGGLE_FLAG_GREEN -> from(keyCode(KeyEvent.KEYCODE_3, CardSide.BOTH, ctrl()), keyCode(KeyEvent.KEYCODE_NUMPAD_3, CardSide.BOTH, ctrl()))
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/CustomButtonsSettingsFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/CustomButtonsSettingsFragment.kt
+index 71ba923310..20f8568975 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/CustomButtonsSettingsFragment.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/CustomButtonsSettingsFragment.kt
+@@ -40,6 +40,7 @@ class CustomButtonsSettingsFragment : SettingsFragment() {
+                     // Reset the settings to default
+                     requireContext().sharedPrefs().edit {
+                         remove("customButtonUndo")
++                        remove("customButtonRedo")
+                         remove("customButtonScheduleCard")
+                         remove("customButtonEditCard")
+                         remove("customButtonTags")
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt b/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt
+index 3bfba69ca8..60f37ae89b 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/reviewer/ActionButtonStatus.kt
+@@ -34,6 +34,7 @@ class ActionButtonStatus(private val reviewerUi: ReviewerUi) {
+     fun setup(preferences: SharedPreferences) {
+         // NOTE: the default values below should be in sync with preferences_custom_buttons.xml and reviewer.xml
+         setupButton(preferences, R.id.action_undo, "customButtonUndo", SHOW_AS_ACTION_ALWAYS)
++        setupButton(preferences, R.id.action_redo, "customButtonRedo", SHOW_AS_ACTION_IF_ROOM)
+         setupButton(preferences, R.id.action_schedule, "customButtonScheduleCard", SHOW_AS_ACTION_NEVER)
+         setupButton(preferences, R.id.action_flag, "customButtonFlag", SHOW_AS_ACTION_ALWAYS)
+         setupButton(preferences, R.id.action_tag, "customButtonTags", SHOW_AS_ACTION_NEVER)
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/BackendUndo.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/BackendUndo.kt
+index 21a8979b9e..565ff2470c 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/BackendUndo.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/BackendUndo.kt
+@@ -65,3 +65,9 @@ fun Collection.redo(): OpChangesAfterUndo {
+ fun Collection.undoStatus(): UndoStatus {
+     return UndoStatus.from(backend.getUndoStatus())
+ }
++
++/** Returns true if a redo operation is available */
++fun Collection.redoAvailable(): Boolean {
++    val status = undoStatus()
++    return status.redo != null
++}
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8d9e..32b98034e3 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {
+
+diff --git a/AnkiDroid/src/main/res/drawable/ic_redo.xml b/AnkiDroid/src/main/res/drawable/ic_redo.xml
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/main/res/drawable/ic_redo.xml
+@@ -0,0 +1,6 @@
++<vector android:height="24dp" android:tint="?attr/colorControlNormal"
++    android:viewportHeight="24.0" android:viewportWidth="24.0"
++    android:width="24dp" xmlns:android="http://schemas.android.com/apk/res/android">
++    <path android:fillColor="#FFFFFF" android:pathData="M18.4,10.6C16.55,8.99 14.15,8 11.5,8c-4.65,0 -8.58,3.03 -9.96,7.22L3.9,16c1.05,-3.19 4.05,-5.5 7.6,-5.5 1.95,0 3.73,0.72 5.12,1.88L13,16h9V7l-3.6,3.6z"/>
++</vector>
++

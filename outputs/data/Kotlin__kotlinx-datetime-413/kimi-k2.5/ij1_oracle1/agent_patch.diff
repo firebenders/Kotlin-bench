@@ -1,0 +1,167 @@
+diff --git a/core/common/src/internal/format/FormatStructure.kt b/core/common/src/internal/format/FormatStructure.kt
+index 64644e8..10cb6ea 100644
+--- a/core/common/src/internal/format/FormatStructure.kt
++++ b/core/common/src/internal/format/FormatStructure.kt
+@@ -7,6 +7,7 @@ package kotlinx.datetime.internal.format
+ 
+ import kotlinx.datetime.internal.format.formatter.*
+ import kotlinx.datetime.internal.format.parser.*
++import kotlinx.datetime.internal.format.parser.isAsciiDigit
+ 
+ internal sealed interface FormatStructure<in T> {
+     fun parser(): ParserStructure<T>
+@@ -37,16 +38,16 @@ internal class ConstantFormatStructure<in T>(
+         operations = when {
+             string.isEmpty() -> emptyList()
+             else -> buildList {
+-                val suffix = if (string[0].isDigit()) {
+-                    add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(string.takeWhile { it.isDigit() }))))
+-                    string.dropWhile { it.isDigit() }
++                val suffix = if (string[0].isAsciiDigit()) {
++                    add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(string.takeWhile { it.isAsciiDigit() }))))
++                    string.dropWhile { it.isAsciiDigit() }
+                 } else {
+                     string
+                 }
+                 if (suffix.isNotEmpty()) {
+-                    if (suffix[suffix.length - 1].isDigit()) {
+-                        add(PlainStringParserOperation(suffix.dropLastWhile { it.isDigit() }))
+-                        add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(suffix.takeLastWhile { it.isDigit() }))))
++                    if (suffix[suffix.length - 1].isAsciiDigit()) {
++                        add(PlainStringParserOperation(suffix.dropLastWhile { it.isAsciiDigit() }))
++                        add(NumberSpanParserOperation(listOf(ConstantNumberConsumer(suffix.takeLastWhile { it.isAsciiDigit() }))))
+                     } else {
+                         add(PlainStringParserOperation(suffix))
+                     }
+diff --git a/core/common/src/internal/format/parser/ParserOperation.kt b/core/common/src/internal/format/parser/ParserOperation.kt
+index 6ac3a1c..206a4ab 100644
+--- a/core/common/src/internal/format/parser/ParserOperation.kt
++++ b/core/common/src/internal/format/parser/ParserOperation.kt
+@@ -9,6 +9,13 @@ internal interface ParserOperation<in Output> {
+     fun consume(storage: Output, input: CharSequence, startIndex: Int): ParseResult
+ }
+ 
++/**
++ * Checks if the character is an ASCII digit (0-9).
++ * Unlike [Char.isDigit], this function does not accept non-ASCII digits like full-width digits (０-９),
++ * Arabic-Indic digits (٠-٩), Devanagari digits (०-९), etc.
++ */
++internal fun Char.isAsciiDigit(): Boolean = this in '0'..'9'
++
+ /**
+  * Consumes exactly the string [string].
+  */
+@@ -77,7 +84,7 @@ internal class NumberSpanParserOperation<Output>(
+         if (startIndex + minLength > input.length)
+             return ParseResult.Error(startIndex) { "Unexpected end of input: yet to parse $whatThisExpects" }
+         var digitsInRow = 0
+-        while (startIndex + digitsInRow < input.length && input[startIndex + digitsInRow].isDigit()) {
++        while (startIndex + digitsInRow < input.length && input[startIndex + digitsInRow].isAsciiDigit()) {
+             ++digitsInRow
+         }
+         if (digitsInRow < minLength)
+
+diff --git a/core/common/test/NonAsciiDigitTest.kt b/core/common/test/NonAsciiDigitTest.kt
+new file mode 100644
+--- /dev/null
++++ b/core/common/test/NonAsciiDigitTest.kt
+@@ -0,0 +1,99 @@
++/*
++ * Copyright 2019-2023 JetBrains s.r.o. and contributors.
++ * Use of this source code is governed by the Apache 2.0 License that can be found in the LICENSE.txt file.
++ */
++
++package kotlinx.datetime.test
++
++import kotlinx.datetime.*
++import kotlinx.datetime.format.*
++import kotlin.test.*
++
++/**
++ * Test that parsing rejects non-ASCII digits.
++ *
++ * Non-ASCII digits include:
++ * - Full-width digits: ０-９ (U+FF10 to U+FF19)
++ * - Arabic-Indic digits: ٠-٩ (U+0660 to U+0669)
++ * - Devanagari digits: ०-९ (U+0966 to U+096F)
++ * - etc.
++ */
++class NonAsciiDigitTest {
++
++    @Test
++    fun testLocalDateParseRejectsFullWidthDigits() {
++        // Full-width digits: ０-９
++        assertFailsWith<IllegalArgumentException> {
++            LocalDate.parse("２０２４０９０６", LocalDate.Formats.ISO_BASIC)
++        }
++        // Mixed ASCII and full-width digits
++        assertFailsWith<IllegalArgumentException> {
++            LocalDate.parse("2０24٠9０६", LocalDate.Formats.ISO_BASIC)
++        }
++    }
++
++    @Test
++    fun testLocalDateParseRejectsArabicIndicDigits() {
++        // Arabic-Indic digits: ٠-٩
++        assertFailsWith<IllegalArgumentException> {
++            LocalDate.parse("٢٠٢٤٠٩٠٦", LocalDate.Formats.ISO_BASIC)
++        }
++    }
++
++    @Test
++    fun testLocalDateParseRejectsDevanagariDigits() {
++        // Devanagari digits: ०-९
++        assertFailsWith<IllegalArgumentException> {
++            LocalDate.parse("२०२४०९०६", LocalDate.Formats.ISO_BASIC)
++        }
++    }
++
++    @Test
++    fun testLocalDateParseAcceptsAsciiDigits() {
++        // ASCII digits should still work
++        assertEquals(LocalDate(2024, 9, 6), LocalDate.parse("20240906", LocalDate.Formats.ISO_BASIC))
++        assertEquals(LocalDate(2024, 9, 6), LocalDate.parse("2024-09-06", LocalDate.Formats.ISO))
++    }
++
++    @Test
++    fun testLocalDateTimeParseRejectsNonAsciiDigits() {
++        assertFailsWith<IllegalArgumentException> {
++            LocalDateTime.parse("２０２４-０９-０６T１２:３０:４５")
++        }
++    }
++
++    @Test
++    fun testLocalTimeParseRejectsNonAsciiDigits() {
++        assertFailsWith<IllegalArgumentException> {
++            LocalTime.parse("１２:３０:４５")
++        }
++    }
++
++    @Test
++    fun testUtcOffsetParseRejectsNonAsciiDigits() {
++        assertFailsWith<IllegalArgumentException> {
++            UtcOffset.parse("＋０１:３０")
++        }
++    }
++
++    @Test
++    fun testCustomFormatRejectsNonAsciiDigits() {
++        val format = LocalDate.Format {
++            year()
++            monthNumber()
++            dayOfMonth()
++        }
++        assertFailsWith<IllegalArgumentException> {
++            format.parse("２０２４０９０６")
++        }
++    }
++
++    @Test
++    fun testIsoFormatRejectsNonAsciiDigits() {
++        // ISO format with full-width digits should fail
++        assertFailsWith<IllegalArgumentException> {
++            LocalDate.parse("２０２４-０９-０６")
++        }
++    }
++}
++

@@ -82,23 +82,26 @@ Usage:
     # List available tasks
     modal run agent-bench/run_eval.py --list-tasks
     
-    # Run agent on single task
-    modal run agent-bench/run_eval.py --task-id ankidroid__Anki-Android-16395
+    # Run agent on single task with specific model
+    modal run agent-bench/run_eval.py --task-id ankidroid__Anki-Android-16395 --model gpt-5.2-codex
     
-    # Run agent on all tasks
-    modal run agent-bench/run_eval.py --all-tasks
+    # Run agent on all tasks with GPT-5.2-Codex
+    modal run agent-bench/run_eval.py --all-tasks --model gpt-5.2-codex
+    
+    # Run with multiple models in parallel
+    modal run agent-bench/run_eval.py --all-tasks --models gpt-5.2-codex,claude-sonnet-4-20250514,gpt-5.1-codex
     
     # Test with gold patches (validate benchmark - should pass)
-    modal run agent-bench/run_eval.py --all-tasks --patch gold
+    modal run agent-bench/run_eval.py --all-tasks --patch gold --model gpt-5.2-codex
     
     # Baseline test (no changes - tests should fail)
     modal run agent-bench/run_eval.py --all-tasks --patch none
     
     # Force re-run agent/tests
-    modal run agent-bench/run_eval.py --task-id xxx --no-agent-cache --no-test-cache
+    modal run agent-bench/run_eval.py --task-id xxx --no-agent-cache --no-test-cache --model gpt-5.2-codex
     
     # Download results and create report (without running evals)
-    modal run agent-bench/run_eval.py --download --model firebender
+    modal run agent-bench/run_eval.py --download --model gpt-5.2-codex
 """
 
 import modal
@@ -414,6 +417,9 @@ eval_volume = modal.Volume.from_name("kotlin-bench-agent", create_if_missing=Tru
 
 # GitHub token secret
 github_secret = modal.Secret.from_name("github-token")
+
+# Firebender API key for authentication with Firebender services
+firebender_secret = modal.Secret.from_name("firebender-api-key")
 
 # Lightweight image for utility functions (just needs constants.py)
 util_image = (
@@ -1068,19 +1074,23 @@ def start_agent_server(
     env["FIREBENDER_AGENT_SERVER"] = "true"
     env["FIREBENDER_AGENT_SERVER_PORT"] = str(AGENT_PORT)
     env["FIREBENDER_ANDROID_PROJECT"] = "true" if is_android else "false"
-    env["FIREBENDER_BYPASS_AUTH_KEY"] = os.environ.get("FIREBENDER_BYPASS_AUTH_KEY", "firebender-bypass-auth-2025")
     env["DISPLAY"] = ":99"
+    
+    # API key for authentication with Firebender services (required)
+    firebender_api_key = os.environ.get("FIREBENDER_USER_API_KEY", "")
+    if firebender_api_key:
+        env["FIREBENDER_USER_API_KEY"] = firebender_api_key
+    else:
+        print("    WARNING: FIREBENDER_USER_API_KEY not set - authentication may fail")
     
     # JVM options for headless IntelliJ
     # IMPORTANT: Include firebender.agentServer as JVM property because env vars
     # may not propagate correctly through idea.sh to the JVM process.
     # The AgentServer.isEnabled() checks System.getProperty() as fallback.
-    bypass_auth_key = env["FIREBENDER_BYPASS_AUTH_KEY"]
     env["_JAVA_OPTIONS"] = " ".join([
         "-Dfirebender.agentServer=true",
         f"-Dfirebender.agentServerPort={AGENT_PORT}",
         f"-Dfirebender.androidProject={'true' if is_android else 'false'}",
-        f"-Dfirebender.bypassAuthKey={bypass_auth_key}",
         "-Djb.consents.confirmation.enabled=false",
         '-Djb.privacy.policy.text="<!--999.999-->"',
         "-Didea.initially.ask.config=false",
@@ -1102,16 +1112,21 @@ def start_agent_server(
         f"FIREBENDER_AGENT_SERVER=true",
         f"FIREBENDER_AGENT_SERVER_PORT={AGENT_PORT}",
         f"FIREBENDER_ANDROID_PROJECT={'true' if is_android else 'false'}",
-        f"FIREBENDER_BYPASS_AUTH_KEY={bypass_auth_key}",
+    ]
+    # Add API key to command if set
+    if firebender_api_key:
+        cmd.append(f"FIREBENDER_USER_API_KEY={firebender_api_key}")
+    cmd.extend([
         "/opt/idea/bin/idea.sh",
         project_path,
-    ]
+    ])
     
     print(f"    Command: {' '.join(cmd)}")
     print(f"    Log file: {log_file}")
     print(f"    FIREBENDER_AGENT_SERVER={env['FIREBENDER_AGENT_SERVER']}")
     print(f"    FIREBENDER_AGENT_SERVER_PORT={env['FIREBENDER_AGENT_SERVER_PORT']}")
     print(f"    FIREBENDER_ANDROID_PROJECT={env['FIREBENDER_ANDROID_PROJECT']}")
+    print(f"    FIREBENDER_USER_API_KEY={'[set]' if firebender_api_key else '[not set]'}")
     
     # Open log file
     log_handle = open(log_file, "w")
@@ -2254,7 +2269,7 @@ def _run_eval_task_impl(
 @app.function(
     image=anki_image,
     volumes={EVAL_VOLUME_PATH: eval_volume},
-    secrets=[github_secret],
+    secrets=[github_secret, firebender_secret],
     timeout=MODAL_TASK_TIMEOUT,
     cpu=8,
     memory=16384,  # 16GB RAM
@@ -2290,7 +2305,7 @@ def run_eval_task(
 @app.function(
     image=wordpress_image,
     volumes={EVAL_VOLUME_PATH: eval_volume},
-    secrets=[github_secret],
+    secrets=[github_secret, firebender_secret],
     timeout=MODAL_TASK_TIMEOUT,
     cpu=8,
     memory=16384,
@@ -2314,7 +2329,7 @@ def run_eval_task_wordpress(
 @app.function(
     image=ktlint_image,
     volumes={EVAL_VOLUME_PATH: eval_volume},
-    secrets=[github_secret],
+    secrets=[github_secret, firebender_secret],
     timeout=MODAL_TASK_TIMEOUT,
     cpu=8,
     memory=16384,
@@ -2338,7 +2353,7 @@ def run_eval_task_ktlint(
 @app.function(
     image=coroutines_image,
     volumes={EVAL_VOLUME_PATH: eval_volume},
-    secrets=[github_secret],
+    secrets=[github_secret, firebender_secret],
     timeout=MODAL_TASK_TIMEOUT,
     cpu=8,
     memory=16384,
@@ -2362,7 +2377,7 @@ def run_eval_task_coroutines(
 @app.function(
     image=thunderbird_image,
     volumes={EVAL_VOLUME_PATH: eval_volume},
-    secrets=[github_secret],
+    secrets=[github_secret, firebender_secret],
     timeout=MODAL_TASK_TIMEOUT,
     cpu=8,
     memory=16384,
@@ -2386,7 +2401,7 @@ def run_eval_task_thunderbird(
 @app.function(
     image=datetime_image,
     volumes={EVAL_VOLUME_PATH: eval_volume},
-    secrets=[github_secret],
+    secrets=[github_secret, firebender_secret],
     timeout=MODAL_TASK_TIMEOUT,
     cpu=8,
     memory=16384,
@@ -2961,24 +2976,24 @@ def main(
         modal run agent-bench/run_eval.py --list-tasks --repo anki
         modal run agent-bench/run_eval.py --list-tasks --repo ktlint
         
-        # Run agent on single task
-        modal run agent-bench/run_eval.py --task-id ankidroid__Anki-Android-16395
+        # Run agent on single task with GPT-5.2-Codex
+        modal run agent-bench/run_eval.py --task-id ankidroid__Anki-Android-16395 --model gpt-5.2-codex
         
-        # Run all tasks for a specific repo
-        modal run agent-bench/run_eval.py --all-tasks --repo anki
-        modal run agent-bench/run_eval.py --all-tasks --repo ktlint
+        # Run all tasks for a specific repo with a model
+        modal run agent-bench/run_eval.py --all-tasks --repo anki --model gpt-5.2-codex
+        modal run agent-bench/run_eval.py --all-tasks --repo ktlint --model claude-sonnet-4-20250514
 
         # Run all tasks for multiple repos
-        modal run agent-bench/run_eval.py --all-tasks --repos anki,ktlint
+        modal run agent-bench/run_eval.py --all-tasks --repos anki,ktlint --model gpt-5.2-codex
 
-        # Run all tasks across all repos
-        modal run agent-bench/run_eval.py --all-tasks
+        # Run all tasks across all repos with multiple models in parallel
+        modal run agent-bench/run_eval.py --all-tasks --models gpt-5.2-codex,gpt-5.1-codex,claude-opus-4-5
 
         # Test with gold patches (should pass)
-        modal run agent-bench/run_eval.py --all-tasks --repo anki --patch gold
+        modal run agent-bench/run_eval.py --all-tasks --repo anki --patch gold --model gpt-5.2-codex
         
         # Download results and create report
-        modal run agent-bench/run_eval.py --download --model firebender
+        modal run agent-bench/run_eval.py --download --model gpt-5.2-codex
     
     Args:
         task_id: Run a specific task by instance_id
@@ -3012,8 +3027,8 @@ def main(
     if needs_model and not model_list:
         print("\nError: --model or --models is required")
         print("Examples:")
-        print("  modal run agent-bench/run_eval.py --all-tasks --model claude-sonnet-4-20250514")
-        print("  modal run agent-bench/run_eval.py --all-tasks --models claude-opus-4-5,gpt-4o")
+        print("  modal run agent-bench/run_eval.py --all-tasks --model gpt-5.2-codex")
+        print("  modal run agent-bench/run_eval.py --all-tasks --models gpt-5.2-codex,claude-sonnet-4-20250514,gpt-5.1-codex")
         return
 
     # Handle download-only mode

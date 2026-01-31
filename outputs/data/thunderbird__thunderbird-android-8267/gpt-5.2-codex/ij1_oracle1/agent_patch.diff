@@ -1,0 +1,78 @@
+diff --git a/legacy/core/src/main/java/com/fsck/k9/preferences/AccountSettingsValidator.kt b/legacy/core/src/main/java/com/fsck/k9/preferences/AccountSettingsValidator.kt
+index 02e6a3fe21..78c88737d8 100644
+--- a/legacy/core/src/main/java/com/fsck/k9/preferences/AccountSettingsValidator.kt
++++ b/legacy/core/src/main/java/com/fsck/k9/preferences/AccountSettingsValidator.kt
+@@ -1,6 +1,8 @@
+ package com.fsck.k9.preferences
+ 
++import app.k9mail.legacy.account.Account.SpecialFolderSelection
+ import com.fsck.k9.preferences.Settings.InvalidSettingValueException
++import com.fsck.k9.preferences.upgrader.AccountSettingsUpgraderTo53
+ 
+ internal class AccountSettingsValidator {
+     private val identitySettingsValidator = IdentitySettingsValidator()
+@@ -8,7 +10,9 @@ internal class AccountSettingsValidator {
+     private val serverSettingsValidator = ServerSettingsValidator()
+ 
+     fun validate(contentVersion: Int, account: SettingsFile.Account): ValidatedSettings.Account {
+-        val validatedSettings = AccountSettingsDescriptions.validate(contentVersion, account.settings.orEmpty(), true)
++        val importedSettings = account.settings.orEmpty()
++        val validatedSettings = AccountSettingsDescriptions.validate(contentVersion, importedSettings, true)
++        val adjustedSettings = applyManualSelectionForImportedFolders(importedSettings, validatedSettings)
+ 
+         val incomingServer = validateIncomingServer(contentVersion, account.incoming)
+         val outgoingServer = validateOutgoingServer(contentVersion, account.outgoing)
+@@ -18,12 +22,52 @@ internal class AccountSettingsValidator {
+             name = account.name,
+             incoming = incomingServer,
+             outgoing = outgoingServer,
+-            settings = validatedSettings,
++            settings = adjustedSettings,
+             identities = validateIdentities(contentVersion, account.identities),
+             folders = validateFolders(contentVersion, account.folders),
+         )
+     }
+ 
++    private fun applyManualSelectionForImportedFolders(
++        importedSettings: SettingsMap,
++        validatedSettings: InternalSettingsMap,
++    ): InternalSettingsMap {
++        val selectionOverrides = mapOf(
++            "archiveFolderName" to "archiveFolderSelection",
++            "draftsFolderName" to "draftsFolderSelection",
++            "sentFolderName" to "sentFolderSelection",
++            "spamFolderName" to "spamFolderSelection",
++            "trashFolderName" to "trashFolderSelection",
++        )
++
++        val updatedSettings = validatedSettings.toMutableMap()
++
++        for ((folderNameKey, selectionKey) in selectionOverrides) {
++            if (shouldForceManualSelection(importedSettings, folderNameKey, selectionKey)) {
++                updatedSettings[selectionKey] = SpecialFolderSelection.MANUAL
++            }
++        }
++
++        return updatedSettings
++    }
++
++    private fun shouldForceManualSelection(
++        importedSettings: SettingsMap,
++        folderNameKey: String,
++        selectionKey: String,
++    ): Boolean {
++        if (selectionKey in importedSettings) {
++            return false
++        }
++
++        val folderName = importedSettings[folderNameKey]?.trim()
++        if (folderName.isNullOrEmpty()) {
++            return false
++        }
++
++        return folderName != AccountSettingsUpgraderTo53.FOLDER_NONE
++    }
++
+     private fun validateIdentities(
+         contentVersion: Int,
+         identities: List<SettingsFile.Identity>?,

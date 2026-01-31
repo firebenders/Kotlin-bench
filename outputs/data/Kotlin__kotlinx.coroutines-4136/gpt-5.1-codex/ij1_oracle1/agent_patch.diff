@@ -1,0 +1,85 @@
+diff --git a/kotlinx-coroutines-core/common/src/EventLoop.common.kt b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+index 6bfcbf0cb..abc9ac945 100644
+--- a/kotlinx-coroutines-core/common/src/EventLoop.common.kt
++++ b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+@@ -265,11 +265,11 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+                 // do not transiently report that both delayed and queue are empty during move
+                 delayed.removeFirstIf {
+                     if (it.timeToExecute(now)) {
+-                        enqueueImpl(it)
++                        enqueueImpl(it, promoteDelayedTasks = false)
+                     } else
+                         false
+                 } ?: break // quit loop when nothing more to remove or enqueueImpl returns false on "isComplete"
+-            }
++}
+         }
+         // then process one event from queue
+         val task = dequeue()
+@@ -280,6 +280,24 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+         return nextTime
+     }
+ 
++    private fun promoteDueDelayedTasks() {
++        val delayed = _delayed.value ?: return
++        if (delayed.isEmpty) return
++        val first = delayed.peek() ?: return
++        val now = nanoTime()
++        if (!first.timeToExecute(now)) return
++while (true) {
++            val removed = delayed.removeFirstIf {
++                if (it.timeToExecute(now)) {
++                    enqueueImpl(it, promoteDelayedTasks = false)
++                } else {
++                    false
++                }
++            }
++            if (removed == null) break
++        }
++}
++
+     final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
+ 
+     open fun enqueue(task: Runnable) {
+@@ -292,10 +310,13 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+     }
+ 
+     @Suppress("UNCHECKED_CAST")
+-    private fun enqueueImpl(task: Runnable): Boolean {
++    private fun enqueueImpl(task: Runnable, promoteDelayedTasks: Boolean = true): Boolean {
++        if (promoteDelayedTasks) {
++            promoteDueDelayedTasks()
++        }
+         _queue.loop { queue ->
+             if (isCompleted) return false // fail fast if already completed, may still add, but queues will close
+-            when (queue) {
++when (queue) {
+                 null -> if (_queue.compareAndSet(null, task)) return true
+                 is Queue<*> -> {
+                     when ((queue as Queue<Runnable>).addLast(task)) {
+
+diff --git a/kotlinx-coroutines-core/jvm/test/EventLoopYieldFairnessTest.kt b/kotlinx-coroutines-core/jvm/test/EventLoopYieldFairnessTest.kt
+new file mode 100644
+--- /dev/null
++++ b/kotlinx-coroutines-core/jvm/test/EventLoopYieldFairnessTest.kt
+@@ -0,0 +1,20 @@
++package kotlinx.coroutines
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++class EventLoopYieldFairnessTest {
++    @Test
++    fun yieldPrefersExpiredDelayedTask() = runBlocking {
++        val sequence = mutableListOf<String>()
++        launch(start = CoroutineStart.UNDISPATCHED) {
++            delay(1)
++            sequence += "first"
++        }
++        Thread.sleep(100)
++yield()
++        sequence += "second"
++        assertEquals(listOf("first", "second"), sequence)
++    }
++}
++

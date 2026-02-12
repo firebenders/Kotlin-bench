@@ -1,0 +1,53 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "duration_ms": 1098285,
+  "duration_api_ms": 723168,
+  "num_turns": 79,
+  "result": "## Summary\n\n### Root Cause\n\nWhen `flowOf(1, 2, 3).flowOn(Dispatchers.Main.immediate).collect { ... }` is called and `Dispatchers.Main` is not available in the classpath, the flow collection hangs silently. Here's why:\n\n1. `flowOn` creates a `ChannelFlowOperatorImpl` which uses `produce()` with `CoroutineStart.ATOMIC` to create a producer coroutine (`ProducerCoroutine`)\n2. The `ProducerCoroutine` is constructed and immediately **registered as a child** of the parent `coroutineScope` via `initParentJob`\n3. When `coroutine.start(ATOMIC, ...)` is called, the `MissingMainCoroutineDispatcher.isDispatchNeeded()` throws `IllegalStateException`, which is wrapped in a `DispatchException`\n4. For `ATOMIC` start (which uses the stdlib `startCoroutine`), there is **no safety wrapper** to catch this exception and complete the coroutine \u2014 unlike `DEFAULT` start which has `runSafely`/`dispatcherFailure` in `startCoroutineCancellable`\n5. The `DispatchException` propagates out of `produce()` into the `coroutineScope` block in `ChannelFlow.collect()`\n6. The `coroutineScope` tries to complete, but it has a child (`ProducerCoroutine`) that is still in ACTIVE state and never completes (its body never started)\n7. `coroutineScope` **hangs forever** waiting for this child to complete\n\n### Fix\n\n**File changed**: `kotlinx-coroutines-core/common/src/channels/Produce.kt`\n\nAdded a try-catch around `coroutine.start()` in the internal `produce()` function. When the dispatcher fails to start the coroutine:\n1. The exception is unwrapped from `DispatchException` if applicable\n2. `coroutine.makeCompleting(CompletedExceptionally(reportException))` is called to properly transition the `ProducerCoroutine` to a completing/completed state (so it won't block the parent)\n3. The exception is rethrown so the caller gets the error\n\nThis follows the same pattern used by `dispatcherFailure` in `Cancellable.kt` and is safe for both `DEFAULT` and `ATOMIC` start modes \u2014 when `DEFAULT` has already completed the coroutine via its own `runSafely` wrapper, `makeCompleting` safely returns `false` (already completing).",
+  "stop_reason": null,
+  "session_id": "aea102cb-98c4-4ef9-8c86-d0bdefb967ef",
+  "total_cost_usd": 4.573872400000001,
+  "usage": {
+    "input_tokens": 81,
+    "cache_creation_input_tokens": 89853,
+    "cache_read_input_tokens": 5649829,
+    "output_tokens": 22010,
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 89853
+    },
+    "inference_geo": "",
+    "iterations": []
+  },
+  "modelUsage": {
+    "claude-haiku-4-5-20251001": {
+      "inputTokens": 59299,
+      "outputTokens": 21101,
+      "cacheReadInputTokens": 2901914,
+      "cacheCreationInputTokens": 145381,
+      "webSearchRequests": 0,
+      "costUSD": 0.6367216499999997,
+      "contextWindow": 200000,
+      "maxOutputTokens": 64000
+    },
+    "claude-opus-4-6": {
+      "inputTokens": 81,
+      "outputTokens": 22010,
+      "cacheReadInputTokens": 5649829,
+      "cacheCreationInputTokens": 89853,
+      "webSearchRequests": 0,
+      "costUSD": 3.9371507500000007,
+      "contextWindow": 200000,
+      "maxOutputTokens": 32000
+    }
+  },
+  "permission_denials": [],
+  "uuid": "f34042ba-3eb7-48bc-a196-1b520df5ad68"
+}

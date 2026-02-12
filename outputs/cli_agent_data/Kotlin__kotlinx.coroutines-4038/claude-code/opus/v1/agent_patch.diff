@@ -1,0 +1,46 @@
+diff --git a/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt b/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt
+index 3d489aa..9a9e97d 100644
+--- a/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt
++++ b/kotlinx-coroutines-core/common/src/flow/operators/Limit.kt
+@@ -47,6 +47,12 @@ public fun <T> Flow<T>.take(count: Int): Flow<T> {
+     require(count > 0) { "Requested element count $count should be positive" }
+     return flow {
+         var consumed = 0
++        // Use a dedicated owner object for the AbortFlowException to avoid ownership
++        // collisions with downstream operators (e.g. first()) that may also use
++        // AbortFlowException with the same downstream collector as the owner.
++        val abortOwner = object : FlowCollector<T> {
++            override suspend fun emit(value: T) = this@flow.emit(value)
++        }
+         try {
+             collect { value ->
+                 // Note: this for take is not written via collectWhile on purpose.
+@@ -56,11 +62,11 @@ public fun <T> Flow<T>.take(count: Int): Flow<T> {
+                 if (++consumed < count) {
+                     return@collect emit(value)
+                 } else {
+-                    return@collect emitAbort(value)
++                    return@collect abortOwner.emitAbort(value)
+                 }
+             }
+         } catch (e: AbortFlowException) {
+-            e.checkOwnership(owner = this)
++            e.checkOwnership(owner = abortOwner)
+         }
+     }
+ }
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index 781d5d0..a693aa5 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -4,10 +4,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */

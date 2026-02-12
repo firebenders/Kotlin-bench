@@ -1,0 +1,910 @@
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt
+index 15fd59b..ce97614 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostActionHandler.kt
+@@ -50,6 +50,7 @@ import org.wordpress.android.widgets.PostListButtonType.BUTTON_SUBMIT
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_SYNC
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_TRASH
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_VIEW
++import org.wordpress.android.widgets.PostListButtonType.BUTTON_COMMENTS
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_PROMOTE_WITH_BLAZE
+ 
+ /**
+@@ -133,6 +134,9 @@ class PostActionHandler(
+             BUTTON_PROMOTE_WITH_BLAZE -> {
+                 triggerPostListAction.invoke(PostListAction.ShowPromoteWithBlaze(post))
+             }
++            BUTTON_COMMENTS -> {
++                // todo: implement
++            }
+         }
+     }
+ 
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListActionTracker.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListActionTracker.kt
+index d9e2c9c..d210f2b 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListActionTracker.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListActionTracker.kt
+@@ -22,6 +22,7 @@ import org.wordpress.android.widgets.PostListButtonType.BUTTON_SUBMIT
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_SYNC
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_TRASH
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_VIEW
++import org.wordpress.android.widgets.PostListButtonType.BUTTON_COMMENTS
+ import org.wordpress.android.widgets.PostListButtonType.BUTTON_PROMOTE_WITH_BLAZE
+ 
+ fun trackPostListAction(site: SiteModel, buttonType: PostListButtonType, postData: PostModel, statsEvent: Stat) {
+@@ -53,6 +54,7 @@ fun trackPostListAction(site: SiteModel, buttonType: PostListButtonType, postDat
+         BUTTON_SHOW_MOVE_TRASHED_POST_TO_DRAFT_DIALOG -> "show_move_trashed_post_to_draft_post_dialog"
+         BUTTON_COPY_URL -> "copy_url"
+         BUTTON_PROMOTE_WITH_BLAZE -> "promote_with_blaze"
++        BUTTON_COMMENTS -> "comments"
+     }
+ 
+     AnalyticsUtils.trackWithSiteDetails(statsEvent, site, properties)
+diff --git a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
+index a69565f..43e9b6a 100644
+--- a/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
++++ b/WordPress/src/main/java/org/wordpress/android/ui/posts/PostListItemViewHolder.kt
+@@ -1,26 +1,28 @@
+ package org.wordpress.android.ui.posts
+ 
+ import android.content.Context
+-import android.graphics.Color
+-import android.graphics.drawable.ColorDrawable
+ import android.graphics.drawable.Drawable
+-import android.text.SpannableStringBuilder
+-import android.text.style.ImageSpan
++import android.text.Spannable
++import android.text.SpannableString
++import android.text.style.ForegroundColorSpan
+ import android.view.LayoutInflater
+ import android.view.Menu
++import android.view.MenuItem
+ import android.view.View
+ import android.view.ViewGroup
+ import android.view.ViewTreeObserver
+ import android.widget.FrameLayout
+ import android.widget.ImageView
+-import android.widget.PopupMenu
+ import android.widget.ProgressBar
+ import android.widget.TextView
+ import androidx.annotation.ColorRes
+ import androidx.annotation.LayoutRes
++import androidx.appcompat.widget.PopupMenu
+ import androidx.constraintlayout.widget.ConstraintLayout
+ import androidx.core.content.ContextCompat
+ import androidx.core.graphics.drawable.DrawableCompat
++import androidx.core.view.GravityCompat
++import androidx.core.view.MenuCompat
+ import androidx.recyclerview.widget.RecyclerView
+ import org.wordpress.android.R
+ import org.wordpress.android.WordPress
+@@ -38,8 +40,8 @@ import org.wordpress.android.viewmodel.posts.PostListItemUiStateData
+ import org.wordpress.android.viewmodel.uistate.ProgressBarUiState
+ import java.util.concurrent.atomic.AtomicBoolean
+ import android.R as AndroidR
++import com.google.android.material.R as MaterialR
+ 
+-const val POST_LIST_ICON_PADDING = 8
+ const val MAX_TITLE_EXCERPT_LINES = 2
+ 
+ sealed class PostListItemViewHolder(
+@@ -157,19 +159,24 @@ sealed class PostListItemViewHolder(
+         uiHelpers.setTextOrHide(view, concatenatedText)
+     }
+ 
+-    protected fun onMoreClicked(actions: List<PostListItemAction>, v: View) {
+-        val menu = PopupMenu(v.context, v)
++    private fun onMoreClicked(actions: List<PostListItemAction>, v: View) {
++        val emptyDrawable = ContextCompat.getDrawable(v.context, R.drawable.ic_placeholder_24dp)
++        val menu = PopupMenu(v.context, v, GravityCompat.END)
++        MenuCompat.setGroupDividerEnabled(menu.menu, true)
++        menu.setForceShowIcon(true)
+         actions.forEach { singleItemAction ->
+             val menuItem = menu.menu.add(
+-                Menu.NONE,
++                singleItemAction.buttonType.groupId,
+                 singleItemAction.buttonType.value,
+                 Menu.NONE,
+-                getMenuItemTitleWithIcon(v.context, singleItemAction)
++                singleItemAction.buttonType.textResId
+             )
+             menuItem.setOnMenuItemClickListener {
+                 singleItemAction.onButtonClicked.invoke(singleItemAction.buttonType)
+                 true
+             }
++            setIconAndIconColorIfNeeded(v.context, menuItem, singleItemAction, emptyDrawable)
++            setTextColorIfNeeded(v.context, menuItem, singleItemAction)
+         }
+         menu.show()
+     }
+@@ -236,26 +243,42 @@ sealed class PostListItemViewHolder(
+         return wrappedDrawable
+     }
+ 
+-    @Suppress("ComplexMethod")
+-    private fun getMenuItemTitleWithIcon(context: Context, item: PostListItemAction): SpannableStringBuilder {
+-        var icon: Drawable? = setTint(
+-            context,
+-            ContextCompat.getDrawable(context, item.buttonType.iconResId)!!, item.buttonType.colorAttrId
+-        )
+-        // If there's no icon, we insert a transparent one to keep the title aligned with the items which have icons.
+-        if (icon == null) icon = ColorDrawable(Color.TRANSPARENT)
+-        val iconSize: Int = context.resources.getDimensionPixelSize(R.dimen.menu_item_icon_size)
+-        icon.setBounds(0, 0, iconSize, iconSize)
+-        val imageSpan = ImageSpan(icon)
+-
+-        // Add a space placeholder for the icon, before the title.
+-        val menuTitle = context.getText(item.buttonType.textResId)
+-        val ssb = SpannableStringBuilder(
+-            menuTitle.padStart(menuTitle.length + POST_LIST_ICON_PADDING)
+-        )
++    private fun setIconAndIconColorIfNeeded(
++        context: Context,
++        menuItem: MenuItem,
++        singleItemAction: PostListItemAction,
++        emptyDrawable: Drawable?
++    ) {
++        if (singleItemAction.buttonType.iconResId > 0) {
++            val icon: Drawable = setTint(
++                context,
++                ContextCompat.getDrawable(context, singleItemAction.buttonType.iconResId)!!,
++                singleItemAction.buttonType.colorAttrId
++            )
++            menuItem.icon = icon
++        } else {
++            menuItem.icon = emptyDrawable
++        }
++    }
+ 
+-        // Replace the space placeholder with the icon.
+-        ssb.setSpan(imageSpan, 1, 2, 0)
+-        return ssb
++    private fun setTextColorIfNeeded(
++        context: Context,
++        menuItem: MenuItem,
++        singleItemAction: PostListItemAction
++    ) {
++        if (singleItemAction.buttonType.colorAttrId > 0 &&
++            singleItemAction.buttonType.colorAttrId != MaterialR.attr.colorOnSurface
++        ) {
++            val menuTitle = context.getText(singleItemAction.buttonType.textResId)
++            val spannableString = SpannableString(menuTitle)
++            val textColor = context.getColorFromAttribute(singleItemAction.buttonType.colorAttrId)
++            spannableString.setSpan(
++                ForegroundColorSpan(textColor),
++                0,
++                spannableString.length,
++                Spannable.SPAN_INCLUSIVE_INCLUSIVE
++            )
++            menuItem.title = spannableString
++        }
+     }
+ }
+diff --git a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+index 5e3eed9..915d884 100644
+--- a/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
++++ b/WordPress/src/main/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelper.kt
+@@ -420,10 +420,6 @@ class PostListItemUiStateHelper @Inject constructor(
+         val canShowPublishButton = canRetryUpload || canPublishPost
+         val buttonTypes = ArrayList<PostListButtonType>()
+ 
+-        if (postStatus != TRASHED) {
+-            buttonTypes.add(BUTTON_EDIT)
+-        }
+-
+         if (canCancelPendingAutoUpload) {
+             buttonTypes.add(BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+         }
+@@ -463,7 +459,14 @@ class PostListItemUiStateHelper @Inject constructor(
+ 
+         buttonTypes.addDeletingOrTrashAction(isLocalDraft, postStatus)
+ 
+-        return buttonTypes
++        return sortPostListButtons(buttonTypes)
++    }
++
++    private fun sortPostListButtons(list: List<PostListButtonType>): List<PostListButtonType> {
++        return list.sortedWith(compareBy(
++            { it.groupId },
++            { it.positionInGroup }
++        ))
+     }
+ 
+     private fun MutableList<PostListButtonType>.addViewOrPreviewAction(shouldShowPreview: Boolean) {
+diff --git a/WordPress/src/main/java/org/wordpress/android/widgets/PostListButtonType.kt b/WordPress/src/main/java/org/wordpress/android/widgets/PostListButtonType.kt
+index ac90a59..3f418ee 100644
+--- a/WordPress/src/main/java/org/wordpress/android/widgets/PostListButtonType.kt
++++ b/WordPress/src/main/java/org/wordpress/android/widgets/PostListButtonType.kt
+@@ -11,118 +11,171 @@ enum class PostListButtonType constructor(
+     val value: Int,
+     @StringRes val textResId: Int,
+     @DrawableRes val iconResId: Int,
+-    @AttrRes val colorAttrId: Int
++    @AttrRes val colorAttrId: Int,
++    val groupId: Int,
++    val positionInGroup: Int
+ ) {
+     BUTTON_EDIT(
+         1,
+         R.string.button_edit,
+         R.drawable.gb_ic_pencil,
+-        MaterialR.attr.colorOnSurface
++        MaterialR.attr.colorOnSurface,
++        VIEW_GROUP_ID,
++        1
+     ),
+     BUTTON_VIEW(
+         2,
+         R.string.button_view,
+         R.drawable.gb_ic_external,
+-        MaterialR.attr.colorOnSurface
++        MaterialR.attr.colorOnSurface,
++        VIEW_GROUP_ID,
++        1
+     ),
+     BUTTON_PREVIEW(
+         3,
+         R.string.button_preview,
+         R.drawable.gb_ic_globe,
+-        MaterialR.attr.colorOnSurface
++        MaterialR.attr.colorOnSurface,
++        VIEW_GROUP_ID,
++        2
+     ),
+     BUTTON_STATS(
+         4,
+         R.string.button_stats,
+         R.drawable.gb_ic_chart_bar,
+-        MaterialR.attr.colorOnSurface
++        MaterialR.attr.colorOnSurface,
++        NAVIGATE_GROUP_ID,
++        1
+     ),
+     BUTTON_TRASH(
+         5,
+         R.string.button_trash,
+         R.drawable.gb_ic_trash,
+-        MaterialR.attr.colorOnSurface
++        R.attr.wpColorError,
++        TRASH_GROUP_ID,
++        3
+     ),
+     BUTTON_DELETE(
+         6,
+         R.string.button_delete,
+         R.drawable.gb_ic_trash,
+-        MaterialR.attr.colorOnSurface
++        R.attr.wpColorError,
++        TRASH_GROUP_ID,
++        1
+     ),
+     BUTTON_PUBLISH(
+         7,
+         R.string.button_publish,
+         R.drawable.gb_ic_globe,
+-        MaterialR.attr.colorOnSurface
++        MaterialR.attr.colorOnSurface,
++        TAKE_AN_ACTION_GROUP_ID,
++        2
+     ),
+     BUTTON_SYNC(
+         8,
+         R.string.button_sync,
+         R.drawable.gb_ic_update,
+-        MaterialR.attr.colorOnSurface
++        MaterialR.attr.colorOnSurface,
++        TAKE_AN_ACTION_GROUP_ID,
++        4
+     ),
+     BUTTON_MORE(
+         9,
+         R.string.button_more,
+         R.drawable.gb_ic_more_horizontal,
+-        MaterialR.attr.colorOnSurface
++        MaterialR.attr.colorOnSurface,
++        OTHER_GROUP_ID,
++        1
+     ),
+     BUTTON_SUBMIT(
+         10,
+         R.string.submit_for_review,
+         R.drawable.gb_ic_post_author,
+-        MaterialR.attr.colorOnSurface
++        MaterialR.attr.colorOnSurface,
++        TAKE_AN_ACTION_GROUP_ID,
++        5
+     ),
+     BUTTON_RETRY(
+         11,
+         R.string.button_retry,
+         R.drawable.gb_ic_redo,
+-        MaterialR.attr.colorError
++        R.attr.wpColorError,
++        TAKE_AN_ACTION_GROUP_ID,
++        3
+     ),
+     BUTTON_MOVE_TO_DRAFT(
+         12,
+         R.string.button_move_to_draft,
+         R.drawable.gb_ic_move_to,
+-        MaterialR.attr.colorOnSurface
++        MaterialR.attr.colorOnSurface,
++        TAKE_AN_ACTION_GROUP_ID,
++        6
+     ),
+     BUTTON_DELETE_PERMANENTLY(
+         13,
+         R.string.button_delete_permanently,
+         R.drawable.gb_ic_trash,
+-        MaterialR.attr.colorOnSurface
++        R.attr.wpColorError,
++        TRASH_GROUP_ID,
++        3
+     ),
+     BUTTON_CANCEL_PENDING_AUTO_UPLOAD(
+         14,
+         R.string.pages_and_posts_cancel_auto_upload,
+         R.drawable.gb_ic_undo,
+-        R.attr.wpColorWarningDark
++        R.attr.wpColorWarningDark,
++        TAKE_AN_ACTION_GROUP_ID,
++        1
+     ),
+     BUTTON_SHOW_MOVE_TRASHED_POST_TO_DRAFT_DIALOG(
+         15,
+         0,
+         0,
+-        0
++        0,
++        TRASH_GROUP_ID,
++        4
+     ),
+     BUTTON_COPY(
+         16,
+         R.string.button_copy,
+         R.drawable.gb_ic_copy,
+-        MaterialR.attr.colorOnSurface
++        MaterialR.attr.colorOnSurface,
++        TAKE_AN_ACTION_GROUP_ID,
++        7
+     ),
+     BUTTON_COPY_URL(
+         17,
+-        R.string.button_copy_link,
+-        R.drawable.gb_ic_link,
+-        MaterialR.attr.colorOnSurface
++        R.string.button_share,
++        R.drawable.gb_ic_share,
++        MaterialR.attr.colorOnSurface,
++        SHARE_AND_PROMOTE_GROUP_ID,
++        1
+     ),
+     BUTTON_PROMOTE_WITH_BLAZE(
+         18,
+         R.string.button_promote_with_blaze,
+-        R.drawable.ic_promote_with_blaze,
+-        0
++        R.drawable.ic_blaze_flame_24dp,
++        0,
++        SHARE_AND_PROMOTE_GROUP_ID,
++        2
++    ),
++    BUTTON_COMMENTS(
++        19,
++        R.string.button_comments,
++        R.drawable.gb_ic_comment,
++        MaterialR.attr.colorOnSurface,
++        NAVIGATE_GROUP_ID,
++        2
+     );
+ 
+     companion object {
++        const val VIEW_GROUP_ID = 1
++        const val TAKE_AN_ACTION_GROUP_ID = 2
++        const val SHARE_AND_PROMOTE_GROUP_ID = 3
++        const val NAVIGATE_GROUP_ID = 4
++        const val TRASH_GROUP_ID = 5
++        const val OTHER_GROUP_ID = 6
++
+         fun fromInt(value: Int): PostListButtonType? = values().firstOrNull { it.value == value }
+     }
+ }
+diff --git a/WordPress/src/main/res/drawable/gb_ic_link.xml b/WordPress/src/main/res/drawable/gb_ic_link.xml
+deleted file mode 100644
+index 2b59e2b..0000000
+--- a/WordPress/src/main/res/drawable/gb_ic_link.xml
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<vector xmlns:android="http://schemas.android.com/apk/res/android"
+-    android:width="24dp"
+-    android:height="24dp"
+-    android:autoMirrored="true"
+-    android:viewportHeight="24"
+-    android:viewportWidth="24">
+-    <path
+-        android:fillColor="#FF000000"
+-        android:pathData="M10,17.389L8.444,17.389A5.194,5.194 0,1 1,8.444 7L10,7v1.5L8.444,8.5a3.694,3.694 0,0 0,0 7.389L10,15.889v1.5ZM14,7h1.556a5.194,5.194 0,0 1,0 10.39L14,17.39v-1.5h1.556a3.694,3.694 0,0 0,0 -7.39L14,8.5L14,7ZM9.5,13h5v-1.5h-5L9.5,13Z" />
+-</vector>
+diff --git a/WordPress/src/main/res/values/strings.xml b/WordPress/src/main/res/values/strings.xml
+index ddd1971..3e12f36 100644
+--- a/WordPress/src/main/res/values/strings.xml
++++ b/WordPress/src/main/res/values/strings.xml
+@@ -308,6 +308,8 @@
+     <string name="button_move_to_draft">Move to Draft</string>
+     <string name="button_copy">Duplicate</string>
+     <string name="button_copy_link">Copy link</string>
++    <string name="button_share" translatable="false">@string/share_desc</string>
++    <string name="button_comments" translatable="false">@string/comments</string>
+     <string name="button_promote_with_blaze">Promote with Blaze</string>
+ 
+     <!-- post uploads -->
+diff --git a/WordPress/src/test/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelperTest.kt b/WordPress/src/test/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelperTest.kt
+index 0937eb3..51c5bdf 100644
+--- a/WordPress/src/test/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelperTest.kt
++++ b/WordPress/src/test/java/org/wordpress/android/viewmodel/posts/PostListItemUiStateHelperTest.kt
+@@ -93,14 +93,13 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_DRAFT)
+         )
+ 
+-
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_PUBLISH)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(state.moreActions.actions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(state.moreActions.actions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(state.moreActions.actions).hasSize(6)
++        val moreActions = state.moreActions.actions
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_PUBLISH)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(5)
+     }
+ 
+     @Test
+@@ -109,12 +108,12 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_DRAFT, isLocalDraft = true)
+         )
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_PUBLISH)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(state.moreActions.actions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
+-        assertThat(state.moreActions.actions).hasSize(5)
++        val moreActions = state.moreActions.actions
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_PUBLISH)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
++        assertThat(moreActions).hasSize(4)
+     }
+ 
+     @Test
+@@ -125,13 +124,12 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+         assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_SUBMIT)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(6)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(5)
+     }
+ 
+     @Test
+@@ -142,12 +140,11 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+         assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_SUBMIT)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
+-        assertThat(moreActions).hasSize(5)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
++        assertThat(moreActions).hasSize(4)
+     }
+ 
+     @Test
+@@ -160,12 +157,11 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(5)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(4)
+     }
+ 
+     @Test
+@@ -178,11 +174,10 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
+-        assertThat(moreActions).hasSize(4)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
++        assertThat(moreActions).hasSize(3)
+     }
+ 
+     @Test
+@@ -195,12 +190,12 @@ class PostListItemUiStateHelperTest {
+             capabilitiesToPublish = false
+         )
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(state.moreActions.actions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(state.moreActions.actions).hasSize(5)
++        val moreActions = state.moreActions.actions
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(4)
+     }
+ 
+     @Test
+@@ -214,11 +209,11 @@ class PostListItemUiStateHelperTest {
+             capabilitiesToPublish = false
+         )
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
+-        assertThat(state.moreActions.actions).hasSize(4)
++        val moreActions = state.moreActions.actions
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
++        assertThat(moreActions).hasSize(3)
+     }
+ 
+     @Test
+@@ -228,14 +223,13 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_PUBLISH)
+         )
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_STATS)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[6].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(7)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_STATS)
++        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(6)
+     }
+ 
+     @Test
+@@ -246,13 +240,12 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+         assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(6)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(5)
+     }
+ 
+     @Test
+@@ -263,14 +256,13 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_STATS)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[6].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(7)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_STATS)
++        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(6)
+     }
+ 
+     @Test
+@@ -281,13 +273,12 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+         assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(6)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(5)
+     }
+ 
+     @Test
+@@ -297,14 +288,13 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+         assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_PUBLISH)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+         assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[6].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(7)
++        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(6)
+     }
+ 
+     @Test
+@@ -317,13 +307,12 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+         assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(6)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(5)
+     }
+ 
+     @Test
+@@ -344,11 +333,10 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(4)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(3)
+     }
+ 
+     @Test
+@@ -358,12 +346,11 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+         assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_SYNC)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(5)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(4)
+     }
+ 
+     @Test
+@@ -376,11 +363,10 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(4)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(3)
+     }
+ 
+     @Test
+@@ -389,12 +375,12 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_PENDING)
+         )
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_PUBLISH)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(state.moreActions.actions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(state.moreActions.actions).hasSize(5)
++        val moreActions = state.moreActions.actions
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_PUBLISH)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(4)
+     }
+ 
+     @Test
+@@ -405,11 +391,10 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(4)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_VIEW)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(3)
+     }
+ 
+     @Test
+@@ -422,14 +407,13 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+         assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+         assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[6].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(7)
++        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(6)
+     }
+ 
+     @Test
+@@ -442,12 +426,11 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+         assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(5)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(4)
+     }
+ 
+     @Test
+@@ -459,12 +442,11 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_PRIVATE, isLocallyChanged = true)
+         )
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+         assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(5)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(4)
+     }
+ 
+     @Test
+@@ -476,14 +458,13 @@ class PostListItemUiStateHelperTest {
+             post = createPostModel(status = POST_STATE_DRAFT, isLocallyChanged = true)
+         )
+ 
+-        assertThat(state.moreActions.actions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(state.moreActions.actions[1].buttonType)
+-            .isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+-        assertThat(state.moreActions.actions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
+-        assertThat(state.moreActions.actions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(state.moreActions.actions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(state.moreActions.actions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(state.moreActions.actions).hasSize(6)
++        val moreActions = state.moreActions.actions
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_PREVIEW)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(5)
+     }
+ 
+     @Test
+@@ -505,14 +486,13 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
+-        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_CANCEL_PENDING_AUTO_UPLOAD)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
++        assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+         assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
+-        assertThat(moreActions[6].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
+-        assertThat(moreActions).hasSize(7)
++        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY_URL)
++        assertThat(moreActions[5].buttonType).isEqualTo(PostListButtonType.BUTTON_TRASH)
++        assertThat(moreActions).hasSize(6)
+     }
+ 
+     @Test
+@@ -845,12 +825,11 @@ class PostListItemUiStateHelperTest {
+         )
+ 
+         val moreActions = state.moreActions.actions
+-        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_EDIT)
+-        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
++        assertThat(moreActions[0].buttonType).isEqualTo(PostListButtonType.BUTTON_RETRY)
++        assertThat(moreActions[1].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+         assertThat(moreActions[2].buttonType).isEqualTo(PostListButtonType.BUTTON_COPY)
+-        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_MOVE_TO_DRAFT)
+-        assertThat(moreActions[4].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
+-        assertThat(moreActions).hasSize(5)
++        assertThat(moreActions[3].buttonType).isEqualTo(PostListButtonType.BUTTON_DELETE)
++        assertThat(moreActions).hasSize(4)
+     }
+ 
+     @Test

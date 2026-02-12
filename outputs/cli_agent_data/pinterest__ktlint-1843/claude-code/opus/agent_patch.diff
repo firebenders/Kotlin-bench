@@ -1,0 +1,88 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
+index 06a2f93..9d337f0 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionReturnTypeSpacingRule.kt
+@@ -5,6 +5,10 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
+ import com.pinterest.ktlint.rule.engine.core.api.Rule
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.column
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY_OFF
+ import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe
+@@ -12,8 +16,17 @@ import com.pinterest.ktlint.ruleset.standard.StandardRule
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+ 
+ public class FunctionReturnTypeSpacingRule :
+-    StandardRule("function-return-type-spacing"),
++    StandardRule(
++        id = "function-return-type-spacing",
++        usesEditorConfigProperties = setOf(MAX_LINE_LENGTH_PROPERTY),
++    ),
+     Rule.Experimental {
++    private var maxLineLength = MAX_LINE_LENGTH_PROPERTY.defaultValue
++
++    override fun beforeFirstNode(editorConfig: EditorConfig) {
++        maxLineLength = editorConfig[MAX_LINE_LENGTH_PROPERTY]
++    }
++
+     override fun beforeVisitChildNodes(
+         node: ASTNode,
+         autoCorrect: Boolean,
+@@ -57,6 +70,12 @@ public class FunctionReturnTypeSpacingRule :
+             ?.takeIf { it.elementType == WHITE_SPACE }
+             .let { whiteSpaceAfterColon ->
+                 if (whiteSpaceAfterColon?.text != " ") {
++                    if (whiteSpaceAfterColon != null &&
++                        whiteSpaceAfterColon.textContains('\n') &&
++                        wouldExceedMaxLineLength(node)
++                    ) {
++                        return
++                    }
+                     emit(node.startOffset, "Single space expected between colon and return type", true)
+                     if (autoCorrect) {
+                         node.upsertWhitespaceAfterMe(" ")
+@@ -64,6 +83,40 @@ public class FunctionReturnTypeSpacingRule :
+                 }
+             }
+     }
++
++    private fun wouldExceedMaxLineLength(colonNode: ASTNode): Boolean {
++        if (maxLineLength == MAX_LINE_LENGTH_PROPERTY_OFF) {
++            return false
++        }
++        // Calculate the length of the line if the return type were placed on the same line as the colon.
++        // The colon column gives us the position of the colon in the current line.
++        // After the colon, we'd have ": " (space) and then the text up to the next newline on the following line.
++        val columnOfColon = colonNode.column
++        val lengthAfterColon = textLengthAfterColonOnNextLine(colonNode)
++        // Line length would be: (column of colon - 1) + 1 (colon) + 1 (space) + length of return type text
++        return (columnOfColon - 1 + 1 + 1 + lengthAfterColon) > maxLineLength
++    }
++
++    private fun textLengthAfterColonOnNextLine(colonNode: ASTNode): Int {
++        // Skip the whitespace after the colon (which contains the newline) and measure text until end or next newline
++        var length = 0
++        var leaf = colonNode.nextLeaf()
++        // Skip the whitespace node that contains the newline
++        if (leaf != null && leaf.elementType == WHITE_SPACE) {
++            leaf = leaf.nextLeaf()
++        }
++        while (leaf != null) {
++            if (leaf.textContains('\n')) {
++                // Only count text up to the newline
++                val textBeforeNewline = leaf.text.substringBefore('\n')
++                length += textBeforeNewline.length
++                break
++            }
++            length += leaf.textLength
++            leaf = leaf.nextLeaf()
++        }
++        return length
++    }
+ }
+ 
+ public val FUNCTION_RETURN_TYPE_SPACING_RULE_ID: RuleId = FunctionReturnTypeSpacingRule().ruleId

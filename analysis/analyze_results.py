@@ -34,6 +34,12 @@ MODEL_CONFIG = {
         "cached_input_price": 0.50,  # Cache hits & refreshes
         "output_price": 25.00,
     },
+    "claude-opus-4-6": {
+        "display_name": "Opus 4.6",
+        "input_price": 5.00,
+        "cached_input_price": 0.50,  # Cache hits & refreshes
+        "output_price": 25.00,
+    },
     "claude-sonnet-4-20250514": {
         "display_name": "Sonnet 4",
         "input_price": 3.00,

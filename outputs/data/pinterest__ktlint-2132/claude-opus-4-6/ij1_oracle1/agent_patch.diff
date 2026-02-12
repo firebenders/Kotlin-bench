@@ -1,0 +1,92 @@
+diff --git a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+index 201e7dac..aab423a0 100644
+--- a/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
++++ b/ktlint-rule-engine-core/src/main/kotlin/com/pinterest/ktlint/rule/engine/core/api/ASTNodeExtension.kt
+@@ -229,7 +229,7 @@ public fun ASTNode.children(): Sequence<ASTNode> = generateSequence(firstChildNo
+ /**
+  * Updates or inserts a new whitespace element with [text] before the given node. If the node itself is a whitespace
+  * then its contents is replaced with [text]. If the node is a (nested) composite element, the whitespace element is
+- * added after the previous leaf node.
++ * added before the node as a sibling in the parent.
+  */
+ public fun ASTNode.upsertWhitespaceBeforeMe(text: String) {
+     if (this is LeafElement) {
+@@ -239,17 +239,36 @@ public fun ASTNode.upsertWhitespaceBeforeMe(text: String) {
+         val previous = treePrev ?: prevLeaf()
+         if (previous != null && previous.elementType == WHITE_SPACE) {
+             previous.replaceWhitespaceWith(text)
++        } else if (treePrev == null && treeParent != null) {
++            // The node is the first child of its parent composite element, so inserting whitespace with
++            // rawInsertBeforeMe would incorrectly place it inside the composite element. Instead, delegate
++            // to the parent to insert the whitespace at the correct tree level.
++            treeParent.upsertWhitespaceBeforeMe(text)
+         } else {
+             PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
+                 (psi as LeafElement).rawInsertBeforeMe(psiWhiteSpace)
+             }
+         }
+     } else {
+-        val prevLeaf =
+-            requireNotNull(prevLeaf()) {
+-                "Can not upsert a whitespace if the first node is a non-leaf node"
++        val prevSibling = treePrev
++        if (prevSibling != null && prevSibling.elementType == WHITE_SPACE) {
++            prevSibling.replaceWhitespaceWith(text)
++        } else if (prevSibling != null) {
++            val treeParent =
++                requireNotNull(treeParent) {
++                    "Can not upsert a whitespace before a non-leaf node without a treeParent"
++                }
++            PsiWhiteSpaceImpl(text).also { psiWhiteSpace ->
++                (treeParent as CompositeElement).addChild(psiWhiteSpace, this)
+             }
+-        prevLeaf.upsertWhitespaceAfterMe(text)
++        } else {
++            // The node is the first child of its parent composite element, so inserting whitespace here
++            // would incorrectly place it inside the composite element. Instead, delegate to the parent
++            // to insert the whitespace at the correct tree level.
++            requireNotNull(treeParent) {
++                "Can not upsert a whitespace before a non-leaf node without a treeParent"
++            }.upsertWhitespaceBeforeMe(text)
++        }
+     }
+ }
+ 
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+index 596533b3..2b0a1fd6 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionSignatureRule.kt
+@@ -643,8 +643,7 @@ public class FunctionSignatureRule :
+                     if (autoCorrect) {
+                         functionBodyBlock
+                             .first()
+-                            .prevLeaf(true)
+-                            ?.upsertWhitespaceAfterMe(" ")
++                            .upsertWhitespaceBeforeMe(" ")
+                     }
+                 }
+             }
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionStartOfBodySpacingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionStartOfBodySpacingRule.kt
+index 4e845c8a..e69dfb42 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionStartOfBodySpacingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/FunctionStartOfBodySpacingRule.kt
+@@ -111,10 +111,7 @@ public class FunctionStartOfBodySpacingRule : StandardRule("function-start-of-bo
+                         if (whiteSpaceBeforeExpressionBlock?.text != " ") {
+                             emit(block.startOffset, "Expected a single white space before start of function body", true)
+                             if (autoCorrect) {
+-                                block
+-                                    .firstChildNode
+-                                    .prevLeaf(true)
+-                                    ?.upsertWhitespaceAfterMe(" ")
++                                block.upsertWhitespaceBeforeMe(" ")
+                             }
+                         }
+                     }
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

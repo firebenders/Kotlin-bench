@@ -1,0 +1,172 @@
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+index 85ea4e2..3c70cfc 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+@@ -47,6 +47,7 @@ import androidx.core.view.children
+ import androidx.core.view.isVisible
+ import androidx.webkit.WebViewAssetLoader
+ import anki.collection.OpChanges
++import anki.config.ConfigKey
+ import com.drakeet.drawer.FullDraggableContainer
+ import com.google.android.material.snackbar.Snackbar
+ import com.ichi2.anim.ActivityTransitionAnimation
+@@ -161,6 +162,7 @@ abstract class AbstractFlashcardViewer :
+ 
+     // Preferences from the collection
+     private var mShowNextReviewTime = false
++    private var mHidePlayButtons = false
+     private var mIsSelecting = false
+     private var mTouchStarted = false
+     private var mInAnswer = false
+@@ -538,7 +540,7 @@ abstract class AbstractFlashcardViewer :
+         registerExternalStorageListener()
+         restoreCollectionPreferences(col)
+         initLayout()
+-        mHtmlGenerator = createInstance(this, typeAnswer!!)
++        mHtmlGenerator = createInstance(this, typeAnswer!!, mHidePlayButtons)
+ 
+         // Initialize text-to-speech. This is an asynchronous operation.
+         mTTS.initialize(this, ReadTextListener())
+@@ -1201,6 +1203,7 @@ abstract class AbstractFlashcardViewer :
+         // These are preferences we pull out of the collection instead of SharedPreferences
+         try {
+             mShowNextReviewTime = col.config.get("estTimes") ?: true
++            mHidePlayButtons = col.config.getBool(ConfigKey.Bool.HIDE_AUDIO_PLAY_BUTTONS)
+             val preferences = baseContext.sharedPrefs()
+             automaticAnswer = AutomaticAnswer.createInstance(this, preferences, col)
+         } catch (ex: Exception) {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
+index b512edc..93a55e7 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
+@@ -23,6 +23,7 @@ import com.ichi2.anki.preferences.sharedPrefs
+ import com.ichi2.anki.reviewer.ReviewerCustomFonts
+ import com.ichi2.libanki.Card
+ import com.ichi2.libanki.Sound
++import com.ichi2.libanki.stripAvRefs
+ import timber.log.Timber
+ import java.io.BufferedReader
+ import java.io.IOException
+@@ -33,7 +34,8 @@ class HtmlGenerator(
+     private val typeAnswer: TypeAnswer,
+     val cardAppearance: CardAppearance,
+     val cardTemplate: CardTemplate,
+-    val resources: Resources
++    val resources: Resources,
++    val hidePlayButtons: Boolean = false
+ ) {
+ 
+     @CheckResult
+@@ -49,13 +51,17 @@ class HtmlGenerator(
+     }
+ 
+     fun expandSounds(content: String): String {
++        if (hidePlayButtons) {
++            return stripAvRefs(content)
++        }
+         return Sound.expandSounds(content)
+     }
+ 
+     companion object {
+         fun createInstance(
+             context: Context,
+-            typeAnswer: TypeAnswer
++            typeAnswer: TypeAnswer,
++            hidePlayButtons: Boolean = false
+         ): HtmlGenerator {
+             val preferences = context.sharedPrefs()
+             val cardAppearance = CardAppearance.create(ReviewerCustomFonts(), preferences)
+@@ -65,7 +71,8 @@ class HtmlGenerator(
+                 typeAnswer,
+                 cardAppearance,
+                 cardHtmlTemplate,
+-                context.resources
++                context.resources,
++                hidePlayButtons
+             )
+         }
+ 
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/AppearanceSettingsFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/AppearanceSettingsFragment.kt
+index ff91cb7..f3b8a15 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/AppearanceSettingsFragment.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/AppearanceSettingsFragment.kt
+@@ -22,6 +22,7 @@ import androidx.core.app.ActivityCompat
+ import androidx.preference.ListPreference
+ import androidx.preference.Preference
+ import androidx.preference.SwitchPreferenceCompat
++import anki.config.ConfigKey
+ import com.ichi2.anki.*
+ import com.ichi2.anki.CollectionManager.withCol
+ import com.ichi2.anki.snackbar.showSnackbar
+@@ -130,6 +131,18 @@ class AppearanceSettingsFragment : SettingsFragment() {
+                 true
+             }
+         }
++        // Show play buttons on cards with audio
++        // Represents the collection pref "hideAudioPlayButtons": i.e.
++        // whether the play buttons should be shown on cards with audio.
++        // Note: the UI shows "show" (checked = visible) but the config stores "hide" (true = hidden)
++        requirePreference<SwitchPreferenceCompat>(R.string.hide_audio_play_buttons_preference).apply {
++            launchCatchingTask { isChecked = withCol { !config.getBool(ConfigKey.Bool.HIDE_AUDIO_PLAY_BUTTONS) } }
++            setOnPreferenceChangeListener { _, newValue ->
++                val showPlayButtons = newValue as? Boolean ?: return@setOnPreferenceChangeListener false
++                launchCatchingTask { withCol { config.setBool(ConfigKey.Bool.HIDE_AUDIO_PLAY_BUTTONS, !showPlayButtons) } }
++                true
++            }
++        }
+         // Show progress
+         // Represents the collection pref "dueCounts": i.e.
+         // whether the remaining number of cards should be shown.
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt
+index fc1b62e..252b6a0 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt
+@@ -58,7 +58,7 @@ open class AvTag
+ val AV_REF_RE = Regex("\\[anki:(play:(.):(\\d+))]")
+ val AV_PLAYLINK_RE = Regex("playsound:(.):(\\d+)")
+ 
+-fun stripAvRefs(text: String) = AV_REF_RE.replace("", text)
++fun stripAvRefs(text: String) = AV_REF_RE.replace(text, "")
+ 
+ fun addPlayIcons(content: String): String {
+     return AV_REF_RE.replace(content) { match ->
+diff --git a/AnkiDroid/src/main/res/values/10-preferences.xml b/AnkiDroid/src/main/res/values/10-preferences.xml
+index 548e3bb..ad4f8c3 100644
+--- a/AnkiDroid/src/main/res/values/10-preferences.xml
++++ b/AnkiDroid/src/main/res/values/10-preferences.xml
+@@ -147,6 +147,8 @@
+     <string name="pref_show_answer_long_press_summary">Minimum long-press time before the show answer button will register a touch. May reduce the chance of accidental extra button presses. Default is 0ms</string>
+     <string name="show_estimates" maxLength="41">Show button time</string>
+     <string name="show_estimates_summ">Show next review time on answer buttons</string>
++    <string name="show_play_buttons_on_cards_with_audio" maxLength="41">Show play buttons on cards with audio</string>
++    <string name="show_play_buttons_on_cards_with_audio_summ">Display play buttons for audio on the card</string>
+     <string name="show_large_answer_buttons" maxLength="41">Show large answer buttons</string>
+     <string name="show_large_answer_buttons_summ">Show answer button in 2 rows</string>
+     <string name="show_top_bar" maxLength="41">Show top bar</string>
+diff --git a/AnkiDroid/src/main/res/values/preferences.xml b/AnkiDroid/src/main/res/values/preferences.xml
+index f1caa14..9541041 100644
+--- a/AnkiDroid/src/main/res/values/preferences.xml
++++ b/AnkiDroid/src/main/res/values/preferences.xml
+@@ -40,6 +40,7 @@
+     <string name="fullscreen_mode_preference">fullscreenMode</string>
+     <string name="center_vertically_preference">centerVertically</string>
+     <string name="show_estimates_preference">showEstimates</string>
++    <string name="hide_audio_play_buttons_preference">hideAudioPlayButtons</string>
+     <string name="pref_display_filenames_in_browser_key">card_browser_show_media_filenames</string>
+     <string name="show_topbar_preference">showTopbar</string>
+     <string name="show_progress_preference">showProgress</string>
+diff --git a/AnkiDroid/src/main/res/xml/preferences_appearance.xml b/AnkiDroid/src/main/res/xml/preferences_appearance.xml
+index 4c9de6a..0ab1f3b 100644
+--- a/AnkiDroid/src/main/res/xml/preferences_appearance.xml
++++ b/AnkiDroid/src/main/res/xml/preferences_appearance.xml
+@@ -87,6 +87,10 @@
+             android:key="@string/show_estimates_preference"
+             android:summary="@string/show_estimates_summ"
+             android:title="@string/show_estimates" />
++        <SwitchPreferenceCompat
++            android:key="@string/hide_audio_play_buttons_preference"
++            android:summary="@string/show_play_buttons_on_cards_with_audio_summ"
++            android:title="@string/show_play_buttons_on_cards_with_audio" />
+         <ListPreference
+             android:defaultValue="bottom"
+             android:entries="@array/answer_buttons_position_labels"

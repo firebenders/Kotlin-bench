@@ -1,0 +1,409 @@
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
+index 3a70af99..d816baf4 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/internal/SuppressionLocatorBuilder.kt
+@@ -51,6 +51,13 @@ internal object SuppressionLocatorBuilder {
+     private val SUPPRESS_ANNOTATIONS = setOf("Suppress", "SuppressWarnings")
+     private val SUPPRESS_ALL_KTLINT_RULES_RULE_ID = RuleId("ktlint:suppress-all-rules")
+ 
++    /**
++     * The ktlint-suppression rule can not be suppressed via any mechanism. It is the rule that detects and replaces old-style ktlint
++     * suppression directives (ktlint-disable/ktlint-enable) with @Suppress annotations. Suppressing this rule would make it impossible
++     * to replace the old-style directives.
++     */
++    private val KTLINT_SUPPRESSION_RULE_ID = RuleId("standard:ktlint-suppression")
++
+     /**
+      * Builds [SuppressionLocator] for given [rootNode] of AST tree.
+      */
+@@ -68,9 +75,14 @@ internal object SuppressionLocatorBuilder {
+ 
+     private fun toSuppressedRegionsLocator(hintsList: List<SuppressionHint>): SuppressionLocator =
+         { offset, ruleId ->
+-            hintsList
+-                .filter { offset in it.range }
+-                .any { hint -> hint.disabledRuleIds.isEmpty() || hint.disabledRuleIds.contains(ruleId) }
++            if (ruleId == KTLINT_SUPPRESSION_RULE_ID) {
++                // The ktlint-suppression rule can not be suppressed
++                false
++            } else {
++                hintsList
++                    .filter { offset in it.range }
++                    .any { hint -> hint.disabledRuleIds.isEmpty() || hint.disabledRuleIds.contains(ruleId) }
++            }
+         }
+ 
+     private fun collect(
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/StandardRuleSetProvider.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/StandardRuleSetProvider.kt
+index fa7b0ff1..62e22815 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/StandardRuleSetProvider.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/StandardRuleSetProvider.kt
+@@ -30,6 +30,7 @@ import com.pinterest.ktlint.ruleset.standard.rules.IfElseWrappingRule
+ import com.pinterest.ktlint.ruleset.standard.rules.ImportOrderingRule
+ import com.pinterest.ktlint.ruleset.standard.rules.IndentationRule
+ import com.pinterest.ktlint.ruleset.standard.rules.KdocWrappingRule
++import com.pinterest.ktlint.ruleset.standard.rules.KtlintSuppressionRule
+ import com.pinterest.ktlint.ruleset.standard.rules.MaxLineLengthRule
+ import com.pinterest.ktlint.ruleset.standard.rules.ModifierListSpacingRule
+ import com.pinterest.ktlint.ruleset.standard.rules.ModifierOrderRule
+@@ -115,6 +116,7 @@ public class StandardRuleSetProvider :
+             RuleProvider { ImportOrderingRule() },
+             RuleProvider { IndentationRule() },
+             RuleProvider { KdocWrappingRule() },
++            RuleProvider { KtlintSuppressionRule() },
+             RuleProvider { MaxLineLengthRule() },
+             RuleProvider { ModifierListSpacingRule() },
+             RuleProvider { ModifierOrderRule() },
+
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/KtlintSuppressionRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/KtlintSuppressionRule.kt
+new file mode 100644
+--- /dev/null
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/KtlintSuppressionRule.kt
+@@ -0,0 +1,339 @@
++package com.pinterest.ktlint.ruleset.standard.rules
++
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.BLOCK_COMMENT
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.EOL_COMMENT
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.WHITE_SPACE
++import com.pinterest.ktlint.rule.engine.core.api.RuleId
++import com.pinterest.ktlint.rule.engine.core.api.indent
++import com.pinterest.ktlint.rule.engine.core.api.nextCodeSibling
++import com.pinterest.ktlint.rule.engine.core.api.nextLeaf
++import com.pinterest.ktlint.rule.engine.core.api.prevLeaf
++import com.pinterest.ktlint.ruleset.standard.StandardRule
++import org.jetbrains.kotlin.com.intellij.lang.ASTNode
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.LeafPsiElement
++import org.jetbrains.kotlin.com.intellij.psi.impl.source.tree.PsiWhiteSpaceImpl
++import org.jetbrains.kotlin.psi.KtAnnotated
++import org.jetbrains.kotlin.psi.KtAnnotationEntry
++import org.jetbrains.kotlin.psi.KtDeclaration
++import org.jetbrains.kotlin.psi.KtExpression
++
++/**
++ * Disallows the usage of the old `ktlint-disable` and `ktlint-enable` directives. Those directives are to be replaced with
++ * `@Suppress` annotations.
++ *
++ * The rule can not be suppressed via the `@Suppress` annotation or the old `ktlint-disable` directive as that would result in a chicken
++ * and egg problem.
++ */
++public class KtlintSuppressionRule :
++    StandardRule(
++        id = "ktlint-suppression",
++        visitorModifiers =
++            setOf(
++                VisitorModifier.RunAsLateAsPossible,
++            ),
++    ) {
++    override fun beforeVisitChildNodes(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        when (node.elementType) {
++            EOL_COMMENT -> visitEolComment(node, autoCorrect, emit)
++            BLOCK_COMMENT -> visitBlockComment(node, autoCorrect, emit)
++        }
++    }
++
++    private fun visitEolComment(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        val commentText =
++            node
++                .text
++                .removePrefix("//")
++                .trim()
++        val parts = commentText.split(" ").filter { it.isNotBlank() }
++        if (parts.isEmpty() || parts[0] != KTLINT_DISABLE) {
++            return
++        }
++
++        val suppressionIds = parts.drop(1).toSuppressAnnotationValues()
++        emit(
++            node.startOffset,
++            "Directive 'ktlint-disable' in EOL comment is deprecated. Replace with @Suppress annotation",
++            true,
++        )
++        if (autoCorrect) {
++            replaceEolCommentDirectiveWithSuppressAnnotation(node, suppressionIds)
++        }
++    }
++
++    private fun visitBlockComment(
++        node: ASTNode,
++        autoCorrect: Boolean,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++    ) {
++        val commentText =
++            node
++                .text
++                .removePrefix("/*")
++                .removeSuffix("*/")
++                .trim()
++        val parts = commentText.split(" ").filter { it.isNotBlank() }
++        if (parts.isEmpty()) {
++            return
++        }
++
++        when (parts[0]) {
++            KTLINT_DISABLE -> {
++                val suppressionIds = parts.drop(1).toSuppressAnnotationValues()
++                emit(
++                    node.startOffset,
++                    "Directive 'ktlint-disable' in block comment is deprecated. Replace with @Suppress annotation",
++                    true,
++                )
++                if (autoCorrect) {
++                    replaceBlockCommentDirectiveWithSuppressAnnotation(node, suppressionIds)
++                }
++            }
++
++            KTLINT_ENABLE -> {
++                emit(
++                    node.startOffset,
++                    "Directive 'ktlint-enable' in block comment is deprecated. Replace with @Suppress annotation",
++                    true,
++                )
++                if (autoCorrect) {
++                    removeNodeAndSurroundingWhitespace(node)
++                }
++            }
++        }
++    }
++
++    /**
++     * Converts old-style rule ids to the new `@Suppress` format:
++     * - No rule ids means suppress all: `ktlint`
++     * - `some-rule` becomes `ktlint:standard:some-rule`
++     * - `standard:some-rule` becomes `ktlint:standard:some-rule`
++     * - `experimental:some-rule` becomes `ktlint:standard:some-rule` (experimental was folded into standard)
++     * - `custom-set:some-rule` becomes `ktlint:custom-set:some-rule`
++     */
++    private fun List<String>.toSuppressAnnotationValues(): List<String> =
++        if (isEmpty()) {
++            listOf("ktlint")
++        } else {
++            map { ruleId ->
++                when {
++                    ruleId.startsWith("experimental:") -> {
++                        "ktlint:standard:${ruleId.removePrefix("experimental:")}"
++                    }
++
++                    ruleId.contains(":") -> {
++                        "ktlint:$ruleId"
++                    }
++
++                    else -> {
++                        "ktlint:standard:$ruleId"
++                    }
++                }
++            }
++        }
++
++    private fun replaceEolCommentDirectiveWithSuppressAnnotation(
++        node: ASTNode,
++        suppressionIds: List<String>,
++    ) {
++        val target = findTargetForEolComment(node)
++        if (target != null) {
++            addSuppressAnnotation(target, suppressionIds)
++        }
++
++        // Remove the EOL comment and the preceding whitespace on the same line
++        val prevLeaf = node.prevLeaf()
++        if (prevLeaf != null && prevLeaf.elementType == WHITE_SPACE && !prevLeaf.textContains('\n')) {
++            prevLeaf.treeParent.removeChild(prevLeaf)
++        }
++        node.treeParent.removeChild(node)
++    }
++
++    private fun replaceBlockCommentDirectiveWithSuppressAnnotation(
++        node: ASTNode,
++        suppressionIds: List<String>,
++    ) {
++        // Find and remove the matching enable comment first (before we lose track of it)
++        val enableComment = findMatchingEnableComment(node, suppressionIds)
++        if (enableComment != null) {
++            removeNodeAndSurroundingWhitespace(enableComment)
++        }
++
++        // Find the target to annotate - it's the next code sibling after the disable comment
++        val target = findTargetForBlockComment(node)
++        if (target != null) {
++            addSuppressAnnotation(target, suppressionIds)
++        }
++
++        // Remove the disable comment
++        removeNodeAndSurroundingWhitespace(node)
++    }
++
++    /**
++     * Find the target node for an EOL comment. The target is the closest parent that is a declaration or expression and
++     * that is a direct child of the file, script, class body, or block (i.e., it is a "statement-level" node).
++     */
++    private fun findTargetForEolComment(node: ASTNode): ASTNode? {
++        var current = node.treeParent
++        while (current != null) {
++            if (current.elementType == FILE) {
++                return null
++            }
++            val psi = current.psi
++            if (psi is KtDeclaration || psi is KtExpression) {
++                return current
++            }
++            current = current.treeParent
++        }
++        return null
++    }
++
++    private fun findTargetForBlockComment(node: ASTNode): ASTNode? {
++        val nextSibling = node.nextCodeSibling()
++        if (nextSibling != null) {
++            val psi = nextSibling.psi
++            if (psi is KtDeclaration || psi is KtExpression) {
++                return nextSibling
++            }
++        }
++        return null
++    }
++
++    private fun findMatchingEnableComment(
++        disableNode: ASTNode,
++        suppressionIds: List<String>,
++    ): ASTNode? {
++        var sibling = disableNode.treeNext
++        while (sibling != null) {
++            if (sibling.elementType == BLOCK_COMMENT) {
++                val text =
++                    sibling
++                        .text
++                        .removePrefix("/*")
++                        .removeSuffix("*/")
++                        .trim()
++                val parts = text.split(" ").filter { it.isNotBlank() }
++                if (parts.isNotEmpty() && parts[0] == KTLINT_ENABLE) {
++                    val enableRuleIds = parts.drop(1).toSuppressAnnotationValues()
++                    if (enableRuleIds == suppressionIds) {
++                        return sibling
++                    }
++                }
++            }
++            sibling = sibling.treeNext
++        }
++        return null
++    }
++
++    private fun removeNodeAndSurroundingWhitespace(node: ASTNode) {
++        val prevLeaf = node.prevLeaf()
++        val nextLeaf = node.nextLeaf()
++
++        val parent = node.treeParent
++        parent.removeChild(node)
++
++        // Clean up whitespace
++        if (prevLeaf != null && prevLeaf.elementType == WHITE_SPACE && prevLeaf.textContains('\n') &&
++            nextLeaf != null && nextLeaf.elementType == WHITE_SPACE && nextLeaf.textContains('\n')
++        ) {
++            try {
++                nextLeaf.treeParent?.removeChild(nextLeaf)
++            } catch (_: Exception) {
++                // Node may have already been removed
++            }
++        } else if (prevLeaf != null && prevLeaf.elementType == WHITE_SPACE && !prevLeaf.textContains('\n')) {
++            try {
++                prevLeaf.treeParent?.removeChild(prevLeaf)
++            } catch (_: Exception) {
++                // Node may have already been removed
++            }
++        }
++    }
++
++    private fun addSuppressAnnotation(
++        target: ASTNode,
++        suppressionIds: List<String>,
++    ) {
++        val psiElement = target.psi
++        if (psiElement is KtAnnotated) {
++            val existingSuppress = findExistingSuppressAnnotation(psiElement)
++            if (existingSuppress != null) {
++                mergeWithExistingSuppress(existingSuppress, suppressionIds)
++                return
++            }
++        }
++
++        val indent = target.indent(includeNewline = false)
++        val annotationText = "@Suppress(${suppressionIds.joinToString(", ") { "\"$it\"" }})"
++
++        // Insert the @Suppress annotation before the target, on a new line with proper indent
++        val prevWhitespace = target.prevLeaf()
++        if (prevWhitespace != null && prevWhitespace.elementType == WHITE_SPACE && prevWhitespace.textContains('\n')) {
++            val newText = prevWhitespace.text + "$annotationText\n$indent"
++            (prevWhitespace as LeafPsiElement).rawReplaceWithText(newText)
++        } else {
++            // No preceding whitespace with newline - we're likely at the start of the file
++            val firstLeaf = target.firstChildNode ?: target
++            if (firstLeaf is LeafPsiElement) {
++                PsiWhiteSpaceImpl("$annotationText\n$indent").also { ws ->
++                    firstLeaf.rawInsertBeforeMe(ws)
++                }
++            }
++        }
++    }
++
++    private fun findExistingSuppressAnnotation(ktAnnotated: KtAnnotated): KtAnnotationEntry? =
++        ktAnnotated
++            .annotationEntries
++            .firstOrNull { annotationEntry ->
++                annotationEntry
++                    .calleeExpression
++                    ?.constructorReferenceExpression
++                    ?.getReferencedName() in SUPPRESS_ANNOTATIONS
++            }
++
++    private fun mergeWithExistingSuppress(
++        existingSuppress: KtAnnotationEntry,
++        newSuppressionIds: List<String>,
++    ) {
++        val existingValues =
++            existingSuppress
++                .valueArguments
++                .mapNotNull { it.getArgumentExpression()?.text }
++
++        // Combine existing and new values, avoid duplicates
++        val quotedNewValues = newSuppressionIds.map { "\"$it\"" }
++        val allValues = (existingValues + quotedNewValues).distinct()
++
++        val newAnnotationText = "@Suppress(${allValues.joinToString(", ")})"
++
++        // Replace the entire annotation text by replacing the text in the node
++        val node = existingSuppress.node
++        val parent = node.treeParent
++        if (parent != null) {
++            val firstChild = node.firstChildNode
++            val lastChild = node.lastChildNode
++            if (firstChild is LeafPsiElement && firstChild === lastChild) {
++                firstChild.rawReplaceWithText(newAnnotationText)
++            }
++        }
++    }
++
++    private companion object {
++        val SUPPRESS_ANNOTATIONS = setOf("Suppress", "SuppressWarnings")
++        const val KTLINT_DISABLE = "ktlint-disable"
++        const val KTLINT_ENABLE = "ktlint-enable"
++    }
++}
++
++public val KTLINT_SUPPRESSION_RULE_ID: RuleId = KtlintSuppressionRule().ruleId
++
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

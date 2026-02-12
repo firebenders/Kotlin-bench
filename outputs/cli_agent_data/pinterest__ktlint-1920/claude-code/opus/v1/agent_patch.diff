@@ -1,0 +1,124 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+index bdddca0..3f86388 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/AnnotationRule.kt
+@@ -6,6 +6,7 @@ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.ANNOTATION_ENTRY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE_ANNOTATION_LIST
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIMARY_CONSTRUCTOR
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_PROJECTION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VALUE_ARGUMENT
+@@ -18,6 +19,7 @@ import com.pinterest.ktlint.rule.engine.core.api.Rule.VisitorModifier.RunAfterRu
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+ import com.pinterest.ktlint.rule.engine.core.api.children
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CODE_STYLE_PROPERTY
++import com.pinterest.ktlint.rule.engine.core.api.editorconfig.CodeStyleValue.ktlint_official
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.EditorConfig
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_SIZE_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPERTY
+@@ -78,6 +80,7 @@ public class AnnotationRule :
+         id = "annotation",
+         usesEditorConfigProperties =
+             setOf(
++                CODE_STYLE_PROPERTY,
+                 INDENT_SIZE_PROPERTY,
+                 INDENT_STYLE_PROPERTY,
+             ),
+@@ -127,6 +130,11 @@ public class AnnotationRule :
+     ) {
+         require(node.elementType == ANNOTATION_ENTRY)
+ 
++        if (codeStyle == ktlint_official && node.isAnnotationOnConstructor()) {
++            checkForAnnotationOnConstructorToBePlacedOnSeparateLine(node, emit, autoCorrect)
++            return
++        }
++
+         if (node.isAnnotationEntryWithValueArgumentList() &&
+             node.treeParent.treeParent.elementType != VALUE_PARAMETER &&
+             node.treeParent.treeParent.elementType != VALUE_ARGUMENT &&
+@@ -245,6 +253,83 @@ public class AnnotationRule :
+         }
+     }
+ 
++    private fun ASTNode.isAnnotationOnConstructor() =
++        treeParent.elementType == MODIFIER_LIST &&
++            treeParent.treeParent.elementType == PRIMARY_CONSTRUCTOR
++
++    private fun checkForAnnotationOnConstructorToBePlacedOnSeparateLine(
++        node: ASTNode,
++        emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
++        autoCorrect: Boolean,
++    ) {
++        val expectedIndent = getNewlineWithIndentForConstructorAnnotation(node)
++
++        if (node.isFirstAnnotationEntry() &&
++            !node.isPrecededByNewline()
++        ) {
++            // In ktlint_official code style, annotations before the constructor should be placed on a separate line:
++            //   data class Foo
++            //       @Bar1
++            //       constructor(...)
++            // Instead of:
++            //   data class Foo @Bar1 constructor(...)
++            emit(
++                node.startOffset,
++                "Annotation must be placed on a separate line when placed before the primary constructor",
++                true,
++            )
++            if (autoCorrect) {
++                node
++                    .firstChildLeafOrSelf()
++                    .upsertWhitespaceBeforeMe(expectedIndent)
++            }
++        }
++
++        if (!node.isFirstAnnotationEntry() && node.isPrecededByOtherAnnotationEntryOnTheSameLine()) {
++            emit(
++                node.startOffset,
++                "Annotation must be placed on a separate line when placed before the primary constructor",
++                true,
++            )
++            if (autoCorrect) {
++                node
++                    .firstChildLeafOrSelf()
++                    .upsertWhitespaceBeforeMe(expectedIndent)
++            }
++        }
++
++        if (node.isLastAnnotationEntry() && node.isOnSameLineAsAnnotatedConstruct()) {
++            emit(
++                node.startOffset,
++                "Annotation must be placed on a separate line when placed before the primary constructor",
++                true,
++            )
++            if (autoCorrect) {
++                node
++                    .lastChildLeafOrSelf()
++                    .nextLeaf()
++                    ?.upsertWhitespaceBeforeMe(expectedIndent)
++            }
++        }
++    }
++
++    private fun getNewlineWithIndentForConstructorAnnotation(node: ASTNode): String {
++        // For annotations on a primary constructor, the indent should be based on the class indent + one indent level
++        // Given:  data class Foo @Bar1 constructor(...)
++        // The PRIMARY_CONSTRUCTOR's parent is the CLASS node
++        val classNode = node.treeParent.treeParent.treeParent // ANNOTATION_ENTRY -> MODIFIER_LIST -> PRIMARY_CONSTRUCTOR -> CLASS
++        val classIndent =
++            classNode
++                .treePrev
++                ?.text
++                .orEmpty()
++                .substringAfterLast('\n')
++        return "\n" + classIndent + indentConfig.indent
++    }
++
++    private fun ASTNode.isPrecededByNewline(): Boolean =
++        prevLeaf()?.isWhiteSpaceWithNewline() == true
++
+     private fun ASTNode.typeProjectionOrNull() =
+         takeIf { elementType == ANNOTATION_ENTRY }
+             ?.takeIf { it.treeParent.elementType == MODIFIER_LIST }

@@ -1,0 +1,167 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 5daff4f..13018a5 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.9.0'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -228,12 +227,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -248,12 +247,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -366,7 +359,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.5.1'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/ViewerResourceHandler.kt b/AnkiDroid/src/main/java/com/ichi2/anki/ViewerResourceHandler.kt
+index 378802b..2f2925c 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/ViewerResourceHandler.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/ViewerResourceHandler.kt
+@@ -17,6 +17,7 @@
+ package com.ichi2.anki
+ 
+ import android.content.Context
++import android.net.Uri
+ import android.webkit.WebResourceRequest
+ import android.webkit.WebResourceResponse
+ import com.ichi2.utils.AssetHelper.guessMimeType
+@@ -48,21 +49,48 @@ class ViewerResourceHandler(context: Context, private val authority: String) {
+         }
+ 
+         try {
+-            val file = File(mediaDir, path)
+-            if (!file.exists()) {
++            val file = getMediaFile(url, path)
++            if (file == null || !file.exists()) {
+                 return null
+             }
+             request.requestHeaders[RANGE_HEADER]?.let { range ->
+                 return handlePartialContent(file, range)
+             }
+             val inputStream = FileInputStream(file)
+-            return WebResourceResponse(guessMimeType(path), null, inputStream)
++            return WebResourceResponse(guessMimeType(file.name), null, inputStream)
+         } catch (e: Exception) {
+             Timber.d("File not found")
+             return null
+         }
+     }
+ 
++    /**
++     * Resolves the media file for a given URL.
++     *
++     * Handles filenames containing `#` characters, which are interpreted as
++     * URL fragment delimiters by [android.net.Uri]. For example, a file named
++     * `image#1.png` in `<img src="image#1.png">` results in [android.net.Uri.getPath]
++     * returning `/image` and [android.net.Uri.getFragment] returning `1.png`.
++     *
++     * This method first tries the path as-is, and if not found, attempts to
++     * reconstruct the filename by appending `#` and the fragment.
++     */
++    private fun getMediaFile(url: Uri, path: String): File? {
++        val file = File(mediaDir, path)
++        if (file.exists()) {
++            return file
++        }
++        // If the URL has a fragment, it may be part of the filename (e.g. "image#1.png")
++        val fragment = url.fragment
++        if (fragment != null) {
++            val fileWithFragment = File(mediaDir, "$path#$fragment")
++            if (fileWithFragment.exists()) {
++                return fileWithFragment
++            }
++        }
++        return null
++    }
++
+     private fun handlePartialContent(file: File, range: String): WebResourceResponse {
+         val rangeHeader = RangeHeader.from(range, defaultEnd = file.length() - 1)
+ 
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+index 01bb151..28b7132 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+@@ -364,7 +364,15 @@ fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
+             }
+             if (attrUri.scheme != null) continue
+ 
+-            val path = Paths.get(mediaDir, attrUri.path).toString()
++            // URI treats '#' as a fragment delimiter, but Anki stores filenames
++            // with literal '#' on disk (legacy behavior). Reconstruct the full
++            // filename by including the fragment if present.
++            val fileName = if (attrUri.fragment != null) {
++                "${attrUri.path}#${attrUri.fragment}"
++            } else {
++                attrUri.path
++            }
++            val path = Paths.get(mediaDir, fileName).toString()
+             val newUri = getFileUri(path)
+ 
+             elem.attr(attr, newUri.toString())
+diff --git a/gradle.properties b/gradle.properties
+index 13992ec..b06b0f2 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index df05afe..4d2ca96 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

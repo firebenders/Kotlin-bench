@@ -1,0 +1,245 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 412b151..6034f42 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.8.4'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -160,9 +159,6 @@ android {
+         play {
+             dimension "appStore"
+         }
+-        amazon {
+-            dimension "appStore"
+-        }
+         // A 'full' build has no restrictions on storage/camera. Distributed on GitHub/F-Droid
+         full {
+             dimension "appStore"
+@@ -225,12 +221,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -245,12 +241,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ task installGitHook(type: Copy) {
+@@ -359,7 +349,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.4.0'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+     implementation 'com.github.AppIntro:AppIntro:6.3.1'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+index 85ea4e2..8bb8111 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+@@ -47,6 +47,7 @@ import androidx.core.view.children
+ import androidx.core.view.isVisible
+ import androidx.webkit.WebViewAssetLoader
+ import anki.collection.OpChanges
++import anki.config.ConfigKey
+ import com.drakeet.drawer.FullDraggableContainer
+ import com.google.android.material.snackbar.Snackbar
+ import com.ichi2.anim.ActivityTransitionAnimation
+@@ -538,7 +539,7 @@ abstract class AbstractFlashcardViewer :
+         registerExternalStorageListener()
+         restoreCollectionPreferences(col)
+         initLayout()
+-        mHtmlGenerator = createInstance(this, typeAnswer!!)
++        mHtmlGenerator = createInstance(this, typeAnswer!!, col.config.getBool(ConfigKey.Bool.HIDE_AUDIO_PLAY_BUTTONS))
+ 
+         // Initialize text-to-speech. This is an asynchronous operation.
+         mTTS.initialize(this, ReadTextListener())
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
+index b512edc..5a2941e 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
+@@ -33,7 +33,8 @@ class HtmlGenerator(
+     private val typeAnswer: TypeAnswer,
+     val cardAppearance: CardAppearance,
+     val cardTemplate: CardTemplate,
+-    val resources: Resources
++    val resources: Resources,
++    val hidePlayButtons: Boolean = false
+ ) {
+ 
+     @CheckResult
+@@ -49,13 +50,14 @@ class HtmlGenerator(
+     }
+ 
+     fun expandSounds(content: String): String {
+-        return Sound.expandSounds(content)
++        return Sound.expandSounds(content, hidePlayButtons)
+     }
+ 
+     companion object {
+         fun createInstance(
+             context: Context,
+-            typeAnswer: TypeAnswer
++            typeAnswer: TypeAnswer,
++            hidePlayButtons: Boolean = false
+         ): HtmlGenerator {
+             val preferences = context.sharedPrefs()
+             val cardAppearance = CardAppearance.create(ReviewerCustomFonts(), preferences)
+@@ -65,7 +67,8 @@ class HtmlGenerator(
+                 typeAnswer,
+                 cardAppearance,
+                 cardHtmlTemplate,
+-                context.resources
++                context.resources,
++                hidePlayButtons
+             )
+         }
+ 
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ReviewingSettingsFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ReviewingSettingsFragment.kt
+index 3020d9d..ca3658d 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ReviewingSettingsFragment.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ReviewingSettingsFragment.kt
+@@ -15,6 +15,7 @@
+  */
+ package com.ichi2.anki.preferences
+ 
++import anki.config.ConfigKey
+ import androidx.preference.ListPreference
+ import androidx.preference.SwitchPreferenceCompat
+ import com.ichi2.anki.CollectionManager.withCol
+@@ -91,5 +92,17 @@ class ReviewingSettingsFragment : SettingsFragment() {
+                 }
+             }
+         }
++        // Show play buttons on cards with audio
++        // The config key is HIDE_AUDIO_PLAY_BUTTONS (inverted logic)
++        requirePreference<SwitchPreferenceCompat>(R.string.hide_audio_play_buttons_preference).apply {
++            launchCatchingTask {
++                isChecked = withCol { !config.getBool(ConfigKey.Bool.HIDE_AUDIO_PLAY_BUTTONS) }
++            }
++            setOnPreferenceChangeListener { newValue ->
++                launchCatchingTask {
++                    withCol { config.setBool(ConfigKey.Bool.HIDE_AUDIO_PLAY_BUTTONS, !(newValue as Boolean)) }
++                }
++            }
++        }
+     }
+ }
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt
+index cdcbdcc..5d08e37 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt
+@@ -222,10 +222,15 @@ class Sound(private val soundPlayer: SoundPlayer, private val soundDir: String)
+          * file
+          *
+          * @param content -- card content to be rendered that may contain embedded audio
++         * @param hidePlayButtons -- if true, strip audio references instead of adding play icons
+          * @return -- the same content but in a format that will render working play buttons when audio was embedded
+          */
+-        fun expandSounds(content: String): String {
+-            return addPlayIcons(content)
++        fun expandSounds(content: String, hidePlayButtons: Boolean = false): String {
++            return if (hidePlayButtons) {
++                AV_REF_RE.replace(content, "")
++            } else {
++                addPlayIcons(content)
++            }
+         }
+ 
+         /**
+diff --git a/AnkiDroid/src/main/res/values/10-preferences.xml b/AnkiDroid/src/main/res/values/10-preferences.xml
+index 548e3bb..5f7a132 100644
+--- a/AnkiDroid/src/main/res/values/10-preferences.xml
++++ b/AnkiDroid/src/main/res/values/10-preferences.xml
+@@ -163,6 +163,7 @@
+     <string name="day_offset_summary">%s hours past midnight</string>
+     <string name="pref_keep_screen_on" maxLength="41">Keep screen on</string>
+     <string name="pref_keep_screen_on_summ">Disable screen timeout</string>
++    <string name="show_play_buttons_on_cards_with_audio" maxLength="41">Show play buttons on cards with audio</string>
+     <string name="enable_api_title" maxLength="41">Enable AnkiDroid API</string>
+     <string name="enable_api_summary">Let other apps connect to AnkiDroid and read / write data without your intervention</string>
+     <string name="custom_buttons" maxLength="41">App bar buttons</string>
+diff --git a/AnkiDroid/src/main/res/values/preferences.xml b/AnkiDroid/src/main/res/values/preferences.xml
+index f1caa14..72e3beb 100644
+--- a/AnkiDroid/src/main/res/values/preferences.xml
++++ b/AnkiDroid/src/main/res/values/preferences.xml
+@@ -19,6 +19,7 @@
+     <string name="keep_screen_on_preference">keepScreenOn</string>
+     <string name="new_timezone_handling_preference">newTimezoneHandling</string>
+     <string name="double_tap_time_interval_preference">doubleTapTimeInterval</string>
++    <string name="hide_audio_play_buttons_preference">hideAudioPlayButtons</string>
+     <!-- Sync -->
+     <string name="pref_sync_screen_key">syncScreen</string>
+     <string name="sync_account_key">syncAccount</string>
+diff --git a/AnkiDroid/src/main/res/xml/preferences_reviewing.xml b/AnkiDroid/src/main/res/xml/preferences_reviewing.xml
+index 3259234..b36b1b9 100644
+--- a/AnkiDroid/src/main/res/xml/preferences_reviewing.xml
++++ b/AnkiDroid/src/main/res/xml/preferences_reviewing.xml
+@@ -49,6 +49,10 @@
+             app:min="0"
+             app1:summaryFormat="@string/pref_summary_minutes"/>
+     </PreferenceCategory>
++    <SwitchPreferenceCompat
++        android:defaultValue="true"
++        android:key="@string/hide_audio_play_buttons_preference"
++        android:title="@string/show_play_buttons_on_cards_with_audio" />
+     <PreferenceCategory android:title="@string/timeout_answer_text" >
+         <SwitchPreferenceCompat
+             android:defaultValue="false"
+diff --git a/gradle.properties b/gradle.properties
+index 13992ec..b06b0f2 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 72d79e8..32b9803 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

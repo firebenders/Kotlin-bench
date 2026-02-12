@@ -1,0 +1,132 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+index 79f1e477..9afdf8ca 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/PropertyNamingRule.kt
+@@ -1,16 +1,22 @@
+ package com.pinterest.ktlint.ruleset.standard.rules
+ 
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CLASS_BODY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CONST_KEYWORD
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.DOT_QUALIFIED_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FILE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.GET_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.IDENTIFIER
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.MODIFIER_LIST
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.NULLABLE_TYPE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OBJECT_DECLARATION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.OVERRIDE_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PRIVATE_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.PROPERTY_ACCESSOR
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.REFERENCE_EXPRESSION
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.TYPE_REFERENCE
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.USER_TYPE
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.VAL_KEYWORD
+ import com.pinterest.ktlint.rule.engine.core.api.Rule
+ import com.pinterest.ktlint.rule.engine.core.api.RuleId
+@@ -52,8 +58,7 @@ public class PropertyNamingRule :
+                         visitBackingProperty(identifier, emit)
+                     }
+                     property.hasConstModifier() ||
+-                        property.isTopLevelValue() ||
+-                        property.isObjectValue() -> {
++                        (property.isTopLevelValue() || property.isObjectValue()) && !property.isMutableProperty() -> {
+                         visitConstProperty(identifier, emit)
+                     }
+                     else -> {
+@@ -129,6 +134,57 @@ public class PropertyNamingRule :
+             containsValKeyword() &&
+             !hasModifier(OVERRIDE_KEYWORD)
+ 
++    /**
++     * Determines whether a property has a mutable type. A property is considered mutable when:
++     * - It has an explicit type annotation that is a known mutable collection type (e.g., MutableMap, MutableList), or
++     * - It is initialized with a known mutable collection factory function (e.g., mutableMapOf, mutableListOf)
++     *
++     * Per https://developer.android.com/kotlin/style-guide#constant_names, mutable collection properties should not
++     * use SCREAMING_SNAKE_CASE even if declared as `val` in objects or at top-level.
++     */
++    private fun ASTNode.isMutableProperty(): Boolean {
++        // Check explicit type reference: val foo: MutableMap<K, V> = ...
++        findChildByType(TYPE_REFERENCE)
++            ?.let { typeReference ->
++                val userType = typeReference.findChildByType(USER_TYPE)
++                    ?: typeReference.findChildByType(NULLABLE_TYPE)?.findChildByType(USER_TYPE)
++                userType
++                    ?.findChildByType(REFERENCE_EXPRESSION)
++                    ?.findChildByType(IDENTIFIER)
++                    ?.text
++                    ?.let { typeName ->
++                        if (typeName in MUTABLE_COLLECTION_TYPES) {
++                            return true
++                        }
++                    }
++            }
++
++        // Check initializer call expression: val foo = mutableMapOf(...)
++        findChildByType(CALL_EXPRESSION)
++            ?.findChildByType(REFERENCE_EXPRESSION)
++            ?.findChildByType(IDENTIFIER)
++            ?.text
++            ?.let { functionName ->
++                if (functionName in MUTABLE_COLLECTION_FACTORY_FUNCTIONS) {
++                    return true
++                }
++            }
++
++        // Check initializer dot-qualified expression: val foo = HashMap<K, V>() or similar
++        findChildByType(DOT_QUALIFIED_EXPRESSION)
++            ?.findChildByType(CALL_EXPRESSION)
++            ?.findChildByType(REFERENCE_EXPRESSION)
++            ?.findChildByType(IDENTIFIER)
++            ?.text
++            ?.let { functionName ->
++                if (functionName in MUTABLE_COLLECTION_FACTORY_FUNCTIONS) {
++                    return true
++                }
++            }
++
++        return false
++    }
++
+     private fun ASTNode.isBackingProperty() =
+         takeIf { hasModifier(PRIVATE_KEYWORD) }
+             ?.findChildByType(IDENTIFIER)
+@@ -150,6 +206,28 @@ public class PropertyNamingRule :
+         val SCREAMING_SNAKE_CASE_REGEXP = "[A-Z][_A-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
+         val BACKING_PROPERTY_LOWER_CAMEL_CASE_REGEXP = "_[a-z][a-zA-Z0-9]*".regExIgnoringDiacriticsAndStrokesOnLetters()
+         const val SERIAL_VERSION_UID_PROPERTY_NAME = "serialVersionUID"
++        val MUTABLE_COLLECTION_TYPES = setOf(
++            "MutableCollection",
++            "MutableList",
++            "MutableMap",
++            "MutableSet",
++            "ArrayList",
++            "ArrayDeque",
++            "HashMap",
++            "HashSet",
++            "LinkedHashMap",
++            "LinkedHashSet",
++        )
++        val MUTABLE_COLLECTION_FACTORY_FUNCTIONS = setOf(
++            "mutableListOf",
++            "mutableSetOf",
++            "mutableMapOf",
++            "arrayListOf",
++            "hashMapOf",
++            "linkedMapOf",
++            "linkedSetOf",
++            "hashSetOf",
++        )
+     }
+ }
+ 
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

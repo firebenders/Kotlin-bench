@@ -1,0 +1,57 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+index dbed1796..28bcdb7c 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+@@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.LAMBDA_ARGUMENT
+@@ -118,7 +119,10 @@ public class BinaryExpressionWrappingRule :
+                 binaryExpression.parent { it.elementType == LONG_STRING_TEMPLATE_ENTRY } == null
+             }?.takeIf { it.isOnLineExceedingMaxLineLength() }
+             ?.let { operationReference ->
+-                if (node.isCallExpressionFollowedByLambdaArgument() || cannotBeWrappedAtOperationReference(operationReference)) {
++                if (node.isCallExpressionFollowedByLambdaArgument() ||
++                    cannotBeWrappedAtOperationReference(operationReference) ||
++                    wrappingOfElvisOperatorCausesInfiniteLoop(operationReference)
++                ) {
+                     // Wrapping after operation reference might not be the best place in case of a call expression or just won't work as
+                     // the left hand side still does not fit on a single line
+                     emit(operationReference.startOffset, "Line is exceeding max line length", false)
+@@ -139,6 +143,24 @@ public class BinaryExpressionWrappingRule :
+             }
+     }
+ 
++    private fun wrappingOfElvisOperatorCausesInfiniteLoop(operationReference: ASTNode): Boolean {
++        if (operationReference.firstChildNode?.elementType != ELVIS) {
++            return false
++        }
++        // When the binary expression is wrapped at the elvis operator, the chain-wrapping rule will move the elvis operator
++        // to the beginning of the next line (as a line may not end with an elvis operator). If the resulting line still
++        // exceeds the max line length, wrapping and chain-wrapping will keep undoing each other, causing an infinite loop.
++        val indent = operationReference.indent(includeNewline = false)
++        val indentLength = indent.length + indentConfig.indent.length
++        val rightHandSideExpression = operationReference.nextCodeSibling() ?: return false
++        // After chain-wrapping, the line will be: <indent><extra-indent>?: <right-hand-side-first-line>
++        // Only consider the first line of the right-hand side expression as multi-line expressions would be split across
++        // multiple lines.
++        val rightHandSideFirstLineLength = rightHandSideExpression.text.substringBefore('\n').length
++        val lineLength = indentLength + "?: ".length + rightHandSideFirstLineLength
++        return lineLength > maxLineLength
++    }
++
+     private fun ASTNode.isCallExpressionFollowedByLambdaArgument() =
+         parent { it.elementType == VALUE_ARGUMENT_LIST }
+             ?.takeIf { it.treeParent.elementType == CALL_EXPRESSION }
+
+diff --git a/local.properties b/local.properties
+new file mode 100644
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++sdk.dir=/root/android-sdk
++

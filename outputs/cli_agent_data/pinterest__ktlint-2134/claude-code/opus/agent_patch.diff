@@ -1,0 +1,59 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+index dbed179..65e22e6 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+@@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.LAMBDA_ARGUMENT
+@@ -26,6 +27,7 @@ import com.pinterest.ktlint.rule.engine.core.api.nextSibling
+ import com.pinterest.ktlint.rule.engine.core.api.noNewLineInClosedRange
+ import com.pinterest.ktlint.rule.engine.core.api.parent
+ import com.pinterest.ktlint.rule.engine.core.api.prevSibling
++import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceAfterMe
+ import com.pinterest.ktlint.rule.engine.core.api.upsertWhitespaceBeforeMe
+ import com.pinterest.ktlint.ruleset.standard.StandardRule
+ import org.jetbrains.kotlin.com.intellij.lang.ASTNode
+@@ -117,11 +119,26 @@ public class BinaryExpressionWrappingRule :
+                 // (each) binary expression inside such a literal seems to create more chaos than it resolves.
+                 binaryExpression.parent { it.elementType == LONG_STRING_TEMPLATE_ENTRY } == null
+             }?.takeIf { it.isOnLineExceedingMaxLineLength() }
+-            ?.let { operationReference ->
++            ?.also { operationReference ->
+                 if (node.isCallExpressionFollowedByLambdaArgument() || cannotBeWrappedAtOperationReference(operationReference)) {
+                     // Wrapping after operation reference might not be the best place in case of a call expression or just won't work as
+                     // the left hand side still does not fit on a single line
+                     emit(operationReference.startOffset, "Line is exceeding max line length", false)
++                } else if (operationReference.isElvisOperator()) {
++                    // Wrapping after the elvis operator would result in the elvis operator being on a line by itself. As the
++                    // chain-wrapping rule requires the elvis operator to be on the same line as the right-hand side expression, this
++                    // would result in a conflict between the two rules and an endless loop of formatting.
++                    // Instead, wrap before the elvis operator so that the operator starts the next line together with the right-hand
++                    // side expression.
++                    emit(
++                        operationReference.startOffset,
++                        "Line is exceeding max line length. Break line before operator in binary expression",
++                        true,
++                    )
++                    if (autoCorrect) {
++                        operationReference.upsertWhitespaceBeforeMe(indentConfig.childIndentOf(operationReference))
++                        operationReference.upsertWhitespaceAfterMe(" ")
++                    }
+                 } else {
+                     operationReference
+                         .nextSibling()
+@@ -145,6 +162,10 @@ public class BinaryExpressionWrappingRule :
+             ?.nextCodeSibling()
+             .let { it?.elementType == LAMBDA_ARGUMENT }
+ 
++    private fun ASTNode.isElvisOperator() =
++        elementType == OPERATION_REFERENCE &&
++            firstChildLeafOrSelf().elementType == ELVIS
++
+     private fun cannotBeWrappedAtOperationReference(operationReference: ASTNode) =
+         operationReference
+             .takeUnless { it.nextCodeSibling()?.elementType == BINARY_EXPRESSION }

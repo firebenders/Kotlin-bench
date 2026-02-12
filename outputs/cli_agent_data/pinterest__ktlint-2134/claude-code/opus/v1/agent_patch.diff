@@ -1,0 +1,91 @@
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+index dbed179..027aa3c 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/BinaryExpressionWrappingRule.kt
+@@ -2,6 +2,7 @@ package com.pinterest.ktlint.ruleset.standard.rules
+ 
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.BINARY_EXPRESSION
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.CALL_EXPRESSION
++import com.pinterest.ktlint.rule.engine.core.api.ElementType.ELVIS
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.EQ
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.FUN
+ import com.pinterest.ktlint.rule.engine.core.api.ElementType.LAMBDA_ARGUMENT
+@@ -20,6 +21,7 @@ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.INDENT_STYLE_PROPE
+ import com.pinterest.ktlint.rule.engine.core.api.editorconfig.MAX_LINE_LENGTH_PROPERTY
+ import com.pinterest.ktlint.rule.engine.core.api.firstChildLeafOrSelf
+ import com.pinterest.ktlint.rule.engine.core.api.indent
++import com.pinterest.ktlint.rule.engine.core.api.isWhiteSpaceWithNewline
+ import com.pinterest.ktlint.rule.engine.core.api.leavesOnLine
+ import com.pinterest.ktlint.rule.engine.core.api.nextCodeSibling
+ import com.pinterest.ktlint.rule.engine.core.api.nextSibling
+@@ -109,36 +111,43 @@ public class BinaryExpressionWrappingRule :
+         emit: (offset: Int, errorMessage: String, canBeAutoCorrected: Boolean) -> Unit,
+         autoCorrect: Boolean,
+     ) {
+-        node
+-            .takeIf { it.elementType == OPERATION_REFERENCE }
+-            ?.takeIf { it.treeParent.elementType == BINARY_EXPRESSION }
+-            ?.takeIf { binaryExpression ->
+-                // Ignore binary expression inside raw string literals. Raw string literals are allowed to exceed max-line-length. Wrapping
+-                // (each) binary expression inside such a literal seems to create more chaos than it resolves.
+-                binaryExpression.parent { it.elementType == LONG_STRING_TEMPLATE_ENTRY } == null
+-            }?.takeIf { it.isOnLineExceedingMaxLineLength() }
+-            ?.let { operationReference ->
+-                if (node.isCallExpressionFollowedByLambdaArgument() || cannotBeWrappedAtOperationReference(operationReference)) {
+-                    // Wrapping after operation reference might not be the best place in case of a call expression or just won't work as
+-                    // the left hand side still does not fit on a single line
+-                    emit(operationReference.startOffset, "Line is exceeding max line length", false)
+-                } else {
+-                    operationReference
+-                        .nextSibling()
+-                        ?.let { nextSibling ->
+-                            emit(
+-                                nextSibling.startOffset,
+-                                "Line is exceeding max line length. Break line after operator in binary expression",
+-                                true,
+-                            )
+-                            if (autoCorrect) {
+-                                nextSibling.upsertWhitespaceBeforeMe(operationReference.indent().plus(indentConfig.indent))
+-                            }
+-                        }
++        val operationReference =
++            node
++                .takeIf { it.elementType == OPERATION_REFERENCE }
++                ?.takeIf { it.treeParent.elementType == BINARY_EXPRESSION }
++                ?.takeIf { binaryExpression ->
++                    // Ignore binary expression inside raw string literals. Raw string literals are allowed to exceed max-line-length.
++                    // Wrapping (each) binary expression inside such a literal seems to create more chaos than it resolves.
++                    binaryExpression.parent { it.elementType == LONG_STRING_TEMPLATE_ENTRY } == null
++                }?.takeIf { it.isOnLineExceedingMaxLineLength() }
++                ?: return
++        if (node.isCallExpressionFollowedByLambdaArgument() || cannotBeWrappedAtOperationReference(operationReference)) {
++            // Wrapping after operation reference might not be the best place in case of a call expression or just won't work as
++            // the left hand side still does not fit on a single line
++            emit(operationReference.startOffset, "Line is exceeding max line length", false)
++        } else if (operationReference.isElvisOperator() && operationReference.treePrev.isWhiteSpaceWithNewline()) {
++            // Wrapping after the elvis operator would result in the elvis operator being the last non-whitespace element on the
++            // line which in turn would conflict with the chain-wrapping rule. As the elvis operator is already at the start of
++            // the line, the right-hand side of the binary expression can not be wrapped to a separate line.
++            emit(operationReference.startOffset, "Line is exceeding max line length", false)
++        } else {
++            operationReference
++                .nextSibling()
++                ?.let { nextSibling ->
++                    emit(
++                        nextSibling.startOffset,
++                        "Line is exceeding max line length. Break line after operator in binary expression",
++                        true,
++                    )
++                    if (autoCorrect) {
++                        nextSibling.upsertWhitespaceBeforeMe(operationReference.indent().plus(indentConfig.indent))
++                    }
+                 }
+-            }
++        }
+     }
+ 
++    private fun ASTNode.isElvisOperator() = findChildByType(ELVIS) != null
++
+     private fun ASTNode.isCallExpressionFollowedByLambdaArgument() =
+         parent { it.elementType == VALUE_ARGUMENT_LIST }
+             ?.takeIf { it.treeParent.elementType == CALL_EXPRESSION }

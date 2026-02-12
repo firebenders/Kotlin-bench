@@ -1,0 +1,204 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 413a4af4fd..dea9975cd2 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -2,7 +2,6 @@ plugins {
+     // Gradle plugin portal
+     id 'com.github.triplet.play' version '3.9.0'
+     id 'com.android.application'
+-    id 'app.brant.amazonappstorepublisher'
+     id 'idea'
+     id 'kotlin-android'
+     id 'kotlin-parcelize'
+@@ -228,12 +227,12 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility JavaVersion.VERSION_11
+-        targetCompatibility JavaVersion.VERSION_11
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
+         coreLibraryDesugaringEnabled true
+     }
+     kotlinOptions {
+-        jvmTarget = JavaVersion.VERSION_11
++        jvmTarget = JavaVersion.VERSION_17
+     }
+ 
+     packagingOptions {
+@@ -248,12 +247,6 @@ play {
+     track.set('alpha')
+ }
+ 
+-amazon {
+-    securityProfile = file("${homePath}/src/AnkiDroid-Amazon-Publish-Security-Profile.json")
+-    applicationId = "amzn1.devportal.mobileapp.524a424d314931494c55383833305539"
+-    pathToApks = [ file("./build/outputs/apk/amazon/release/AnkiDroid-amazon-universal-release.apk") ]
+-    replaceEdit = true
+-}
+ 
+ // Install Git pre-commit hook for Ktlint
+ tasks.register('installGitHook', Copy) {
+@@ -365,7 +358,7 @@ dependencies {
+     implementation 'com.github.mrudultora:Colorpicker:1.2.0'
+     implementation "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+     implementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+-    implementation 'com.github.ByteHamster:SearchPreference:2.5.1'
++    implementation 'com.github.ByteHamster:SearchPreference:2.7.2'
+ 
+     // Cannot use debugImplementation since classes need to be imported in AnkiDroidApp
+     // and there's no no-op version for release build. Usage has been disabled for release
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+index 9e6c7805a6..ad01339e54 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+@@ -34,8 +34,6 @@ import net.ankiweb.rsdroid.exceptions.BackendTemplateException
+ import org.intellij.lang.annotations.Language
+ import org.jetbrains.annotations.VisibleForTesting
+ import org.json.JSONObject
+-import org.jsoup.Jsoup
+-import org.jsoup.nodes.Document.OutputSettings
+ import java.io.File
+ import java.net.URI
+ import java.net.URISyntaxException
+@@ -330,53 +328,76 @@ fun parseVideos(text: String, mediaDir: String): String {
+     }
+ }
+ 
++/**
++ * Regex that matches `src` or `data` attributes within `<img>`, `<video>`, `<audio>`,
++ * `<source>` and `<object>` tags. Attribute values can be double-quoted, single-quoted
++ * or unquoted.
++ *
++ * Groups:
++ * 1. `<` character
++ * 2. the tag name (e.g. `img`, `IMG`, `video`)
++ * 3. content between tag name and attribute name (other attributes, whitespace)
++ * 4. the attribute name (`src` or `data`)
++ * 5. the `=` sign (possibly surrounded by whitespace)
++ * 6. the full attribute value token (including quotes if present)
++ * 7. the value if double-quoted
++ * 8. the value if single-quoted
++ * 9. the value if unquoted
++ */
++private val SOURCE_ATTRIBUTE_REGEX = Regex(
++    """(<)(img|video|audio|source|object)(\b[^>]*?\b)(src|data)(\s*=\s*)("([^"]*)"|'([^']*)'|([^\s>]+))""",
++    RegexOption.IGNORE_CASE
++)
++
+ /**
+  * Parses the sources of the `<img>`, `<video>`, `<audio>`, `<object>` and `<source>` tags
+  * to use the `file:///` scheme, which allows seeking audio and videos,
+  * and loads faster than using HTTP.
+  *
+  * Only attribute values that don't have a Uri scheme (http, file, etc) are parsed.
++ *
++ * Uses regex-based replacement instead of Jsoup serialization to preserve
++ * `<script>` tags and other content that Jsoup would strip or modify.
+  */
+ @NotInLibAnki
+ @VisibleForTesting
+ fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
+-    val doc = Jsoup.parse(content)
+-    doc.outputSettings(OutputSettings().prettyPrint(false))
+-
+-    fun replaceWithFileScheme(tag: String, attr: String): Boolean {
+-        var madeChanges = false
+-        for (elem in doc.select(tag)) {
+-            val attrValue = elem.attr(attr)
+-            if (attrValue.isEmpty()) continue
+-
+-            val attrUri = try {
+-                URI(attrValue)
+-            } catch (_: URISyntaxException) {
+-                continue
+-            }
+-            if (attrUri.scheme != null) continue
++    var result = content
++    var madeChanges = false
+ 
+-            val path = Paths.get(mediaDir, attrUri.path).toString()
+-            val newUri = getFileUri(path)
++    // Process matches from end to start to preserve string indices when making replacements
++    val matches = SOURCE_ATTRIBUTE_REGEX.findAll(content).toList().reversed()
+ 
+-            elem.attr(attr, newUri.toString())
+-            madeChanges = true
++    for (match in matches) {
++        // The attribute value is in group 7 (double-quoted), 8 (single-quoted), or 9 (unquoted)
++        val attrValue = match.groupValues[7].ifEmpty { match.groupValues[8].ifEmpty { match.groupValues[9] } }
++        if (attrValue.isEmpty()) continue
++
++        val attrUri = try {
++            URI(attrValue)
++        } catch (_: URISyntaxException) {
++            continue
+         }
+-        return madeChanges
++        if (attrUri.scheme != null) continue
++
++        val path = Paths.get(mediaDir, attrUri.path).toString()
++        val newUri = getFileUri(path)
++
++        // Replace the tag name (lowercased) + attribute name (lowercased) + value
++        // Group 1: `<`
++        // Group 2: tag name -> lowercase
++        // Group 3: content between tag name and attr -> preserved
++        // Group 4: attr name -> lowercase
++        // Group 5: `=` -> replaced with `=`
++        // Group 6: old value -> replaced with new quoted value
++        val replacement = "${match.groupValues[1]}${match.groupValues[2].lowercase()}${match.groupValues[3]}${match.groupValues[4].lowercase()}=\"$newUri\""
++        val replStart = match.groups[1]!!.range.first
++        val replEnd = match.groups[6]!!.range.last + 1
++        result = result.substring(0, replStart) + replacement + result.substring(replEnd)
++        madeChanges = true
+     }
+ 
+-    val hasMadeChanges =
+-        replaceWithFileScheme("img", "src") ||
+-            replaceWithFileScheme("video", "src") ||
+-            replaceWithFileScheme("audio", "src") ||
+-            replaceWithFileScheme("source", "src") ||
+-            replaceWithFileScheme("object", "data")
+-
+-    return if (hasMadeChanges) {
+-        doc.body().html()
+-    } else {
+-        content
+-    }
++    return if (madeChanges) result else content
+ }
+ 
+ /** Similar to [File.toURI], but doesn't use the absolute file to simplify testing */
+diff --git a/gradle.properties b/gradle.properties
+index 13992ecd31..b06b0f2c12 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -9,7 +9,7 @@
+ 
+ # Specifies the JVM arguments used for the daemon process.
+ # The setting is particularly useful for tweaking memory settings.
+-org.gradle.jvmargs=-Xmx3072M -Dfile.encoding=UTF-8
++org.gradle.jvmargs=-Xmx2048M -XX:MaxMetaspaceSize=512M -Dfile.encoding=UTF-8
+ 
+ # AndroidX package structure to make it clearer which packages are bundled with the
+ # Android operating system, and which are packaged with your app's APK
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index df05afef76..4d2ca9684e 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -5,14 +5,6 @@ pluginManagement {
+         mavenCentral()
+         maven(url = "https://jitpack.io") // only needed for the "amazonappstorepublisher" plugin
+     }
+-    resolutionStrategy {
+-        // TODO try to find another plugin for this functionality?
+-        eachPlugin {
+-            if (requested.id.id == "app.brant.amazonappstorepublisher") {
+-                useModule("com.github.BrantApps.gradle-amazon-app-store-publisher:amazonappstorepublisher:master-SNAPSHOT")
+-            }
+-        }
+-    }
+ }
+ 
+ dependencyResolutionManagement {

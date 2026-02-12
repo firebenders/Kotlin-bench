@@ -1,0 +1,97 @@
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+index 9e6c780..54700f7 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/TemplateManager.kt
+@@ -34,8 +34,6 @@ import net.ankiweb.rsdroid.exceptions.BackendTemplateException
+ import org.intellij.lang.annotations.Language
+ import org.jetbrains.annotations.VisibleForTesting
+ import org.json.JSONObject
+-import org.jsoup.Jsoup
+-import org.jsoup.nodes.Document.OutputSettings
+ import java.io.File
+ import java.net.URI
+ import java.net.URISyntaxException
+@@ -340,42 +338,51 @@ fun parseVideos(text: String, mediaDir: String): String {
+ @NotInLibAnki
+ @VisibleForTesting
+ fun parseSourcesToFileScheme(content: String, mediaDir: String): String {
+-    val doc = Jsoup.parse(content)
+-    doc.outputSettings(OutputSettings().prettyPrint(false))
+-
+-    fun replaceWithFileScheme(tag: String, attr: String): Boolean {
+-        var madeChanges = false
+-        for (elem in doc.select(tag)) {
+-            val attrValue = elem.attr(attr)
+-            if (attrValue.isEmpty()) continue
+-
+-            val attrUri = try {
+-                URI(attrValue)
+-            } catch (_: URISyntaxException) {
+-                continue
+-            }
+-            if (attrUri.scheme != null) continue
++    // Regex approach: match tags and replace their src/data attributes directly
++    // This avoids Jsoup HTML re-serialization which corrupts <script> tag contents
++    var result = content
++    result = replaceAttrWithFileScheme(result, "img", "src", mediaDir)
++    result = replaceAttrWithFileScheme(result, "video", "src", mediaDir)
++    result = replaceAttrWithFileScheme(result, "audio", "src", mediaDir)
++    result = replaceAttrWithFileScheme(result, "source", "src", mediaDir)
++    result = replaceAttrWithFileScheme(result, "object", "data", mediaDir)
++    return result
++}
++
++/**
++ * Replaces relative URIs in the [attr] attribute of [tag] elements with file:// URIs
++ * pointing to [mediaDir].
++ */
++private fun replaceAttrWithFileScheme(content: String, tag: String, attr: String, mediaDir: String): String {
++    // Match opening tags (case-insensitive) and capture the attribute value
++    // Handles: attr=value, attr="value", attr='value'
++    val pattern = Regex(
++        """(<$tag\b[^>]*?\s$attr\s*=\s*)(?:"([^"]*?)"|'([^']*?)'|([^\s>]*))""",
++        RegexOption.IGNORE_CASE
++    )
++    return pattern.replace(content) { matchResult ->
++        val prefix = matchResult.groupValues[1]
++        // The value is in one of the three capture groups depending on quoting style
++        val attrValue = when {
++            matchResult.groupValues[2].isNotEmpty() -> matchResult.groupValues[2]
++            matchResult.groupValues[3].isNotEmpty() -> matchResult.groupValues[3]
++            matchResult.groupValues[4].isNotEmpty() -> matchResult.groupValues[4]
++            else -> return@replace matchResult.value
++        }
+ 
+-            val path = Paths.get(mediaDir, attrUri.path).toString()
+-            val newUri = getFileUri(path)
++        if (attrValue.isEmpty()) return@replace matchResult.value
+ 
+-            elem.attr(attr, newUri.toString())
+-            madeChanges = true
++        val attrUri = try {
++            URI(attrValue)
++        } catch (_: URISyntaxException) {
++            return@replace matchResult.value
+         }
+-        return madeChanges
+-    }
++        if (attrUri.scheme != null) return@replace matchResult.value
++
++        val path = Paths.get(mediaDir, attrUri.path).toString()
++        val newUri = getFileUri(path)
+ 
+-    val hasMadeChanges =
+-        replaceWithFileScheme("img", "src") ||
+-            replaceWithFileScheme("video", "src") ||
+-            replaceWithFileScheme("audio", "src") ||
+-            replaceWithFileScheme("source", "src") ||
+-            replaceWithFileScheme("object", "data")
+-
+-    return if (hasMadeChanges) {
+-        doc.body().html()
+-    } else {
+-        content
++        """${prefix}"$newUri""""
+     }
+ }
+ 

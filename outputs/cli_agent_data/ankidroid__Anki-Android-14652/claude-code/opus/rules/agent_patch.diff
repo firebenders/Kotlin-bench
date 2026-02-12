@@ -1,0 +1,172 @@
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+index 85ea4e2..924c149 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AbstractFlashcardViewer.kt
+@@ -538,7 +538,7 @@ abstract class AbstractFlashcardViewer :
+         registerExternalStorageListener()
+         restoreCollectionPreferences(col)
+         initLayout()
+-        mHtmlGenerator = createInstance(this, typeAnswer!!)
++        mHtmlGenerator = createInstance(this, typeAnswer!!, col.config.getBool(anki.config.ConfigKey.Bool.HIDE_AUDIO_PLAY_BUTTONS))
+ 
+         // Initialize text-to-speech. This is an asynchronous operation.
+         mTTS.initialize(this, ReadTextListener())
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt b/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
+index 8b6894a..0724498 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/analytics/UsageAnalytics.kt
+@@ -464,6 +464,7 @@ object UsageAnalytics {
+         "keepScreenOn", // Disable screen timeout
+         "newTimezoneHandling", // New timezone handling
+         "doubleTapTimeInterval", // Double tap time interval (milliseconds)
++        "hideAudioPlayButtons", // Show play buttons on cards with audio
+         // Sync
+         "syncFetchMedia", // Fetch media on sync
+         "automaticSyncMode", // Automatic synchronization
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
+index b512edc..59a651f 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/cardviewer/HtmlGenerator.kt
+@@ -33,7 +33,8 @@ class HtmlGenerator(
+     private val typeAnswer: TypeAnswer,
+     val cardAppearance: CardAppearance,
+     val cardTemplate: CardTemplate,
+-    val resources: Resources
++    val resources: Resources,
++    private val hidePlayButtons: Boolean = false
+ ) {
+ 
+     @CheckResult
+@@ -49,13 +50,14 @@ class HtmlGenerator(
+     }
+ 
+     fun expandSounds(content: String): String {
+-        return Sound.expandSounds(content)
++        return Sound.expandSounds(content, hidePlayButtons)
+     }
+ 
+     companion object {
+         fun createInstance(
+             context: Context,
+-            typeAnswer: TypeAnswer
++            typeAnswer: TypeAnswer,
++            hidePlayButtons: Boolean = false
+         ): HtmlGenerator {
+             val preferences = context.sharedPrefs()
+             val cardAppearance = CardAppearance.create(ReviewerCustomFonts(), preferences)
+@@ -65,7 +67,8 @@ class HtmlGenerator(
+                 typeAnswer,
+                 cardAppearance,
+                 cardHtmlTemplate,
+-                context.resources
++                context.resources,
++                hidePlayButtons
+             )
+         }
+ 
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ReviewingSettingsFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ReviewingSettingsFragment.kt
+index 3020d9d..3c8dc40 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ReviewingSettingsFragment.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/preferences/ReviewingSettingsFragment.kt
+@@ -15,6 +15,7 @@
+  */
+ package com.ichi2.anki.preferences
+ 
++import anki.config.ConfigKey
+ import androidx.preference.ListPreference
+ import androidx.preference.SwitchPreferenceCompat
+ import com.ichi2.anki.CollectionManager.withCol
+@@ -77,6 +78,16 @@ class ReviewingSettingsFragment : SettingsFragment() {
+                 launchCatchingTask { withCol { config.set(AutomaticAnswerAction.CONFIG_KEY, (newValue as String).toInt()) } }
+             }
+         }
++        // Show play buttons on cards with audio
++        // The config key is HIDE_AUDIO_PLAY_BUTTONS, so we invert the value for the UI toggle
++        requirePreference<SwitchPreferenceCompat>(R.string.hide_audio_play_buttons_preference).apply {
++            launchCatchingTask {
++                isChecked = withCol { !config.getBool(ConfigKey.Bool.HIDE_AUDIO_PLAY_BUTTONS) }
++            }
++            setOnPreferenceChangeListener { newValue ->
++                launchCatchingTask { withCol { config.setBool(ConfigKey.Bool.HIDE_AUDIO_PLAY_BUTTONS, !(newValue as Boolean)) } }
++            }
++        }
+         // New timezone handling
+         requirePreference<SwitchPreferenceCompat>(R.string.new_timezone_handling_preference).apply {
+             launchCatchingTask {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt
+index cdcbdcc..ac054d3 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/Sound.kt
+@@ -222,10 +222,15 @@ class Sound(private val soundPlayer: SoundPlayer, private val soundDir: String)
+          * file
+          *
+          * @param content -- card content to be rendered that may contain embedded audio
++         * @param hidePlayButtons -- if true, strip audio references instead of showing play buttons
+          * @return -- the same content but in a format that will render working play buttons when audio was embedded
+          */
+-        fun expandSounds(content: String): String {
+-            return addPlayIcons(content)
++        fun expandSounds(content: String, hidePlayButtons: Boolean = false): String {
++            return if (hidePlayButtons) {
++                stripAvRefs(content)
++            } else {
++                addPlayIcons(content)
++            }
+         }
+ 
+         /**
+diff --git a/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt b/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt
+index fc1b62e..252b6a0 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/libanki/SoundKt.kt
+@@ -58,7 +58,7 @@ open class AvTag
+ val AV_REF_RE = Regex("\\[anki:(play:(.):(\\d+))]")
+ val AV_PLAYLINK_RE = Regex("playsound:(.):(\\d+)")
+ 
+-fun stripAvRefs(text: String) = AV_REF_RE.replace("", text)
++fun stripAvRefs(text: String) = AV_REF_RE.replace(text, "")
+ 
+ fun addPlayIcons(content: String): String {
+     return AV_REF_RE.replace(content) { match ->
+diff --git a/AnkiDroid/src/main/res/values/10-preferences.xml b/AnkiDroid/src/main/res/values/10-preferences.xml
+index 548e3bb..4d965a1 100644
+--- a/AnkiDroid/src/main/res/values/10-preferences.xml
++++ b/AnkiDroid/src/main/res/values/10-preferences.xml
+@@ -163,6 +163,8 @@
+     <string name="day_offset_summary">%s hours past midnight</string>
+     <string name="pref_keep_screen_on" maxLength="41">Keep screen on</string>
+     <string name="pref_keep_screen_on_summ">Disable screen timeout</string>
++    <string name="hide_audio_play_buttons" maxLength="41">Show play buttons on cards with audio</string>
++    <string name="hide_audio_play_buttons_summ">Show replay buttons next to audio on cards</string>
+     <string name="enable_api_title" maxLength="41">Enable AnkiDroid API</string>
+     <string name="enable_api_summary">Let other apps connect to AnkiDroid and read / write data without your intervention</string>
+     <string name="custom_buttons" maxLength="41">App bar buttons</string>
+diff --git a/AnkiDroid/src/main/res/values/preferences.xml b/AnkiDroid/src/main/res/values/preferences.xml
+index f1caa14..72e3beb 100644
+--- a/AnkiDroid/src/main/res/values/preferences.xml
++++ b/AnkiDroid/src/main/res/values/preferences.xml
+@@ -19,6 +19,7 @@
+     <string name="keep_screen_on_preference">keepScreenOn</string>
+     <string name="new_timezone_handling_preference">newTimezoneHandling</string>
+     <string name="double_tap_time_interval_preference">doubleTapTimeInterval</string>
++    <string name="hide_audio_play_buttons_preference">hideAudioPlayButtons</string>
+     <!-- Sync -->
+     <string name="pref_sync_screen_key">syncScreen</string>
+     <string name="sync_account_key">syncAccount</string>
+diff --git a/AnkiDroid/src/main/res/xml/preferences_reviewing.xml b/AnkiDroid/src/main/res/xml/preferences_reviewing.xml
+index 3259234..4ed95fc 100644
+--- a/AnkiDroid/src/main/res/xml/preferences_reviewing.xml
++++ b/AnkiDroid/src/main/res/xml/preferences_reviewing.xml
+@@ -82,6 +82,12 @@
+             app1:displayFormat="@string/pref_summary_seconds"/>
+     </PreferenceCategory>
+     <PreferenceCategory android:title="@string/pref_cat_advanced">
++        <SwitchPreferenceCompat
++            android:defaultValue="true"
++            android:key="@string/hide_audio_play_buttons_preference"
++            android:summary="@string/hide_audio_play_buttons_summ"
++            android:title="@string/hide_audio_play_buttons"
++            app1:persistent="false" />
+         <SwitchPreferenceCompat
+             android:defaultValue="false"
+             android:key="@string/keep_screen_on_preference"

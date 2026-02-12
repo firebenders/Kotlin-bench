@@ -1,0 +1,121 @@
+diff --git a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+index eec63c7..e1b2e99 100644
+--- a/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
++++ b/ktlint-rule-engine/src/main/kotlin/com/pinterest/ktlint/rule/engine/api/KtLintRuleEngine.kt
+@@ -135,41 +135,51 @@ public class KtLintRuleEngine(
+         val hasUTF8BOM = code.content.startsWith(UTF8_BOM)
+         val ruleExecutionContext = createRuleExecutionContext(this, code)
+ 
+-        var tripped = false
++        var tripped: Boolean
+         var mutated = false
+         val errors = mutableSetOf<Pair<LintError, Boolean>>()
+         val visitorProvider = VisitorProvider(ruleExecutionContext.ruleProviders)
+-        visitorProvider
+-            .visitor()
+-            .invoke { rule ->
+-                ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
+-                    tripped = true
+-                    if (canBeAutoCorrected) {
+-                        mutated = true
+-                        /**
+-                         * Rebuild the suppression locator after each change in the AST as the offsets of the
+-                         * suppression hints might have changed.
+-                         */
+-                        ruleExecutionContext.rebuildSuppressionLocator()
+-                    }
+-                    val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
+-                    errors.add(
+-                        Pair(
+-                            LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
+-                            // It is assumed that a rule that emits that an error can be autocorrected, also
+-                            // does correct the error.
+-                            canBeAutoCorrected,
+-                        ),
+-                    )
+-                    // In trace mode report the violation immediately. The order in which violations are actually found might be different
+-                    // from the order in which they are reported. For debugging purposes it cn be helpful to know the exact order in which
+-                    // violations are being solved.
+-                    LOGGER.trace {
+-                        "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
+-                            canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
++
++        var formatRunCount = 0
++        var autoCorrectIteration: Boolean
++        do {
++            autoCorrectIteration = false
++            tripped = false
++            formatRunCount++
++            LOGGER.debug { "Format run $formatRunCount of file '${code.fileNameOrStdin()}'" }
++            visitorProvider
++                .visitor()
++                .invoke { rule ->
++                    ruleExecutionContext.executeRule(rule, true) { offset, errorMessage, canBeAutoCorrected ->
++                        tripped = true
++                        if (canBeAutoCorrected) {
++                            mutated = true
++                            autoCorrectIteration = true
++                            /**
++                             * Rebuild the suppression locator after each change in the AST as the offsets of the
++                             * suppression hints might have changed.
++                             */
++                            ruleExecutionContext.rebuildSuppressionLocator()
++                        }
++                        val (line, col) = ruleExecutionContext.positionInTextLocator(offset)
++                        errors.add(
++                            Pair(
++                                LintError(line, col, rule.ruleId, errorMessage, canBeAutoCorrected),
++                                // It is assumed that a rule that emits that an error can be autocorrected, also
++                                // does correct the error.
++                                canBeAutoCorrected,
++                            ),
++                        )
++                        // In trace mode report the violation immediately. The order in which violations are actually
++                        // found might be different from the order in which they are reported. For debugging purposes
++                        // it can be helpful to know the exact order in which violations are being solved.
++                        LOGGER.trace {
++                            "Format violation: ${code.fileNameOrStdin()}:$line:$col: $errorMessage (${rule.ruleId})" +
++                                canBeAutoCorrected.ifFalse { " [cannot be autocorrected]" }
++                        }
+                     }
+                 }
+-            }
++        } while (autoCorrectIteration && formatRunCount < MAX_FORMAT_RUNS_PER_FILE)
+         if (tripped) {
+             visitorProvider
+                 .visitor()
+@@ -284,6 +294,12 @@ public class KtLintRuleEngine(
+     public companion object {
+         internal const val UTF8_BOM = "\uFEFF"
+ 
++        /**
++         * The maximum number of times that the format is repeated in case autocorrectable violations are found in the
++         * previous format run. This is to prevent that a set of rules cause an infinite rerun of the format.
++         */
++        internal const val MAX_FORMAT_RUNS_PER_FILE = 3
++
+         public const val STDIN_FILE: String = "<stdin>"
+     }
+ }
+diff --git a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/StringTemplateIndentRule.kt b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/StringTemplateIndentRule.kt
+index 78ba388..82c72de 100644
+--- a/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/StringTemplateIndentRule.kt
++++ b/ktlint-ruleset-standard/src/main/kotlin/com/pinterest/ktlint/ruleset/standard/rules/StringTemplateIndentRule.kt
+@@ -242,7 +242,7 @@ public class StringTemplateIndentRule :
+         autoCorrect: Boolean,
+     ) {
+         val firstNodeAfterOpeningQuotes = node.firstChildNode.nextLeaf() ?: return
+-        if (firstNodeAfterOpeningQuotes.text.isNotBlank()) {
++        if (firstNodeAfterOpeningQuotes.text.isNotBlank() && !firstNodeAfterOpeningQuotes.text.startsWith("\n")) {
+             emit(
+                 firstNodeAfterOpeningQuotes.startOffset + firstNodeAfterOpeningQuotes.text.length,
+                 "Missing newline after the opening quotes of the raw string literal",
+@@ -309,7 +309,7 @@ public class StringTemplateIndentRule :
+         autoCorrect: Boolean,
+     ) {
+         val lastNodeBeforeClosingQuotes = node.lastChildNode.prevLeaf() ?: return
+-        if (lastNodeBeforeClosingQuotes.text.isNotBlank()) {
++        if (lastNodeBeforeClosingQuotes.text.isNotBlank() && !lastNodeBeforeClosingQuotes.text.endsWith("\n" + indent)) {
+             emit(
+                 lastNodeBeforeClosingQuotes.startOffset + lastNodeBeforeClosingQuotes.text.length,
+                 "Missing newline before the closing quotes of the raw string literal",

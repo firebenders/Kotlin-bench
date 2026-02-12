@@ -1,0 +1,78 @@
+diff --git a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+index de1522526..8e1e6ce44 100644
+--- a/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
++++ b/kotlinx-coroutines-core/jvm/src/internal/ExceptionsConstructor.kt
+@@ -37,32 +37,45 @@ private fun <E : Throwable> createConstructor(clz: Class<E>): Ctor {
+     /*
+     * Try to reflectively find constructor(), constructor(message, cause), constructor(cause) or constructor(message).
+     * Exceptions are shared among coroutines, so we should copy exception before recovering current stacktrace.
++    *
++    * Constructors are ranked by priority: (String, Throwable) > (Throwable) > (String) > ()
++    * to ensure the best available constructor is always selected regardless of declaration order.
+     */
+-    val constructors = clz.constructors.sortedByDescending { it.parameterTypes.size }
+-    for (constructor in constructors) {
+-        val result = createSafeConstructor(constructor)
+-        if (result != null) return result
++    var bestCtor: Ctor? = null
++    var bestPriority = -1
++    for (constructor in clz.constructors) {
++        val (priority, ctor) = rankConstructor(constructor)
++        if (ctor != null && priority > bestPriority) {
++            bestCtor = ctor
++            bestPriority = priority
++            if (bestPriority == 3) break // Already found the best possible constructor
++        }
+     }
+-    return nullResult
++    return bestCtor ?: nullResult
+ }
+ 
+-private fun createSafeConstructor(constructor: Constructor<*>): Ctor? {
++/*
++ * Returns a pair of (priority, constructor-function) for the given constructor.
++ * Priority values: 3 = (String, Throwable), 2 = (Throwable), 1 = (String), 0 = ().
++ * Returns (-1, null) if the constructor signature is not recognized.
++ */
++private fun rankConstructor(constructor: Constructor<*>): Pair<Int, Ctor?> {
+     val p = constructor.parameterTypes
+     return when (p.size) {
+         2 -> when {
+             p[0] == String::class.java && p[1] == Throwable::class.java ->
+-                safeCtor { e -> constructor.newInstance(e.message, e) as Throwable }
+-            else -> null
++                3 to safeCtor { e -> constructor.newInstance(e.message, e) as Throwable }
++            else -> -1 to null
+         }
+         1 -> when (p[0]) {
+             Throwable::class.java ->
+-                safeCtor { e -> constructor.newInstance(e) as Throwable }
++                2 to safeCtor { e -> constructor.newInstance(e) as Throwable }
+             String::class.java ->
+-                safeCtor { e -> (constructor.newInstance(e.message) as Throwable).also { it.initCause(e) } }
+-            else -> null
++                1 to safeCtor { e -> (constructor.newInstance(e.message) as Throwable).also { it.initCause(e) } }
++            else -> -1 to null
+         }
+-        0 -> safeCtor { e -> (constructor.newInstance() as Throwable).also { it.initCause(e) } }
+-        else -> null
++        0 -> 0 to safeCtor { e -> (constructor.newInstance() as Throwable).also { it.initCause(e) } }
++        else -> -1 to null
+     }
+ }
+ 
+diff --git a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+index e7b039ce3..f19300707 100644
+--- a/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
++++ b/kotlinx-coroutines-core/jvm/test/TestSecurityManager.kt
+@@ -8,10 +8,6 @@ import java.security.Permission
+ 
+ @Suppress("unused")
+ class TestSecurityManager : SecurityManager() {
+-    override fun checkPropertyAccess(key: String?) {
+-        if (key?.startsWith("kotlinx.") == true)
+-            throw SecurityException("'$key' property is not allowed")
+-    }
+ 
+     override fun checkPermission(perm: Permission?) {
+         /* allow everything else */

@@ -1,0 +1,50 @@
+diff --git a/kotlinx-coroutines-core/common/src/EventLoop.common.kt b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+index 6bfcbf0..300776b 100644
+--- a/kotlinx-coroutines-core/common/src/EventLoop.common.kt
++++ b/kotlinx-coroutines-core/common/src/EventLoop.common.kt
+@@ -256,6 +256,20 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+         // unconfined events take priority
+         if (processUnconfinedEvent()) return 0
+         // queue all delayed tasks that are due to be executed
++        promoteDelayedTasks()
++        // then process one event from queue
++        val task = dequeue()
++        if (task != null) {
++            platformAutoreleasePool { task.run() }
++            return 0
++        }
++        return nextTime
++    }
++
++    /**
++     * Moves delayed tasks that are due to be executed from the delayed queue to the regular queue.
++     */
++    private fun promoteDelayedTasks() {
+         val delayed = _delayed.value
+         if (delayed != null && !delayed.isEmpty) {
+             val now = nanoTime()
+@@ -271,17 +285,17 @@ internal abstract class EventLoopImplBase: EventLoopImplPlatform(), Delay {
+                 } ?: break // quit loop when nothing more to remove or enqueueImpl returns false on "isComplete"
+             }
+         }
+-        // then process one event from queue
+-        val task = dequeue()
+-        if (task != null) {
+-            platformAutoreleasePool { task.run() }
+-            return 0
+-        }
+-        return nextTime
+     }
+ 
+     final override fun dispatch(context: CoroutineContext, block: Runnable) = enqueue(block)
+ 
++    override fun dispatchYield(context: CoroutineContext, block: Runnable) {
++        // Promote delayed tasks before enqueueing the yield continuation,
++        // so that already-due delayed tasks get dispatched ahead of the yielding coroutine.
++        promoteDelayedTasks()
++        enqueue(block)
++    }
++
+     open fun enqueue(task: Runnable) {
+         if (enqueueImpl(task)) {
+             // todo: we should unpark only when this delayed task became first in the queue

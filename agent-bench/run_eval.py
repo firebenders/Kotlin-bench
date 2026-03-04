@@ -633,7 +633,7 @@ class EvalSettings:
         return f"ij{int(self.intellij_guidance)}_oracle{int(self.oracle_files)}"
 
 
-def generate_eval_prompt(task: "TaskInstance", settings: "EvalSettings" = None) -> str:
+def generate_eval_prompt(task: "TaskInstance", settings: "EvalSettings" = None, model: str = None) -> str:
     """
     Generate the prompt for an evaluation task.
     
@@ -644,6 +644,7 @@ def generate_eval_prompt(task: "TaskInstance", settings: "EvalSettings" = None) 
     Args:
         task: The task instance containing problem details
         settings: Eval settings (affects oracle file hints)
+        model: The model name (used for model-specific instructions)
         
     Returns:
         Formatted prompt string for the agent
@@ -700,6 +701,17 @@ def generate_eval_prompt(task: "TaskInstance", settings: "EvalSettings" = None) 
     lines.append("**If you write tests to verify your changes, create them in NEW test files only** - do NOT modify existing test files")
     lines.append("")
     
+    # Model-specific instructions for small context window models
+    is_small_context_model = model and ("spark" in model)
+    if is_small_context_model:
+        lines.append("## CONTEXT WINDOW CONSTRAINTS")
+        lines.append("")
+        lines.append("You have a LIMITED context window. To avoid running out of context and getting stuck in summarization loops, follow these rules strictly:")
+        lines.append("- **ALWAYS read entire files** using the read tool WITHOUT offset/limit parameters. NEVER read partial sections of files - this wastes context on repeated reads of the same file.")
+        lines.append("- **Be surgical**: identify the relevant files quickly, read them once in full, make your edits, and finish. Do NOT exploratory-read many files.")
+        lines.append("- **Minimize grep usage**: prefer targeted greps with specific patterns rather than broad searches. Use grep results to identify file paths, then read those files once.")
+        lines.append("")
+
     # Critical restrictions
     lines.append("## CRITICAL RESTRICTIONS")
     lines.append("")
@@ -2140,7 +2152,7 @@ def _run_eval_task_impl(
         
         # Send agent request
         log("  Sending agent request...")
-        eval_prompt = generate_eval_prompt(task, settings)
+        eval_prompt = generate_eval_prompt(task, settings, model=model)
         log(f"    Prompt preview: {eval_prompt[:300]}...")
 
         query_start = time.time()
@@ -3292,7 +3304,7 @@ def main(
         test_str = "PASS" if r.get("test_passed") else ("FAIL" if r.get("test_passed") is False else "-")
         if r.get("test_cached"):
             test_str += " (cached)"
-        duration = r.get("total_duration_seconds", 0)
+        duration = r.get("total_duration_seconds") or 0
         print(f"{model_name:<25} {task_id:<40} {patch_str:<10} {test_str:<12} {duration:<10.1f}")
     
     # Save immediate results (for quick reference)
